@@ -1,0 +1,41 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CreativeBlueprint",
+  "type": "object",
+  "required": ["ad_id", "source_page", "captured_at", "format", "hook", "awareness_stage", "claims", "visual", "cta"],
+  "properties": {
+    "ad_id": { "type": "string" },
+    "source_page": { "type": "string" },
+    "captured_at": { "type": "string" },
+    "format": { "type": "string" },
+    "hook": {
+      "type": "object",
+      "required": ["type", "headline_structure"],
+      "properties": {
+        "type": { "type": "string" },
+        "headline_structure": { "type": "string" }
+      }
+    },
+    "angle": { "type": "string" },
+    "awareness_stage": {
+      "type": "string",
+      "enum": ["unaware", "problem", "solution", "product", "most_aware"]
+    },
+    "claims": {
+      "type": "array",
+      "items": { "type": "string", "enum": ["efficacy", "sensory", "ingredient", "social_proof", "offer"] }
+    },
+    "visual": {
+      "type": "object",
+      "required": ["layout", "subject", "palette_mood", "text_placement"],
+      "properties": {
+        "layout": { "type": "string" },
+        "subject": { "type": "string" },
+        "palette_mood": { "type": "string" },
+        "text_placement": { "type": "string" }
+      }
+    },
+    "cta": { "type": "string" },
+    "destination_url": { "type": "string" }
+  }
+}
