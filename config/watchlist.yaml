@@ -1,0 +1,11 @@
+# Competitor Meta Ad Library pages to monitor.
+# Real watchlist provided by Besque at kickoff.
+competitors:
+  - name: "Competitor A"
+    page_id: "PLACEHOLDER_PAGE_ID_1"
+  - name: "Competitor B"
+    page_id: "PLACEHOLDER_PAGE_ID_2"
+
+settings:
+  ads_type: "static"        # static image ads only, per brief
+  schedule_cadence: "daily"

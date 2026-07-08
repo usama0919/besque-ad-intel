@@ -48,3 +48,15 @@ def test_bad_enum_value_fails():
     bp = _valid_blueprint()
     bp["awareness_stage"] = "not_a_real_stage"
     assert validator.is_valid(bp) is False
+def test_config_loads_competitors():
+    from src import config_loader
+    competitors = config_loader.get_competitors()
+    assert isinstance(competitors, list)
+    assert len(competitors) >= 1
+    assert "name" in competitors[0]
+
+
+def test_config_settings_present():
+    from src import config_loader
+    settings = config_loader.get_settings()
+    assert settings.get("ads_type") == "static"
