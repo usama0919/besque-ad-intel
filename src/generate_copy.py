@@ -1,4 +1,4 @@
-﻿import os
+import os
 import json
 
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
@@ -67,7 +67,7 @@ def generate_copy_live(blueprint, brand_voice="", approved_claims=""):
     Makes ONE API call. Raises if the response is missing required fields."""
     prompt = build_copy_prompt(blueprint, brand_voice, approved_claims)
 
-    client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from env
+    client = anthropic.Anthropic(timeout=60.0, max_retries=1)  # reads ANTHROPIC_API_KEY from env
     message = client.messages.create(
         model=CLAUDE_MODEL,
         max_tokens=1024,

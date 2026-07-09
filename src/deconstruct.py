@@ -62,7 +62,7 @@ import anthropic
 def _load_image_b64_v2(image_path):
     with open(image_path, "rb") as f:
         data = f.read()
-    media_type = ("image/png" if data[:8] == b"\x89PNG\r\n\x1a\n" else "image/jpeg")
+    media_type = ("image/png" if data[:8]==b"\x89PNG\r\n\x1a\n" else "image/webp" if data[:4]==b"RIFF" and data[8:12]==b"WEBP" else "image/gif" if data[:4]==b"GIF8" else "image/jpeg")
     return base64.standard_b64encode(data).decode("utf-8"), media_type
 
 
@@ -72,7 +72,7 @@ def deconstruct_image(image_path, ad_id, source_page, captured_at, destination_u
     b64, media_type = _load_image_b64_v2(image_path)
     prompt = build_prompt(ad_id, source_page, captured_at, destination_url)
 
-    client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from env
+    client = anthropic.Anthropic(timeout=60.0, max_retries=1)  # reads ANTHROPIC_API_KEY from env
     message = client.messages.create(
         model=CLAUDE_MODEL,
         max_tokens=1024,
