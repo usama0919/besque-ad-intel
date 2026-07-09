@@ -56,3 +56,22 @@ def copy_from_response(raw_text):
     copy = parse_copy(raw_text)
     validate_copy(copy)
     return copy
+
+
+# ---- Live Claude copy call (wired at kickoff) ----
+import anthropic
+
+
+def generate_copy_live(blueprint, brand_voice="", approved_claims=""):
+    """Send a blueprint to Claude and return validated Besque-adapted copy.
+    Makes ONE API call. Raises if the response is missing required fields."""
+    prompt = build_copy_prompt(blueprint, brand_voice, approved_claims)
+
+    client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from env
+    message = client.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=1024,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    raw_text = message.content[0].text
+    return copy_from_response(raw_text)
