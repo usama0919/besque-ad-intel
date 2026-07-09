@@ -41,3 +41,40 @@ def mark_seen(ad_id: str, page_name: str = "") -> None:
             (ad_id, page_name),
         )
         conn.commit()
+
+# ---- Review decision capture (approve/reject persistence) ----
+
+def init_decisions():
+    """Create the review_decisions table if it doesn't exist."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS review_decisions (
+                id          SERIAL PRIMARY KEY,
+                ad_id       TEXT NOT NULL,
+                decision    TEXT NOT NULL,
+                decided_at  TIMESTAMPTZ DEFAULT now()
+            )
+        """)
+        conn.commit()
+
+
+def record_decision(ad_id: str, decision: str) -> None:
+    """Record an approve/reject decision for an ad, with a timestamp."""
+    if decision not in ("approve", "reject"):
+        raise ValueError("decision must be 'approve' or 'reject'")
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO review_decisions (ad_id, decision) VALUES (%s, %s)",
+            (ad_id, decision),
+        )
+        conn.commit()
+
+
+def get_decisions(ad_id: str = None):
+    """Return decisions, optionally filtered by ad_id. List of (ad_id, decision, decided_at)."""
+    with get_conn() as conn, conn.cursor() as cur:
+        if ad_id:
+            cur.execute("SELECT ad_id, decision, decided_at FROM review_decisions WHERE ad_id = %s ORDER BY decided_at", (ad_id,))
+        else:
+            cur.execute("SELECT ad_id, decision, decided_at FROM review_decisions ORDER BY decided_at")
+        return cur.fetchall()

@@ -60,3 +60,20 @@ def test_config_settings_present():
     from src import config_loader
     settings = config_loader.get_settings()
     assert settings.get("ads_type") == "static"
+def test_record_and_get_decision():
+    from src import dedupe
+    import uuid
+    dedupe.init_decisions()
+    ad_id = f"DEC_{uuid.uuid4().hex[:8]}"
+    dedupe.record_decision(ad_id, "approve")
+    rows = dedupe.get_decisions(ad_id)
+    assert len(rows) == 1
+    assert rows[0][1] == "approve"
+
+
+def test_invalid_decision_raises():
+    from src import dedupe
+    import pytest
+    dedupe.init_decisions()
+    with pytest.raises(ValueError):
+        dedupe.record_decision("AD1", "maybe")
