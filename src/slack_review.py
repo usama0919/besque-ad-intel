@@ -33,3 +33,28 @@ def build_review_message(ad: dict, blueprint: dict, copy: dict, image_ref: str =
     ]})
 
     return {"blocks": blocks}
+
+# ---- Live Slack posting (wired at kickoff) ----
+import os
+from slack_sdk import WebClient
+from slack_sdk.errors import SlackApiError
+
+
+def post_review(ad, blueprint, copy, image_ref="", channel=None):
+    """Post one review package to Slack. Returns the API response.
+    Reads SLACK_BOT_TOKEN and SLACK_CHANNEL from env."""
+    token = os.getenv("SLACK_BOT_TOKEN")
+    channel = channel or os.getenv("SLACK_CHANNEL")
+    if not token or not channel:
+        raise ValueError("SLACK_BOT_TOKEN and SLACK_CHANNEL must be set")
+
+    message = build_review_message(ad, blueprint, copy, image_ref)
+    client = WebClient(token=token)
+    try:
+        return client.chat_postMessage(
+            channel=channel,
+            blocks=message["blocks"],
+            text="New competitor ad to review",  # fallback text
+        )
+    except SlackApiError as e:
+        raise RuntimeError(f"Slack post failed: {e.response['error']}")
