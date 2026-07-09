@@ -6,3 +6,4 @@ __pycache__/
 *.json.cred
 samples/
 .pytest_cache/
+assets/

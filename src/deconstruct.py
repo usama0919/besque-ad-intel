@@ -59,17 +59,17 @@ import mimetypes
 import anthropic
 
 
-def _load_image_b64(image_path):
+def _load_image_b64_v2(image_path):
     with open(image_path, "rb") as f:
         data = f.read()
-    media_type = mimetypes.guess_type(image_path)[0] or "image/jpeg"
+    media_type = ("image/png" if data[:8] == b"\x89PNG\r\n\x1a\n" else "image/jpeg")
     return base64.standard_b64encode(data).decode("utf-8"), media_type
 
 
 def deconstruct_image(image_path, ad_id, source_page, captured_at, destination_url=""):
     """Send one ad image to Claude vision and return a validated blueprint dict.
     Makes ONE API call. Raises if the response fails schema validation."""
-    b64, media_type = _load_image_b64(image_path)
+    b64, media_type = _load_image_b64_v2(image_path)
     prompt = build_prompt(ad_id, source_page, captured_at, destination_url)
 
     client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from env
