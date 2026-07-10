@@ -28,8 +28,8 @@ def build_review_message(ad: dict, blueprint: dict, copy: dict, image_ref: str =
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*Original ad:* <{original_link}|view>"}})
 
     blocks.append({"type": "actions", "elements": [
-        {"type": "button", "text": {"type": "plain_text", "text": "Approve"}, "style": "primary", "value": ad.get("ad_id", "")},
-        {"type": "button", "text": {"type": "plain_text", "text": "Reject"}, "style": "danger", "value": ad.get("ad_id", "")},
+        {"type": "button", "text": {"type": "plain_text", "text": "Approve"}, "style": "primary", "action_id": "approve", "value": ad.get("ad_id", "")},
+        {"type": "button", "text": {"type": "plain_text", "text": "Reject"}, "style": "danger", "action_id": "reject", "value": ad.get("ad_id", "")},
     ]})
 
     return {"blocks": blocks}
