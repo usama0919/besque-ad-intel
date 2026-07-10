@@ -1,10 +1,10 @@
-﻿"""End-to-end pipeline: scrape -> dedupe -> image -> blueprint -> copy -> Slack.
+"""End-to-end pipeline: scrape -> dedupe -> image -> blueprint -> copy -> Slack.
 
 One scheduled run across the watchlist. Each ad is failure-isolated: one bad
 ad or failed stage is skipped cleanly without stopping the run.
 """
 import logging
-from src import dedupe, config_loader, scrape, assets, deconstruct, generate_copy, slack_review
+from src import dedupe, config_loader, scrape, assets, deconstruct, generate_copy, generate_image_prompt, slack_review
 from src.retry import with_retry
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -30,7 +30,8 @@ def process_ad(ad):
             destination_url=ad.get("destination_url", ""),
         )
         copy = generate_copy.generate_copy_live(blueprint)
-        slack_review.post_review(ad, blueprint, copy, image_ref=image_path)
+        draft_image = generate_image_prompt.generate_image(blueprint, ad_id)
+        slack_review.post_review(ad, blueprint, copy, image_ref=draft_image or image_path)
 
         dedupe.mark_seen(ad_id, ad.get("page_name", ""))
         log.info("Ad %s processed and posted to Slack", ad_id)
