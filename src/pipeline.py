@@ -4,7 +4,7 @@ One scheduled run across the watchlist. Each ad is failure-isolated: one bad
 ad or failed stage is skipped cleanly without stopping the run.
 """
 import logging
-from src import dedupe, config_loader, scrape, assets, deconstruct, generate_copy, generate_image_prompt, slack_review
+from src import dedupe, config_loader, scrape, assets, deconstruct, generate_copy, generate_image_prompt, slack_review, compliance
 from src.retry import with_retry
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -30,6 +30,10 @@ def process_ad(ad):
             destination_url=ad.get("destination_url", ""),
         )
         copy = generate_copy.generate_copy_live(blueprint)
+        ok, issues = compliance.check_compliance(copy, ad.get("page_name", ""), ad.get("text", ""))
+        if not ok:
+            log.warning("Ad %s failed compliance check: %s", ad_id, issues)
+            return "failed"
         draft_image = generate_image_prompt.generate_image(blueprint, ad_id)
         slack_review.post_review(ad, blueprint, copy, image_ref=draft_image or image_path)
 
