@@ -33,6 +33,21 @@ def process_ad(ad):
         draft_image = generate_image_prompt.generate_image(blueprint, ad_id)
         slack_review.post_review(ad, blueprint, copy, image_ref=draft_image or image_path)
 
+        dedupe.save_artifact(
+            ad_id=ad_id,
+            page_name=ad.get("page_name", ""),
+            image_path=image_path,
+            blueprint=blueprint,
+            generated_copy=copy,
+            draft_image=draft_image,
+            metadata={
+                "start_date": ad.get("start_date", ""),
+                "cta": ad.get("cta", ""),
+                "destination_url": ad.get("destination_url", ""),
+                "media_type": ad.get("media_type", ""),
+            },
+        )
+
         dedupe.mark_seen(ad_id, ad.get("page_name", ""))
         log.info("Ad %s processed and posted to Slack", ad_id)
         return "processed"
@@ -45,6 +60,7 @@ def run_once(max_per_competitor=5):
     """One scheduled run across the watchlist."""
     dedupe.init_db()
     dedupe.init_decisions()
+    dedupe.init_artifacts()
     competitors = config_loader.get_competitors()
     summary = {"processed": 0, "skipped": 0, "failed": 0}
 

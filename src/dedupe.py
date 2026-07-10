@@ -78,3 +78,48 @@ def get_decisions(ad_id: str = None):
         else:
             cur.execute("SELECT ad_id, decision, decided_at FROM review_decisions ORDER BY decided_at")
         return cur.fetchall()
+
+
+# ---- Artifact persistence (blueprint + generated output, timestamped) ----
+import json as _json
+
+
+def init_artifacts():
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS artifacts (
+                id            SERIAL PRIMARY KEY,
+                ad_id         TEXT NOT NULL,
+                page_name     TEXT,
+                image_path    TEXT,
+                blueprint     JSONB,
+                generated_copy JSONB,
+                draft_image   TEXT,
+                metadata      JSONB,
+                created_at    TIMESTAMPTZ DEFAULT now()
+            )
+        """)
+        conn.commit()
+
+
+def save_artifact(ad_id, page_name, image_path, blueprint, generated_copy, draft_image, metadata):
+    """Persist all artifacts for one ad with a timestamp."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO artifacts
+               (ad_id, page_name, image_path, blueprint, generated_copy, draft_image, metadata)
+               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+            (ad_id, page_name, image_path,
+             _json.dumps(blueprint), _json.dumps(generated_copy),
+             draft_image, _json.dumps(metadata)),
+        )
+        conn.commit()
+
+
+def get_artifacts(ad_id=None):
+    with get_conn() as conn, conn.cursor() as cur:
+        if ad_id:
+            cur.execute("SELECT ad_id, blueprint, generated_copy, created_at FROM artifacts WHERE ad_id = %s", (ad_id,))
+        else:
+            cur.execute("SELECT ad_id, blueprint, generated_copy, created_at FROM artifacts ORDER BY created_at")
+        return cur.fetchall()

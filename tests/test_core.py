@@ -77,3 +77,18 @@ def test_invalid_decision_raises():
     dedupe.init_decisions()
     with pytest.raises(ValueError):
         dedupe.record_decision("AD1", "maybe")
+def test_save_and_get_artifact():
+    from src import dedupe
+    import uuid
+    dedupe.init_artifacts()
+    ad_id = f"ART_{uuid.uuid4().hex[:8]}"
+    dedupe.save_artifact(
+        ad_id=ad_id, page_name="TestBrand", image_path="assets/x.jpg",
+        blueprint={"format": "hero"}, generated_copy={"headline": "H"},
+        draft_image="assets/x_draft.png",
+        metadata={"cta": "Shop", "destination_url": "http://x"},
+    )
+    rows = dedupe.get_artifacts(ad_id)
+    assert len(rows) == 1
+    assert rows[0][1]["format"] == "hero"
+    assert rows[0][2]["headline"] == "H"
