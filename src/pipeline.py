@@ -62,6 +62,8 @@ def process_ad(ad):
 
 def run_once(max_per_competitor=5):
     """One scheduled run across the watchlist."""
+    from src.config_check import validate_config
+    validate_config()
     dedupe.init_db()
     dedupe.init_decisions()
     dedupe.init_artifacts()
