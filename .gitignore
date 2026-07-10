@@ -7,3 +7,6 @@ __pycache__/
 samples/
 .pytest_cache/
 assets/
+run_output.txt
+*.txt
+run_output.txt
