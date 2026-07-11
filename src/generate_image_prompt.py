@@ -42,7 +42,7 @@ def generate_image(blueprint, ad_id):
 
     ASSET_DIR.mkdir(exist_ok=True)
     dest = ASSET_DIR / f"{ad_id}_draft.png"
-    with httpx.stream("GET", url, timeout=60, follow_redirects=True) as r:
+    with httpx.stream("GET", url, timeout=120, follow_redirects=True) as r:
         r.raise_for_status()
         with open(dest, "wb") as f:
             for chunk in r.iter_bytes():

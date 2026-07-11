@@ -34,7 +34,11 @@ def process_ad(ad):
         if not ok:
             log.warning("Ad %s failed compliance check: %s", ad_id, issues)
             return "failed"
-        draft_image = generate_image_prompt.generate_image(blueprint, ad_id)
+        try:
+            draft_image = generate_image_prompt.generate_image(blueprint, ad_id)
+        except Exception as e:
+            log.warning("Image generation slow/failed for %s, continuing without draft image: %s", ad_id, e)
+            draft_image = None
         slack_review.post_review(ad, blueprint, copy, image_ref=draft_image or image_path)
 
         dedupe.save_artifact(
