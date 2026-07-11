@@ -1,0 +1,36 @@
+﻿services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: besque
+      POSTGRES_PASSWORD: besque_dev_2026
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  pipeline:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://postgres:besque_dev_2026@db:5432/besque
+    depends_on:
+      db:
+        condition: service_healthy
+    command: python -m src.scheduler
+
+  listener:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://postgres:besque_dev_2026@db:5432/besque
+    depends_on:
+      db:
+        condition: service_healthy
+    command: python -m src.slack_listener
+
+volumes:
+  pgdata:
