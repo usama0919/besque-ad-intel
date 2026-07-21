@@ -1,7 +1,6 @@
-﻿competitors:
-  - name: "Fenty Beauty"
-    page_id: "Fenty Beauty"
-
+competitors:
+- name: OSEA
+  page_id: OSEA
 settings:
-  ads_type: "static"
-  schedule_cadence: "daily"
+  ads_type: static
+  schedule_cadence: daily

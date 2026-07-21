@@ -123,3 +123,26 @@ def get_artifacts(ad_id=None):
         else:
             cur.execute("SELECT ad_id, blueprint, generated_copy, created_at FROM artifacts ORDER BY created_at")
         return cur.fetchall()
+
+
+# ---- Dashboard read: full artifact data including images ----
+
+def get_artifacts_full(limit=50):
+    """Return full artifact records for the dashboard, newest first.
+    Returns list of dicts with everything needed to display."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+            SELECT a.ad_id, a.page_name, a.image_path, a.blueprint,
+                   a.generated_copy, a.draft_image, a.metadata, a.created_at,
+                   d.decision
+            FROM artifacts a
+            LEFT JOIN LATERAL (
+                SELECT decision FROM review_decisions r
+                WHERE r.ad_id = a.ad_id ORDER BY decided_at DESC LIMIT 1
+            ) d ON true
+            ORDER BY a.created_at DESC
+            LIMIT %s
+        """, (limit,))
+        cols = ["ad_id", "page_name", "image_path", "blueprint", "generated_copy",
+                "draft_image", "metadata", "created_at", "decision"]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
