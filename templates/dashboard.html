@@ -46,6 +46,27 @@
   .log-dec.reject { color:#c0392b; }
   .log-at { color:#aaa; font-size:11px; }
   .empty { color:#bbb; font-size:13px; padding:20px 0; text-align:center; }
+  .comp-panel { background:#fff; border:1px solid #e5e0d8; border-radius:12px; padding:14px 18px; margin-bottom:20px; }
+  .comp-add-row { display:flex; gap:8px; margin-bottom:12px; }
+  .comp-add-row input { flex:1; padding:9px 12px; border:1px solid #ccc; border-radius:7px; font-size:13px; min-width:0; }
+  .comp-row { padding:8px 0; border-bottom:1px solid #f4f1ec; }
+  .comp-row:last-child { border:none; }
+  .comp-view, .comp-edit { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+  .comp-name { font-size:13px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .comp-actions { display:flex; gap:6px; flex-shrink:0; }
+  button.mini { background:#f0ece4; color:#333; border:none; padding:5px 10px; border-radius:6px; font-size:11px; font-weight:600; cursor:pointer; }
+  button.mini:hover { background:#e5e0d8; }
+  button.mini.mini-r { background:#fbe6e6; color:#c0392b; }
+  button.mini.mini-r:hover { background:#f5d0d0; }
+  .comp-edit input { flex:1; padding:6px 10px; border:1px solid #ccc; border-radius:6px; font-size:13px; min-width:0; }
+  .comp-row.selected { background:#f0ece4; border-radius:8px; }
+  .comp-row.selected .comp-name { color:#1a7f42; }
+  .comp-name { cursor:pointer; }
+  button.stop { background:#c0392b; color:#fff; border:none; padding:11px 22px; border-radius:8px; font-size:14px; font-weight:600; cursor:pointer; }
+  button.stop:hover { background:#a32e22; }
+  button.stop:disabled { background:#e5c6c2; cursor:not-allowed; }
+  #searchBox { padding:10px 14px; border:1px solid #ccc; border-radius:8px; font-size:14px; width:100%; max-width:360px; margin-bottom:14px; }
+  #selectedCompName { font-size:12px; color:#888; }
 </style>
 </head>
 <body>
@@ -57,9 +78,9 @@
   <div class="sub" id="clock"></div>
 </header>
 <div class="bar">
-  <button class="run" id="runBtn" onclick="runPipeline()">Run Pipeline</button>
-  <input id="compInput" placeholder="Add a competitor (e.g. CeraVe)" style="padding:10px 14px;border:1px solid #ccc;border-radius:8px;font-size:14px;width:260px;">
-  <button class="run" onclick="addCompetitor()">Add &amp; Scan</button>
+  <button class="run" id="runBtn" onclick="runPipeline()" disabled>Run Pipeline</button>
+  <button class="stop" id="stopBtn" onclick="stopPipeline()" disabled>Stop</button>
+  <span id="selectedCompName">No competitor selected</span>
   <span class="status" id="status">Ready</span>
 </div>
 <div class="bar" style="border-top:none;padding-top:0;padding-bottom:20px;gap:32px;">
@@ -71,9 +92,18 @@
 <div class="layout">
   <div>
     <h2>Competitor Ads &rarr; Besque Drafts</h2>
+    <input id="searchBox" placeholder="Search existing ads (competitor, headline, copy)…" oninput="applySearchFilter()">
     <div id="cards"><div class="empty">Loading…</div></div>
   </div>
   <div>
+    <h2>Competitors</h2>
+    <div class="comp-panel">
+      <div class="comp-add-row">
+        <input id="newCompName" placeholder="Competitor name (e.g. CeraVe)">
+        <button class="run" onclick="addCompetitorRow()">Add</button>
+      </div>
+      <div id="competitors"><div class="empty">Loading…</div></div>
+    </div>
     <h2>Decision Log</h2>
     <div class="log" id="log"><div class="empty">No decisions yet</div></div>
   </div>
@@ -81,8 +111,32 @@
 <script>
 function esc(s){return (s||"").replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
 
+let allArtifacts = [];
+
 async function loadCards(){
   const r = await fetch('/api/artifacts'); const data = await r.json();
+  allArtifacts = data;
+  applySearchFilter();
+
+  fetch('/api/stats').then(r=>r.json()).then(s=>{
+    document.getElementById('stat-total').textContent=s.total;
+    document.getElementById('stat-approved').textContent=s.approved;
+    document.getElementById('stat-rejected').textContent=s.rejected;
+    document.getElementById('stat-pending').textContent=s.total-s.approved-s.rejected;
+  });
+}
+
+function applySearchFilter(){
+  const q = (document.getElementById('searchBox').value||'').trim().toLowerCase();
+  const list = !q ? allArtifacts : allArtifacts.filter(a=>{
+    const bp=a.blueprint||{}, c=a.copy||{};
+    const hay = [a.page_name, c.headline, c.primary_text, c.cta, bp.angle].join(' ').toLowerCase();
+    return hay.includes(q);
+  });
+  renderCards(list);
+}
+
+function renderCards(data){
   const el = document.getElementById('cards');
   if(!data.length){ el.innerHTML='<div class="empty">No ads yet. Click Run Pipeline.</div>'; return; }
   el.innerHTML = data.map(a=>{
@@ -108,14 +162,6 @@ async function loadCards(){
         <button class="btn-r" onclick="decide('${a.ad_id}','reject')">Reject</button>
       </div></div>`;
   }).join('');
-
-  
-fetch('/api/stats').then(r=>r.json()).then(s=>{
-    document.getElementById('stat-total').textContent=s.total;
-    document.getElementById('stat-approved').textContent=s.approved;
-    document.getElementById('stat-rejected').textContent=s.rejected;
-    document.getElementById('stat-pending').textContent=s.total-s.approved-s.rejected;
-  }); 
 }
 
 async function loadLog(){
@@ -133,35 +179,99 @@ async function decide(ad,dec){
   await loadCards(); await loadLog();
 }
 
-async function addCompetitor(){
-  const name=document.getElementById('compInput').value.trim();
-  if(!name){ alert('Enter a competitor name'); return; }
-  const st=document.getElementById('status');
-  st.textContent='Adding '+name+' — scanning their ads…';
-  document.getElementById('compInput').value='';
-  await fetch('/api/add-competitor?name='+encodeURIComponent(name)+'&n=2',{method:'POST'});
-  const poll=setInterval(async()=>{
-    const r=await fetch('/api/run/status'); const s=await r.json();
-    if(!s.running){ clearInterval(poll);
-      st.textContent='Done — '+name+' ads added: '+JSON.stringify(s.last_summary);
-      loadCards(); loadLog(); }
-  },3000);
+let selectedCompetitorId = null;
+let selectedCompetitorName = null;
+
+async function loadCompetitors(){
+  const r = await fetch('/api/competitors'); const data = await r.json();
+  const el = document.getElementById('competitors');
+  if(selectedCompetitorId !== null && !data.some(c=>c.id===selectedCompetitorId)){
+    selectedCompetitorId = null; selectedCompetitorName = null;
+  }
+  if(!data.length){ el.innerHTML='<div class="empty">No competitors yet</div>'; updateRunButtonState(); return; }
+  el.innerHTML = data.map(c=>`
+    <div class="comp-row${c.id===selectedCompetitorId?' selected':''}" data-id="${c.id}">
+      <div class="comp-view">
+        <span class="comp-name" onclick="selectCompetitor(${c.id},'${esc(c.name).replace(/'/g,"\\'")}')">${esc(c.name)}</span>
+        <div class="comp-actions">
+          <button class="mini" onclick="editCompetitor(${c.id})">Edit</button>
+          <button class="mini mini-r" onclick="removeCompetitor(${c.id})">Remove</button>
+        </div>
+      </div>
+    </div>`).join('');
+  updateRunButtonState();
+}
+
+function selectCompetitor(id, name){
+  if(selectedCompetitorId === id){ selectedCompetitorId = null; selectedCompetitorName = null; }
+  else { selectedCompetitorId = id; selectedCompetitorName = name; }
+  loadCompetitors();
+}
+
+function updateRunButtonState(){
+  const btn = document.getElementById('runBtn');
+  const nameEl = document.getElementById('selectedCompName');
+  nameEl.textContent = selectedCompetitorId===null ? 'No competitor selected' : 'Selected: '+selectedCompetitorName;
+  if(!btn.dataset.running){ btn.disabled = (selectedCompetitorId === null); }
+}
+
+async function addCompetitorRow(){
+  const input = document.getElementById('newCompName');
+  const name = input.value.trim();
+  if(!name){ return; }
+  input.value = '';
+  await fetch('/api/competitors?name='+encodeURIComponent(name), {method:'POST'});
+  loadCompetitors();
+}
+
+function editCompetitor(id){
+  const row = document.querySelector('.comp-row[data-id="'+id+'"]');
+  const current = row.querySelector('.comp-name').textContent;
+  row.innerHTML = `<div class="comp-edit">
+      <input value="${esc(current)}" id="edit-${id}">
+      <div class="comp-actions">
+        <button class="mini" onclick="saveCompetitor(${id})">Save</button>
+        <button class="mini" onclick="loadCompetitors()">Cancel</button>
+      </div>
+    </div>`;
+}
+
+async function saveCompetitor(id){
+  const val = document.getElementById('edit-'+id).value.trim();
+  if(!val){ return; }
+  await fetch('/api/competitors/'+id+'?name='+encodeURIComponent(val), {method:'PUT'});
+  loadCompetitors();
+}
+
+async function removeCompetitor(id){
+  if(!confirm('Remove this competitor?')) return;
+  await fetch('/api/competitors/'+id, {method:'DELETE'});
+  loadCompetitors();
 }
 
 async function runPipeline(){
-  const btn=document.getElementById('runBtn'), st=document.getElementById('status');
-  btn.disabled=true; st.textContent='Running — scraping, analysing, generating…';
-  await fetch('/api/run?n=2',{method:'POST'});
+  if(selectedCompetitorId === null){ return; }
+  const btn=document.getElementById('runBtn'), stopBtn=document.getElementById('stopBtn'), st=document.getElementById('status');
+  btn.disabled=true; btn.dataset.running='1'; stopBtn.disabled=false;
+  st.textContent='Running '+selectedCompetitorName+' — scraping, analysing, generating…';
+  await fetch('/api/run?n=2&competitor_id='+selectedCompetitorId,{method:'POST'});
   const poll=setInterval(async()=>{
     const r=await fetch('/api/run/status'); const s=await r.json();
-    if(!s.running){ clearInterval(poll); btn.disabled=false;
+    if(!s.running){ clearInterval(poll); delete btn.dataset.running; stopBtn.disabled=true;
+      updateRunButtonState();
       st.textContent='Done: '+JSON.stringify(s.last_summary); loadCards(); loadLog(); }
   },3000);
 }
 
+async function stopPipeline(){
+  document.getElementById('status').textContent = 'Stopping…';
+  document.getElementById('stopBtn').disabled = true;
+  await fetch('/api/run/stop', {method:'POST'});
+}
+
 function tick(){document.getElementById('clock').textContent=new Date().toLocaleString();}
 setInterval(tick,1000); tick();
-loadCards(); loadLog();
+loadCards(); loadLog(); loadCompetitors();
 function refreshAll(){ loadCards(); loadLog(); }
 setInterval(refreshAll, 3000);
 </script>

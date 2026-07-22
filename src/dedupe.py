@@ -125,6 +125,57 @@ def get_artifacts(ad_id=None):
         return cur.fetchall()
 
 
+# ---- Competitor watchlist (Postgres-backed, replaces static watchlist.yaml) ----
+
+def init_competitors():
+    """Create the competitors table if it doesn't exist."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS competitors (
+                id          SERIAL PRIMARY KEY,
+                name        TEXT NOT NULL,
+                page_id     TEXT NOT NULL,
+                created_at  TIMESTAMPTZ DEFAULT now()
+            )
+        """)
+        conn.commit()
+
+
+def add_competitor(name: str, page_id: str) -> int:
+    """Append a new competitor row. Never overwrites existing rows."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO competitors (name, page_id) VALUES (%s, %s) RETURNING id",
+            (name, page_id),
+        )
+        new_id = cur.fetchone()[0]
+        conn.commit()
+        return new_id
+
+
+def get_competitors():
+    """Return all competitors, oldest first. List of dicts: id, name, page_id, created_at."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT id, name, page_id, created_at FROM competitors ORDER BY id")
+        cols = ["id", "name", "page_id", "created_at"]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def update_competitor(competitor_id: int, name: str, page_id: str) -> None:
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "UPDATE competitors SET name = %s, page_id = %s WHERE id = %s",
+            (name, page_id, competitor_id),
+        )
+        conn.commit()
+
+
+def delete_competitor(competitor_id: int) -> None:
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM competitors WHERE id = %s", (competitor_id,))
+        conn.commit()
+
+
 # ---- Dashboard read: full artifact data including images ----
 
 def get_artifacts_full(limit=50):

@@ -4,7 +4,7 @@ One scheduled run across the watchlist. Each ad is failure-isolated: one bad
 ad or failed stage is skipped cleanly without stopping the run.
 """
 import logging
-from src import dedupe, config_loader, scrape, assets, deconstruct, generate_copy, generate_image_prompt, slack_review, compliance
+from src import dedupe, scrape, assets, deconstruct, generate_copy, generate_image_prompt, slack_review, compliance
 from src.retry import with_retry
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -39,7 +39,6 @@ def process_ad(ad):
         except Exception as e:
             log.warning("Image generation slow/failed for %s, continuing without draft image: %s", ad_id, e)
             draft_image = None
-        slack_review.post_review(ad, blueprint, copy, image_ref=draft_image or image_path)
 
         dedupe.save_artifact(
             ad_id=ad_id,
@@ -57,24 +56,40 @@ def process_ad(ad):
         )
 
         dedupe.mark_seen(ad_id, ad.get("page_name", ""))
-        log.info("Ad %s processed and posted to Slack", ad_id)
+
+        try:
+            slack_review.post_review(ad, blueprint, copy, image_ref=draft_image or image_path)
+            log.info("Ad %s processed and posted to Slack", ad_id)
+        except Exception as e:
+            log.warning("Ad %s saved but Slack post failed: %s", ad_id, e)
+
         return "processed"
     except Exception as e:
         log.error("Ad %s failed: %s", ad_id, e)
         return "failed"
 
 
-def run_once(max_per_competitor=5):
-    """One scheduled run across the watchlist."""
+def run_once(max_per_competitor=5, competitor_id=None, should_stop=None):
+    """One scheduled run across the watchlist, or a single competitor if
+    competitor_id is given. should_stop is an optional zero-arg callable
+    checked between ads/competitors to cooperatively halt the run early."""
     from src.config_check import validate_config
     validate_config()
     dedupe.init_db()
     dedupe.init_decisions()
     dedupe.init_artifacts()
-    competitors = config_loader.get_competitors()
+    dedupe.init_competitors()
+    should_stop = should_stop or (lambda: False)
+
+    competitors = dedupe.get_competitors()
+    if competitor_id is not None:
+        competitors = [c for c in competitors if c.get("id") == competitor_id]
     summary = {"processed": 0, "skipped": 0, "failed": 0}
 
     for competitor in competitors:
+        if should_stop():
+            log.info("Stop requested, halting run.")
+            break
         name = competitor.get("name", "?")
         try:
             ads = with_retry(lambda: scrape.scrape_ads(name, max_results=max_per_competitor),
@@ -83,6 +98,9 @@ def run_once(max_per_competitor=5):
             log.error("Scrape failed for %s: %s (clean skip)", name, e)
             continue
         for ad in ads:
+            if should_stop():
+                log.info("Stop requested, halting run.")
+                break
             summary[process_ad(ad)] += 1
 
     log.info("Run complete: %s", summary)

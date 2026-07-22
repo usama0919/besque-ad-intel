@@ -10,5 +10,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Default: run one pipeline pass. Override in compose for scheduler/listener.
-CMD ["python", "-m", "src.pipeline"]
+# Serve the FastAPI dashboard on Cloud Run's $PORT (defaults to 8080 locally).
+CMD ["sh", "-c", "uvicorn dashboard:app --host 0.0.0.0 --port ${PORT:-8080}"]

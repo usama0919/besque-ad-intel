@@ -22,7 +22,7 @@ app.mount("/assets", StaticFiles(directory="assets"), name="assets")
 
 templates = Jinja2Templates(directory="templates")
 
-_run_status = {"running": False, "last_summary": None}
+_run_status = {"running": False, "last_summary": None, "stop_requested": False}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -70,10 +70,14 @@ def api_decision(ad_id: str, decision: str):
     return JSONResponse({"ok": True, "ad_id": ad_id, "decision": decision})
 
 
-def _run_pipeline_bg(n):
+def _run_pipeline_bg(n, competitor_id=None):
     try:
         from src import pipeline
-        _run_status["last_summary"] = pipeline.run_once(max_per_competitor=n)
+        _run_status["last_summary"] = pipeline.run_once(
+            max_per_competitor=n,
+            competitor_id=competitor_id,
+            should_stop=lambda: _run_status["stop_requested"],
+        )
     except Exception as e:
         _run_status["last_summary"] = {"error": str(e)}
     finally:
@@ -81,37 +85,51 @@ def _run_pipeline_bg(n):
 
 
 @app.post("/api/run")
-def api_run(n: int = 2):
+def api_run(n: int = 2, competitor_id: int = None):
     if _run_status["running"]:
         return JSONResponse({"ok": False, "error": "already running"})
     _run_status["running"] = True
     _run_status["last_summary"] = None
-    threading.Thread(target=_run_pipeline_bg, args=(n,), daemon=True).start()
+    _run_status["stop_requested"] = False
+    threading.Thread(target=_run_pipeline_bg, args=(n, competitor_id), daemon=True).start()
     return JSONResponse({"ok": True, "started": True})
+
+
+@app.post("/api/run/stop")
+def api_run_stop():
+    _run_status["stop_requested"] = True
+    return JSONResponse({"ok": True})
 
 
 @app.get("/api/run/status")
 def api_run_status():
     return JSONResponse(_run_status)
 
-@app.post("/api/add-competitor")
-def api_add_competitor(name: str, n: int = 2):
-    """Set a competitor and run the pipeline on them - live from the dashboard."""
-    if _run_status["running"]:
-        return JSONResponse({"ok": False, "error": "already running"})
-    # Write the competitor to the watchlist
-    import yaml
-    watchlist = {
-        "competitors": [{"name": name, "page_id": name}],
-        "settings": {"ads_type": "static", "schedule_cadence": "daily"},
-    }
-    with open("config/watchlist.yaml", "w") as f:
-        yaml.safe_dump(watchlist, f)
-    # Run the pipeline in background
-    _run_status["running"] = True
-    _run_status["last_summary"] = None
-    threading.Thread(target=_run_pipeline_bg, args=(n,), daemon=True).start()
-    return JSONResponse({"ok": True, "competitor": name})
+@app.get("/api/competitors")
+def api_competitors():
+    dedupe.init_competitors()
+    rows = dedupe.get_competitors()
+    return JSONResponse([{"id": r["id"], "name": r["name"], "page_id": r["page_id"]} for r in rows])
+
+
+@app.post("/api/competitors")
+def api_add_competitor(name: str):
+    """Append a new competitor to the watchlist table. Never overwrites existing rows."""
+    dedupe.init_competitors()
+    new_id = dedupe.add_competitor(name, name)
+    return JSONResponse({"ok": True, "id": new_id, "name": name, "page_id": name})
+
+
+@app.put("/api/competitors/{competitor_id}")
+def api_update_competitor(competitor_id: int, name: str):
+    dedupe.update_competitor(competitor_id, name, name)
+    return JSONResponse({"ok": True, "id": competitor_id, "name": name})
+
+
+@app.delete("/api/competitors/{competitor_id}")
+def api_delete_competitor(competitor_id: int):
+    dedupe.delete_competitor(competitor_id)
+    return JSONResponse({"ok": True, "id": competitor_id})
 @app.get("/api/stats")
 def api_stats():
     dedupe.init_artifacts()

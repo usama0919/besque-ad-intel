@@ -25,4 +25,4 @@ if __name__ == "__main__":
     print(">> Slack listener started (buttons live)")
     print(">> Dashboard starting at http://localhost:8080")
     # Start dashboard (blocks)
-    uvicorn.run("dashboard:app", host="0.0.0.0", port=8080, log_level="warning")
+    uvicorn.run("dashboard:app", host="0.0.0.0", port=int(os.getenv("PORT", 8080)), log_level="warning")
