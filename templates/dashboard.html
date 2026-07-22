@@ -75,6 +75,11 @@
   .modal input[type=text], .modal textarea { width:100%; padding:9px 12px; border:1px solid #ccc; border-radius:7px; font-size:13px; font-family:inherit; box-sizing:border-box; }
   .modal textarea { min-height:90px; resize:vertical; }
   .modal-actions { display:flex; justify-content:flex-end; gap:10px; margin-top:20px; }
+  .edit-row { padding:10px 18px 14px; display:flex; gap:8px; border-top:1px dashed #eee; align-items:center; }
+  .edit-row input { flex:1; padding:8px 10px; border:1px solid #ccc; border-radius:7px; font-size:12px; min-width:0; }
+  .edit-row select { padding:8px; border:1px solid #ccc; border-radius:7px; font-size:12px; }
+  .edit-row button:disabled { opacity:0.5; cursor:wait; }
+  .img-missing { display:flex; align-items:center; justify-content:center; background:#f4f1ec; color:#999; font-size:12px; min-height:180px; border-radius:8px; }
 </style>
 </head>
 <body>
@@ -152,6 +157,60 @@ function applySearchFilter(){
   renderCards(list);
 }
 
+
+let editModalAdId = null;
+
+function openEditModal(adId){
+  editModalAdId = adId;
+  document.getElementById('aeInst').value = '';
+  document.getElementById('aeStatus').textContent = '';
+  document.getElementById('adEditModal').classList.add('open');
+}
+
+function closeEditModal(){ document.getElementById('adEditModal').classList.remove('open'); }
+
+function _aeBusy(busy, msg){
+  document.getElementById('aeImgBtn').disabled = busy;
+  document.getElementById('aeCopyBtn').disabled = busy;
+  document.getElementById('aeStatus').textContent = msg || '';
+}
+
+async function modalEditImage(){
+  let inst = document.getElementById('aeInst').value.trim();
+  if(!inst){ inst = 'Keep the image content the same; only re-frame it to the requested aspect ratio.'; }
+  const aspect = document.getElementById('aeAspect').value;
+  _aeBusy(true, 'Regenerating image... this takes 20-30 seconds');
+  try {
+    const r = await fetch('/api/edit_image/'+editModalAdId, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({instruction: inst, aspect})});
+    const res = await r.json();
+    if(!res.ok){ _aeBusy(false, 'Failed: ' + (res.error||'unknown')); }
+    else { _aeBusy(false, 'Done.'); closeEditModal(); await loadCards(); }
+  } catch(e) {
+    _aeBusy(false, 'Failed: ' + e);
+  }
+}
+
+async function modalEditCopy(){
+  const inst = document.getElementById('aeInst').value.trim();
+  if(!inst){ alert('Type an instruction first'); return; }
+  _aeBusy(true, 'Revising copy... about 10 seconds');
+  try {
+    const r = await fetch('/api/edit_copy/'+editModalAdId, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({instruction: inst})});
+    const res = await r.json();
+    if(!res.ok){ _aeBusy(false, 'Failed: ' + (res.error||'unknown')); }
+    else { _aeBusy(false, 'Done.'); closeEditModal(); await loadCards(); }
+  } catch(e) {
+    _aeBusy(false, 'Failed: ' + e);
+  }
+}
+
+function imgFallback(el){
+  const d = document.createElement('div');
+  d.className = 'img-missing';
+  d.textContent = 'No image available';
+  el.replaceWith(d);
+}
+
 function renderCards(data){
   const el = document.getElementById('cards');
   if(!data.length){ el.innerHTML='<div class="empty">No ads yet. Click Run Pipeline.</div>'; return; }
@@ -161,8 +220,8 @@ function renderCards(data){
     const badge = dec==='approve'?'<span class="badge approve">Approved</span>'
       : dec==='reject'?'<span class="badge reject">Rejected</span>'
       : '<span class="badge pending">Pending</span>';
-    const orig = a.original_image?`<img src="${a.original_image}" onerror="this.style.display='none'">`:'';
-    const draft = a.draft_image?`<img src="${a.draft_image}" onerror="this.style.display='none'">`:'';
+    const orig = a.original_image?`<img onerror="imgFallback(this)" src="${a.original_image}">`:'';
+    const draft = a.draft_image?`<img onerror="imgFallback(this)" src="${a.draft_image}">`:'';
     return `<div class="card">
       <div class="card-head"><span class="comp">${esc(a.page_name)||'Competitor'} <span style="font-size:11px;color:#aaa;font-weight:400;">· ${a.created_at||''}</span></span>${badge}</div>
       <div class="split">
@@ -176,6 +235,7 @@ function renderCards(data){
       <div class="actions">
         <button class="btn-a" onclick="decide('${a.ad_id}','approve')">Approve</button>
         <button class="btn-r" onclick="decide('${a.ad_id}','reject')">Reject</button>
+        <button style="flex:0 0 auto;background:#3b3b3b;color:#fff;" onclick="openEditModal('${a.ad_id}')">Edit</button>
       </div></div>`;
   }).join('');
 }
@@ -394,6 +454,25 @@ setInterval(refreshAll, 3000);
     <div class="modal-actions">
       <button class="mini" onclick="closeProdModal()">Cancel</button>
       <button class="run" onclick="saveProdModal()">Save</button>
+    </div>
+  </div>
+</div>
+<div class="modal-overlay" id="adEditModal" onclick="if(event.target===this)closeEditModal()">
+  <div class="modal">
+    <h3>Edit Ad Draft</h3>
+    <label>Instruction</label>
+    <textarea id="aeInst" placeholder="e.g. 'make the background lighter', 'shorter headline', 'focus on hydration'"></textarea>
+    <label>Image aspect</label>
+    <select id="aeAspect" style="width:100%;padding:9px 12px;border:1px solid #ccc;border-radius:7px;font-size:13px;">
+      <option value="1:1">Square 1:1</option>
+      <option value="4:5">Portrait 4:5</option>
+      <option value="1.91:1">Landscape 1.91:1</option>
+    </select>
+    <div id="aeStatus" style="margin-top:12px;font-size:13px;color:#777;"></div>
+    <div class="modal-actions">
+      <button class="mini" onclick="closeEditModal()">Cancel</button>
+      <button class="mini" id="aeCopyBtn" onclick="modalEditCopy()">Revise Copy</button>
+      <button class="run" id="aeImgBtn" onclick="modalEditImage()">Regenerate Image</button>
     </div>
   </div>
 </div>

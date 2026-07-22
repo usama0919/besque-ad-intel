@@ -262,3 +262,22 @@ def get_product(product_id):
         if r is None:
             return None
         return {"id": r[0], "name": r[1], "description": r[2], "ingredients": r[3], "hero_claim": r[4]}
+
+
+def update_artifact_copy(ad_id, generated_copy):
+    """Replace the generated copy for one artifact."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("UPDATE artifacts SET generated_copy=%s WHERE ad_id=%s", (_json.dumps(generated_copy), ad_id))
+        conn.commit()
+
+
+def get_artifact(ad_id):
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT ad_id, page_name, blueprint, generated_copy, draft_image FROM artifacts WHERE ad_id=%s ORDER BY id DESC LIMIT 1", (ad_id,))
+        r = cur.fetchone()
+        if r is None:
+            return None
+        import json as _j
+        bp = r[2] if isinstance(r[2], dict) else _j.loads(r[2] or "{}")
+        cp = r[3] if isinstance(r[3], dict) else _j.loads(r[3] or "{}")
+        return {"ad_id": r[0], "page_name": r[1], "blueprint": bp, "generated_copy": cp, "draft_image": r[4]}

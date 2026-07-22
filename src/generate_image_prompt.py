@@ -74,3 +74,49 @@ def generate_image(blueprint, ad_id, product=None):
         print(f"[DEBUG generate_image] ad_id={ad_id} failed: {type(e).__name__}: {e}")
         traceback.print_exc()
         return None
+
+
+def edit_image(current_image_bytes, instruction, ad_id, aspect="1:1"):
+    """Edit an existing draft image with a natural-language instruction via nano banana.
+    Saves/uploads the result under the same key and returns it. Returns None on failure."""
+    from google.genai import types as genai_types
+    prompt = (
+        f"Edit this Besque skincare advertisement image. Instruction: {instruction}. "
+        f"Keep it a premium, editorial skincare ad. Output aspect ratio: {aspect}. "
+        f"Do not add any text, ingredients, or claims that are not already present."
+    )
+    try:
+        client = genai.Client(vertexai=True, project="besque-martech", location="global")
+        response = client.models.generate_content(
+            model="gemini-3.1-flash-image",
+            contents=[
+                genai_types.Part.from_bytes(data=current_image_bytes, mime_type="image/png"),
+                prompt,
+            ],
+            config=genai_types.GenerateContentConfig(
+                image_config=genai_types.ImageConfig(aspect_ratio=aspect),
+            ),
+        )
+        image_bytes = None
+        for part in response.candidates[0].content.parts:
+            if part.inline_data is not None:
+                image_bytes = part.inline_data.data
+                break
+        if image_bytes is None:
+            return None
+        ASSET_DIR.mkdir(exist_ok=True)
+        dest = ASSET_DIR / f"{ad_id}_draft.png"
+        with open(dest, "wb") as f:
+            f.write(image_bytes)
+        try:
+            from google.cloud import storage
+            bucket_name = os.getenv("ASSET_BUCKET", "besque-ad-intel-assets")
+            blob = storage.Client().bucket(bucket_name).blob(f"{ad_id}_draft.png")
+            blob.upload_from_string(image_bytes, content_type="image/png")
+        except Exception as e:
+            print(f"Bucket upload failed (non-fatal): {e}")
+        return str(dest)
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return None

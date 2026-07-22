@@ -157,6 +157,76 @@ def api_run_status():
     except Exception as e:
         return JSONResponse({"running": False, "last_summary": {"error": str(e)}})
 
+@app.post("/api/edit_image/{ad_id}")
+async def api_edit_image(ad_id: str, request: Request):
+    """Edit a draft image with a natural-language instruction via nano banana."""
+    body = await request.json()
+    instruction = (body.get("instruction") or "").strip()
+    aspect = (body.get("aspect") or "1:1").strip()
+    if not instruction:
+        return JSONResponse({"ok": False, "error": "instruction required"}, status_code=400)
+    art = dedupe.get_artifact(ad_id)
+    if art is None:
+        return JSONResponse({"ok": False, "error": "artifact not found"}, status_code=404)
+    # fetch the current draft image bytes (local first, then bucket)
+    filename = f"{ad_id}_draft.png"
+    current = None
+    local = ASSET_DIR / filename
+    if local.exists():
+        current = local.read_bytes()
+    else:
+        try:
+            from google.cloud import storage
+            blob = storage.Client().bucket(os.getenv("ASSET_BUCKET", "besque-ad-intel-assets")).blob(filename)
+            if blob.exists():
+                current = blob.download_as_bytes()
+        except Exception:
+            pass
+    if current is None:
+        return JSONResponse({"ok": False, "error": "no existing draft image to edit"}, status_code=404)
+    from src import generate_image_prompt
+    result = generate_image_prompt.edit_image(current, instruction, ad_id, aspect=aspect)
+    if result is None:
+        return JSONResponse({"ok": False, "error": "image edit failed"})
+    return JSONResponse({"ok": True, "ad_id": ad_id})
+
+
+@app.post("/api/edit_copy/{ad_id}")
+async def api_edit_copy(ad_id: str, request: Request):
+    """Revise the generated copy with a natural-language instruction via Claude."""
+    body = await request.json()
+    instruction = (body.get("instruction") or "").strip()
+    if not instruction:
+        return JSONResponse({"ok": False, "error": "instruction required"}, status_code=400)
+    art = dedupe.get_artifact(ad_id)
+    if art is None:
+        return JSONResponse({"ok": False, "error": "artifact not found"}, status_code=404)
+    import anthropic, json as _j
+    prompt = (
+        "You are a senior copywriter for Besque, a natural skincare brand for women 40+.\n"
+        "Here is the current ad copy JSON:\n" + _j.dumps(art["generated_copy"], indent=2) + "\n\n"
+        "Revise it according to this instruction: " + instruction + "\n"
+        "Keep the same language as the current copy. Return ONLY the full revised JSON with the same fields, no preamble or markdown."
+    )
+    try:
+        client = anthropic.Anthropic(timeout=60.0, max_retries=1)
+        message = client.messages.create(
+            model=os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6"),
+            max_tokens=1024,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = message.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        new_copy = _j.loads(raw)
+        dedupe.update_artifact_copy(ad_id, new_copy)
+        return JSONResponse({"ok": True, "ad_id": ad_id, "copy": new_copy})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)})
+
+
 @app.get("/api/products")
 def api_products():
     dedupe.init_products()
