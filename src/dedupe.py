@@ -103,8 +103,11 @@ def init_artifacts():
 
 
 def save_artifact(ad_id, page_name, image_path, blueprint, generated_copy, draft_image, metadata):
-    """Persist all artifacts for one ad with a timestamp."""
+    """Persist all artifacts for one ad with a timestamp. Skips if ad_id already stored."""
     with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM artifacts WHERE ad_id = %s", (ad_id,))
+        if cur.fetchone() is not None:
+            return
         cur.execute(
             """INSERT INTO artifacts
                (ad_id, page_name, image_path, blueprint, generated_copy, draft_image, metadata)

@@ -99,13 +99,28 @@ def _run_pipeline_bg(n, competitor_id=None):
 
 @app.post("/api/run")
 def api_run(n: int = 2, competitor_id: int = None):
-    if _run_status["running"]:
-        return JSONResponse({"ok": False, "error": "already running"})
-    _run_status["running"] = True
-    _run_status["last_summary"] = None
-    _run_status["stop_requested"] = False
-    threading.Thread(target=_run_pipeline_bg, args=(n, competitor_id), daemon=True).start()
-    return JSONResponse({"ok": True, "started": True})
+    """Trigger the pipeline as a Cloud Run Job (runs to completion, isolated)."""
+    from google.cloud import run_v2
+    project = os.getenv("GCP_PROJECT", "besque-martech")
+    region = os.getenv("GCP_REGION", "europe-west2")
+    job = os.getenv("PIPELINE_JOB", "besque-pipeline")
+    job_path = f"projects/{project}/locations/{region}/jobs/{job}"
+    overrides = run_v2.RunJobRequest.Overrides(
+        container_overrides=[
+            run_v2.RunJobRequest.Overrides.ContainerOverride(
+                env=[
+                    run_v2.EnvVar(name="RUN_COMPETITOR_ID", value=str(competitor_id) if competitor_id is not None else ""),
+                    run_v2.EnvVar(name="RUN_MAX_PER_COMPETITOR", value=str(n)),
+                ]
+            )
+        ]
+    )
+    try:
+        client = run_v2.JobsClient()
+        client.run_job(request=run_v2.RunJobRequest(name=job_path, overrides=overrides))
+        return JSONResponse({"ok": True, "started": True})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)})
 
 
 @app.post("/api/run/stop")
