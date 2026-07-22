@@ -1,4 +1,4 @@
-﻿"""Startup config validation. Fails fast with a clear message if required
+"""Startup config validation. Fails fast with a clear message if required
 environment variables are missing, rather than crashing mid-run.
 """
 import os
@@ -7,12 +7,12 @@ REQUIRED = {
     "DATABASE_URL": "Postgres connection for dedupe/artifacts",
     "ANTHROPIC_API_KEY": "Claude vision + copy generation",
     "APIFY_TOKEN": "Meta Ad Library scrape",
-    "REPLICATE_API_TOKEN": "Flux draft image generation",
-    "SLACK_BOT_TOKEN": "Posting review cards to Slack",
-    "SLACK_CHANNEL": "Target Slack channel",
 }
 
 OPTIONAL = {
+    "REPLICATE_API_TOKEN": "Flux draft image generation",
+    "SLACK_BOT_TOKEN": "Posting review cards to Slack",
+    "SLACK_CHANNEL": "Target Slack channel",
     "SLACK_APP_TOKEN": "Socket Mode listener for Approve/Reject buttons",
     "STORAGE_BACKEND": "Storage backend (local default, gcs for production)",
 }
