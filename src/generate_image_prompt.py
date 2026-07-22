@@ -51,6 +51,13 @@ def generate_image(blueprint, ad_id):
         dest = ASSET_DIR / f"{ad_id}_draft.png"
         with open(dest, "wb") as f:
             f.write(image_bytes)
+        try:
+            from google.cloud import storage
+            bucket_name = os.getenv("ASSET_BUCKET", "besque-ad-intel-assets")
+            blob = storage.Client().bucket(bucket_name).blob(f"{ad_id}_draft.png")
+            blob.upload_from_string(image_bytes, content_type="image/png")
+        except Exception as e:
+            print(f"Bucket upload failed (non-fatal): {e}")
         return str(dest)
     except Exception as e:
         import traceback

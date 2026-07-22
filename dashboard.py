@@ -6,7 +6,7 @@ import threading
 from pathlib import Path
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -18,7 +18,20 @@ app = FastAPI(title="Besque Ad Intelligence")
 # Serve the saved ad images
 ASSET_DIR = Path("assets")
 ASSET_DIR.mkdir(exist_ok=True)
-app.mount("/assets", StaticFiles(directory="assets"), name="assets")
+@app.get("/assets/{filename}")
+def get_asset(filename: str):
+    local = ASSET_DIR / filename
+    if local.exists():
+        return Response(local.read_bytes(), media_type="image/png")
+    try:
+        from google.cloud import storage
+        bucket_name = os.getenv("ASSET_BUCKET", "besque-ad-intel-assets")
+        blob = storage.Client().bucket(bucket_name).blob(filename)
+        if blob.exists():
+            return Response(blob.download_as_bytes(), media_type="image/png")
+    except Exception as e:
+        print(f"Bucket fetch failed: {e}")
+    return Response(status_code=404)
 
 templates = Jinja2Templates(directory="templates")
 
