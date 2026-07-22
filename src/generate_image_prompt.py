@@ -22,6 +22,7 @@ def build_image_prompt(blueprint: dict, product: dict = None) -> str:
     else:
         product_desc = "(a natural botanical body oil in an elegant bottle). "
     prompt = (
+        BRAND_RULES +
         f"A premium skincare advertisement image for Besque, a natural body-oil brand for women 40+. "
         f"Composition: {layout}. Subject: {subject}, reimagined with a Besque product. "
         + product_desc +
@@ -37,6 +38,15 @@ from google import genai
 from pathlib import Path
 
 ASSET_DIR = Path(os.getenv("ASSET_DIR", "assets"))
+
+BRAND_RULES = (
+    "STRICT RULES - NEVER VIOLATE: "
+    "1) Any Besque bottle label must show ONLY the exact product name provided, nothing else. "
+    "2) NEVER copy the competitor's product name, brand name, claims, or any label text onto the Besque product. "
+    "3) NEVER invent ingredients, percentages, or product names. "
+    "4) If no product name is provided, the bottle shows only the word 'Besque'. "
+    "5) The product is always a body OIL in a glass bottle unless stated otherwise - never a cream, jar, or tub. "
+)
 
 
 def generate_image(blueprint, ad_id, product=None):
@@ -81,6 +91,7 @@ def edit_image(current_image_bytes, instruction, ad_id, aspect="1:1"):
     Saves/uploads the result under the same key and returns it. Returns None on failure."""
     from google.genai import types as genai_types
     prompt = (
+        BRAND_RULES +
         f"Edit this Besque skincare advertisement image. Instruction: {instruction}. "
         f"Keep it a premium, editorial skincare ad. Output aspect ratio: {aspect}. "
         f"Do not add any text, ingredients, or claims that are not already present."
