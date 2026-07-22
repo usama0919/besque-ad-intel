@@ -21,16 +21,22 @@ BRAND VOICE GUIDE:
 APPROVED CLAIMS:
 {approved_claims}
 
+PRODUCT (use ONLY these facts, never invent claims or ingredients):
+{product_info}
+
+LANGUAGE: Write the copy in the SAME language as the competitor ad shown in the blueprint. If the blueprint's text is in Italian, write Italian; if German, German; and so on. Default to English only if the source language is unclear.
+
 CREATIVE BLUEPRINT:
 {blueprint}
 """
 
 
-def build_copy_prompt(blueprint, brand_voice="", approved_claims=""):
+def build_copy_prompt(blueprint, brand_voice="", approved_claims="", product=None):
     return COPY_PROMPT.format(
         brand_voice=brand_voice or "(brand voice guide provided at kickoff)",
         approved_claims=approved_claims or "(approved claims list provided at kickoff)",
         blueprint=json.dumps(blueprint, indent=2),
+        product_info=json.dumps(product, indent=2) if product else "(no specific product selected)",
     )
 
 
@@ -62,10 +68,10 @@ def copy_from_response(raw_text):
 import anthropic
 
 
-def generate_copy_live(blueprint, brand_voice="", approved_claims=""):
+def generate_copy_live(blueprint, brand_voice="", approved_claims="", product=None):
     """Send a blueprint to Claude and return validated Besque-adapted copy.
     Makes ONE API call. Raises if the response is missing required fields."""
-    prompt = build_copy_prompt(blueprint, brand_voice, approved_claims)
+    prompt = build_copy_prompt(blueprint, brand_voice, approved_claims, product=product)
 
     client = anthropic.Anthropic(timeout=60.0, max_retries=1)  # reads ANTHROPIC_API_KEY from env
     message = client.messages.create(

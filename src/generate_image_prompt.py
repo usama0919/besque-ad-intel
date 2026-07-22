@@ -4,7 +4,7 @@ import os
 IMAGE_MODEL = os.getenv("IMAGE_MODEL", "placeholder-image-model")
 
 
-def build_image_prompt(blueprint: dict) -> str:
+def build_image_prompt(blueprint: dict, product: dict = None) -> str:
     """Construct a Besque-adapted image generation prompt from the blueprint's visual notes."""
     visual = blueprint.get("visual", {})
     layout = visual.get("layout", "clean centered composition")
@@ -12,11 +12,21 @@ def build_image_prompt(blueprint: dict) -> str:
     palette = visual.get("palette_mood", "warm, natural tones")
     text_placement = visual.get("text_placement", "minimal")
 
+    if product:
+        product_desc = (
+            f"The featured product is {product.get('name', 'a Besque product')}: {product.get('description', '')} "
+            f"If any label or ingredient text appears on the product, it must show ONLY these real ingredients: "
+            f"{product.get('ingredients', '')}. Key claim: {product.get('hero_claim', '')}. "
+            f"Never invent ingredients or label text not listed here. "
+        )
+    else:
+        product_desc = "(a natural botanical body oil in an elegant bottle). "
     prompt = (
         f"A premium skincare advertisement image for Besque, a natural body-oil brand for women 40+. "
-        f"Composition: {layout}. Subject: {subject}, reimagined with a Besque product "
-        f"(a natural botanical body oil in an elegant bottle). "
+        f"Composition: {layout}. Subject: {subject}, reimagined with a Besque product. "
+        + product_desc +
         f"Palette and mood: {palette}. Text placement: {text_placement}. "
+        f"Square 1:1 aspect ratio composition. "
         f"Style: clean, editorial, aspirational, natural light, no competitor branding, "
         f"no text overlays baked into the image."
     )
@@ -29,10 +39,10 @@ from pathlib import Path
 ASSET_DIR = Path(os.getenv("ASSET_DIR", "assets"))
 
 
-def generate_image(blueprint, ad_id):
+def generate_image(blueprint, ad_id, product=None):
     """Single-pass image generation from the blueprint. One image, no iteration.
     Saves to assets/<ad_id>_draft.png and returns the path. Returns None on failure."""
-    prompt = build_image_prompt(blueprint)
+    prompt = build_image_prompt(blueprint, product=product)
     try:
         client = genai.Client(vertexai=True, project="besque-martech", location="global")
         response = client.models.generate_content(

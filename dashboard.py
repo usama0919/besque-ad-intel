@@ -98,7 +98,7 @@ def _run_pipeline_bg(n, competitor_id=None):
 
 
 @app.post("/api/run")
-def api_run(n: int = 2, competitor_id: int = None):
+def api_run(n: int = 2, competitor_id: int = None, product_id: int = None):
     """Trigger the pipeline as a Cloud Run Job (runs to completion, isolated)."""
     from google.cloud import run_v2
     project = os.getenv("GCP_PROJECT", "besque-martech")
@@ -111,6 +111,7 @@ def api_run(n: int = 2, competitor_id: int = None):
                 env=[
                     run_v2.EnvVar(name="RUN_COMPETITOR_ID", value=str(competitor_id) if competitor_id is not None else ""),
                     run_v2.EnvVar(name="RUN_MAX_PER_COMPETITOR", value=str(n)),
+                    run_v2.EnvVar(name="RUN_PRODUCT_ID", value=str(product_id) if product_id is not None else ""),
                 ]
             )
         ]
@@ -155,6 +156,35 @@ def api_run_status():
         return JSONResponse({"running": running, "last_summary": summary})
     except Exception as e:
         return JSONResponse({"running": False, "last_summary": {"error": str(e)}})
+
+@app.get("/api/products")
+def api_products():
+    dedupe.init_products()
+    return JSONResponse(dedupe.get_products())
+
+
+@app.post("/api/products")
+async def api_add_product(request: Request):
+    body = await request.json()
+    name = (body.get("name") or "").strip()
+    if not name:
+        return JSONResponse({"ok": False, "error": "name required"}, status_code=400)
+    new_id = dedupe.add_product(name, body.get("description", ""), body.get("ingredients", ""), body.get("hero_claim", ""))
+    return JSONResponse({"ok": True, "id": new_id})
+
+
+@app.post("/api/products/{product_id}")
+async def api_update_product(product_id: int, request: Request):
+    body = await request.json()
+    dedupe.update_product(product_id, body.get("name", ""), body.get("description", ""), body.get("ingredients", ""), body.get("hero_claim", ""))
+    return JSONResponse({"ok": True, "id": product_id})
+
+
+@app.post("/api/products/{product_id}/delete")
+def api_delete_product(product_id: int):
+    dedupe.delete_product(product_id)
+    return JSONResponse({"ok": True, "id": product_id})
+
 
 @app.get("/api/competitors")
 def api_competitors():

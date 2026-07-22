@@ -96,7 +96,15 @@
     <div id="cards"><div class="empty">Loading…</div></div>
   </div>
   <div>
-    <h2>Competitors</h2>
+    <h2>Products</h2>
+      <div class="comp-panel">
+        <div class="comp-add-row">
+          <input id="newProdName" placeholder="Product name (e.g. Magic Body Oil)">
+          <button class="run" onclick="addProductRow()">Add</button>
+        </div>
+        <div id="products"><div class="empty">Loading...</div></div>
+      </div>
+      <h2>Competitors</h2>
     <div class="comp-panel">
       <div class="comp-add-row">
         <input id="newCompName" placeholder="Competitor name (e.g. CeraVe)">
@@ -182,7 +190,62 @@ async function decide(ad,dec){
 let selectedCompetitorId = null;
 let selectedCompetitorName = null;
 
-async function loadCompetitors(){
+let selectedProductId = null;
+  let selectedProductName = null;
+
+  async function loadProducts(){
+    const r = await fetch('/api/products'); const data = await r.json();
+    const el = document.getElementById('products');
+    if(selectedProductId !== null && !data.some(p=>p.id===selectedProductId)){
+      selectedProductId = null; selectedProductName = null;
+    }
+    if(!data.length){ el.innerHTML='<div class="empty">No products yet</div>'; return; }
+    el.innerHTML = data.map(p=>`
+      <div class="comp-row${p.id===selectedProductId?' selected':''}" data-id="${p.id}">
+        <div class="comp-view">
+          <span class="comp-name" onclick="selectProduct(${p.id},'${esc(p.name).replace(/'/g,"\\'")}')">${esc(p.name)}</span>
+          <div class="comp-actions">
+            <button class="mini" onclick="editProduct(${p.id})">Edit</button>
+            <button class="mini mini-r" onclick="removeProduct(${p.id})">Remove</button>
+          </div>
+        </div>
+        <div class="prod-detail" style="font-size:12px;color:#777;margin-top:4px;">${esc(p.description||'').slice(0,140)}</div>
+      </div>`).join('');
+  }
+
+  function selectProduct(id, name){
+    if(selectedProductId === id){ selectedProductId = null; selectedProductName = null; }
+    else { selectedProductId = id; selectedProductName = name; }
+    loadProducts();
+  }
+
+  async function addProductRow(){
+    const input = document.getElementById('newProdName');
+    const name = input.value.trim();
+    if(!name) return;
+    input.value = '';
+    await fetch('/api/products', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({name})});
+    loadProducts();
+  }
+
+  async function editProduct(id){
+    const r = await fetch('/api/products'); const data = await r.json();
+    const p = data.find(x=>x.id===id); if(!p) return;
+    const name = prompt('Product name:', p.name); if(name===null) return;
+    const description = prompt('Description:', p.description||''); if(description===null) return;
+    const ingredients = prompt('Ingredients (with benefits):', p.ingredients||''); if(ingredients===null) return;
+    const hero = prompt('Hero claim:', p.hero_claim||''); if(hero===null) return;
+    await fetch('/api/products/'+id, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({name, description, ingredients, hero_claim: hero})});
+    loadProducts();
+  }
+
+  async function removeProduct(id){
+    if(!confirm('Remove this product?')) return;
+    await fetch('/api/products/'+id+'/delete', {method:'POST'});
+    loadProducts();
+  }
+
+  async function loadCompetitors(){
   const r = await fetch('/api/competitors'); const data = await r.json();
   const el = document.getElementById('competitors');
   if(selectedCompetitorId !== null && !data.some(c=>c.id===selectedCompetitorId)){
@@ -254,7 +317,7 @@ async function runPipeline(){
   const btn=document.getElementById('runBtn'), stopBtn=document.getElementById('stopBtn'), st=document.getElementById('status');
   btn.disabled=true; btn.dataset.running='1'; stopBtn.disabled=false;
   st.textContent='Running '+selectedCompetitorName+' — scraping, analysing, generating…';
-  await fetch('/api/run?n=2&competitor_id='+selectedCompetitorId,{method:'POST'});
+  await fetch('/api/run?n=2&competitor_id='+selectedCompetitorId+(selectedProductId?('&product_id='+selectedProductId):''),{method:'POST'});
   const poll=setInterval(async()=>{
     const r=await fetch('/api/run/status'); const s=await r.json();
     if(!s.running){ clearInterval(poll); delete btn.dataset.running; stopBtn.disabled=true;
@@ -271,7 +334,7 @@ async function stopPipeline(){
 
 function tick(){document.getElementById('clock').textContent=new Date().toLocaleString();}
 setInterval(tick,1000); tick();
-loadCards(); loadLog(); loadCompetitors();
+loadCards(); loadLog(); loadCompetitors(); loadProducts();
 function refreshAll(){ loadCards(); loadLog(); }
 setInterval(refreshAll, 3000);
 </script>

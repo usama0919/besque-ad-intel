@@ -11,7 +11,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("pipeline")
 
 
-def process_ad(ad):
+def process_ad(ad, product=None):
     """Run one ad through the full pipeline. Returns processed/skipped/failed."""
     ad_id = ad.get("ad_id")
     if not ad_id:
@@ -36,7 +36,7 @@ def process_ad(ad):
             log.warning("Ad %s failed compliance check: %s", ad_id, issues)
             return "failed"
         try:
-            draft_image = generate_image_prompt.generate_image(blueprint, ad_id)
+            draft_image = generate_image_prompt.generate_image(blueprint, ad_id, product=product)
         except Exception as e:
             log.warning("Image generation slow/failed for %s, continuing without draft image: %s", ad_id, e)
             draft_image = None
@@ -70,7 +70,7 @@ def process_ad(ad):
         return "failed"
 
 
-def run_once(max_per_competitor=5, competitor_id=None, should_stop=None):
+def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product_id=None):
     """One scheduled run across the watchlist, or a single competitor if
     competitor_id is given. should_stop is an optional zero-arg callable
     checked between ads/competitors to cooperatively halt the run early."""
@@ -80,6 +80,8 @@ def run_once(max_per_competitor=5, competitor_id=None, should_stop=None):
     dedupe.init_decisions()
     dedupe.init_artifacts()
     dedupe.init_competitors()
+    dedupe.init_products()
+    product = dedupe.get_product(product_id) if product_id else None
     should_stop = should_stop or (lambda: False)
 
     competitors = dedupe.get_competitors()
@@ -102,7 +104,7 @@ def run_once(max_per_competitor=5, competitor_id=None, should_stop=None):
             if should_stop():
                 log.info("Stop requested, halting run.")
                 break
-            summary[process_ad(ad)] += 1
+            summary[process_ad(ad, product=product)] += 1
 
     log.info("Run complete: %s", summary)
     return summary
