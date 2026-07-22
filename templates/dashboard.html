@@ -67,6 +67,14 @@
   button.stop:disabled { background:#e5c6c2; cursor:not-allowed; }
   #searchBox { padding:10px 14px; border:1px solid #ccc; border-radius:8px; font-size:14px; width:100%; max-width:360px; margin-bottom:14px; }
   #selectedCompName { font-size:12px; color:#888; }
+  .modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.45); z-index:50; }
+  .modal-overlay.open { display:flex; align-items:center; justify-content:center; }
+  .modal { background:#fff; border-radius:14px; width:min(560px, 92vw); max-height:86vh; overflow-y:auto; padding:24px 28px; box-shadow:0 12px 40px rgba(0,0,0,.25); }
+  .modal h3 { margin:0 0 16px; }
+  .modal label { display:block; font-size:12px; font-weight:600; color:#666; margin:12px 0 4px; text-transform:uppercase; letter-spacing:.04em; }
+  .modal input[type=text], .modal textarea { width:100%; padding:9px 12px; border:1px solid #ccc; border-radius:7px; font-size:13px; font-family:inherit; box-sizing:border-box; }
+  .modal textarea { min-height:90px; resize:vertical; }
+  .modal-actions { display:flex; justify-content:flex-end; gap:10px; margin-top:20px; }
 </style>
 </head>
 <body>
@@ -193,8 +201,10 @@ let selectedCompetitorName = null;
 let selectedProductId = null;
   let selectedProductName = null;
 
+  let _productsCache = [];
   async function loadProducts(){
     const r = await fetch('/api/products'); const data = await r.json();
+    _productsCache = data;
     const el = document.getElementById('products');
     if(selectedProductId !== null && !data.some(p=>p.id===selectedProductId)){
       selectedProductId = null; selectedProductName = null;
@@ -209,7 +219,7 @@ let selectedProductId = null;
             <button class="mini mini-r" onclick="removeProduct(${p.id})">Remove</button>
           </div>
         </div>
-        <div class="prod-detail" style="font-size:12px;color:#777;margin-top:4px;">${esc(p.description||'').slice(0,140)}</div>
+        <div class="prod-detail" style="font-size:12px;color:#777;margin-top:4px;cursor:pointer;" onclick="editProduct(${p.id})">${esc(p.description||'').slice(0,140)}</div>
       </div>`).join('');
   }
 
@@ -217,25 +227,49 @@ let selectedProductId = null;
     if(selectedProductId === id){ selectedProductId = null; selectedProductName = null; }
     else { selectedProductId = id; selectedProductName = name; }
     loadProducts();
+    updateSelectionLabel();
   }
 
-  async function addProductRow(){
+  function addProductRow(){
     const input = document.getElementById('newProdName');
     const name = input.value.trim();
-    if(!name) return;
-    input.value = '';
-    await fetch('/api/products', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({name})});
-    loadProducts();
+    openNewProdModal();
+    if(name){ document.getElementById('pmName').value = name; input.value=''; }
   }
 
-  async function editProduct(id){
-    const r = await fetch('/api/products'); const data = await r.json();
-    const p = data.find(x=>x.id===id); if(!p) return;
-    const name = prompt('Product name:', p.name); if(name===null) return;
-    const description = prompt('Description:', p.description||''); if(description===null) return;
-    const ingredients = prompt('Ingredients (with benefits):', p.ingredients||''); if(ingredients===null) return;
-    const hero = prompt('Hero claim:', p.hero_claim||''); if(hero===null) return;
-    await fetch('/api/products/'+id, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({name, description, ingredients, hero_claim: hero})});
+  let prodModalId = null;
+
+  function editProduct(id){
+    const p = _productsCache.find(x=>x.id===id); if(!p) return;
+    prodModalId = id;
+    document.getElementById('prodModalTitle').textContent = 'Edit Product';
+    document.getElementById('pmName').value = p.name || '';
+    document.getElementById('pmDesc').value = p.description || '';
+    document.getElementById('pmIngr').value = p.ingredients || '';
+    document.getElementById('pmHero').value = p.hero_claim || '';
+    document.getElementById('prodModal').classList.add('open');
+  }
+
+  function openNewProdModal(){
+    prodModalId = null;
+    document.getElementById('prodModalTitle').textContent = 'New Product';
+    ['pmName','pmDesc','pmIngr','pmHero'].forEach(i=>document.getElementById(i).value='');
+    document.getElementById('prodModal').classList.add('open');
+  }
+
+  function closeProdModal(){ document.getElementById('prodModal').classList.remove('open'); }
+
+  async function saveProdModal(){
+    const body = JSON.stringify({
+      name: document.getElementById('pmName').value.trim(),
+      description: document.getElementById('pmDesc').value.trim(),
+      ingredients: document.getElementById('pmIngr').value.trim(),
+      hero_claim: document.getElementById('pmHero').value.trim(),
+    });
+    if(!JSON.parse(body).name){ alert('Name is required'); return; }
+    const url = prodModalId ? '/api/products/'+prodModalId : '/api/products';
+    await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body});
+    closeProdModal();
     loadProducts();
   }
 
@@ -245,6 +279,13 @@ let selectedProductId = null;
     loadProducts();
   }
 
+
+  function updateSelectionLabel(){
+    const el = document.getElementById('selectedCompName');
+    let txt = selectedCompetitorName ? ('Selected: ' + selectedCompetitorName) : 'No competitor selected';
+    if(selectedProductName){ txt += '  -  Product: ' + selectedProductName; }
+    el.textContent = txt;
+  }
   async function loadCompetitors(){
   const r = await fetch('/api/competitors'); const data = await r.json();
   const el = document.getElementById('competitors');
@@ -269,6 +310,7 @@ function selectCompetitor(id, name){
   if(selectedCompetitorId === id){ selectedCompetitorId = null; selectedCompetitorName = null; }
   else { selectedCompetitorId = id; selectedCompetitorName = name; }
   loadCompetitors();
+    updateSelectionLabel();
 }
 
 function updateRunButtonState(){
@@ -338,5 +380,22 @@ loadCards(); loadLog(); loadCompetitors(); loadProducts();
 function refreshAll(){ loadCards(); loadLog(); }
 setInterval(refreshAll, 3000);
 </script>
+<div class="modal-overlay" id="prodModal" onclick="if(event.target===this)closeProdModal()">
+  <div class="modal">
+    <h3 id="prodModalTitle">Product</h3>
+    <label>Name</label>
+    <input type="text" id="pmName">
+    <label>Description</label>
+    <textarea id="pmDesc"></textarea>
+    <label>Ingredients (with benefits)</label>
+    <textarea id="pmIngr"></textarea>
+    <label>Hero claim</label>
+    <input type="text" id="pmHero">
+    <div class="modal-actions">
+      <button class="mini" onclick="closeProdModal()">Cancel</button>
+      <button class="run" onclick="saveProdModal()">Save</button>
+    </div>
+  </div>
+</div>
 </body>
 </html>
