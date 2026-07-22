@@ -35,7 +35,7 @@ def get_asset(filename: str):
 
 templates = Jinja2Templates(directory="templates")
 
-_run_status = {"running": False, "last_summary": None, "stop_requested": False}
+_run_status = {"running": False, "last_summary": None, "stop_requested": False, "execution": None}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -117,7 +117,10 @@ def api_run(n: int = 2, competitor_id: int = None):
     )
     try:
         client = run_v2.JobsClient()
-        client.run_job(request=run_v2.RunJobRequest(name=job_path, overrides=overrides))
+        op = client.run_job(request=run_v2.RunJobRequest(name=job_path, overrides=overrides))
+        _run_status["execution"] = op.metadata.name
+        _run_status["running"] = True
+        _run_status["last_summary"] = None
         return JSONResponse({"ok": True, "started": True})
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)})
@@ -131,6 +134,24 @@ def api_run_stop():
 
 @app.get("/api/run/status")
 def api_run_status():
+    exec_name = _run_status.get("execution")
+    if exec_name:
+        try:
+            from google.cloud import run_v2
+            client = run_v2.ExecutionsClient()
+            ex = client.get_execution(name=exec_name)
+            running = (ex.running_count or 0) > 0 or (ex.succeeded_count or 0) + (ex.failed_count or 0) == 0
+            if not running:
+                _run_status["running"] = False
+                _run_status["last_summary"] = {
+                    "succeeded": ex.succeeded_count or 0,
+                    "failed": ex.failed_count or 0,
+                }
+            else:
+                _run_status["running"] = True
+        except Exception as e:
+            _run_status["running"] = False
+            _run_status["last_summary"] = {"error": str(e)}
     return JSONResponse(_run_status)
 
 @app.get("/api/competitors")
