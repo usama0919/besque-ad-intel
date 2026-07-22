@@ -66,10 +66,15 @@ def _load_image_b64_v2(image_path):
     return base64.standard_b64encode(data).decode("utf-8"), media_type
 
 
-def deconstruct_image(image_path, ad_id, source_page, captured_at, destination_url=""):
+def _b64_from_bytes(data):
+    media_type = ("image/png" if data[:8]==b"\x89PNG\r\n\x1a\n" else "image/webp" if data[:4]==b"RIFF" and data[8:12]==b"WEBP" else "image/gif" if data[:4]==b"GIF8" else "image/jpeg")
+    return base64.standard_b64encode(data).decode("utf-8"), media_type
+
+
+def deconstruct_image(image_bytes, ad_id, source_page, captured_at, destination_url=""):
     """Send one ad image to Claude vision and return a validated blueprint dict.
     Makes ONE API call. Raises if the response fails schema validation."""
-    b64, media_type = _load_image_b64_v2(image_path)
+    b64, media_type = _b64_from_bytes(image_bytes)
     prompt = build_prompt(ad_id, source_page, captured_at, destination_url)
 
     client = anthropic.Anthropic(timeout=60.0, max_retries=1)  # reads ANTHROPIC_API_KEY from env

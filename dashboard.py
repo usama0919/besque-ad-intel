@@ -55,8 +55,8 @@ def api_artifacts():
         out.append({
             "ad_id": r["ad_id"],
             "page_name": r.get("page_name", ""),
-            "original_image": "/" + img.replace("\\", "/") if img else "",
-            "draft_image": "/" + draft.replace("\\", "/") if draft else "",
+            "original_image": ("/assets/" + os.path.basename(img.replace("\\", "/"))) if img else "",
+            "draft_image": ("/assets/" + os.path.basename(draft.replace("\\", "/"))) if draft else "",
             "blueprint": r.get("blueprint") or {},
             "copy": r.get("generated_copy") or {},
             "decision": r.get("decision"),

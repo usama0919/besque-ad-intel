@@ -21,9 +21,10 @@ def process_ad(ad):
             log.info("Ad %s already seen, skipping", ad_id)
             return "skipped"
 
+        image_bytes = assets.download_image_bytes(ad["image_url"])
         image_path = assets.download_image(ad["image_url"], ad_id)
         blueprint = deconstruct.deconstruct_image(
-            image_path=image_path,
+            image_bytes=image_bytes,
             ad_id=ad_id,
             source_page=ad.get("page_name", ""),
             captured_at=ad.get("start_date", ""),

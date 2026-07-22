@@ -1,4 +1,4 @@
-﻿"""Asset storage. Pluggable backend: local now, GCS drop-in for production.
+"""Asset storage. Pluggable backend: local now, GCS drop-in for production.
 
 The brief specifies GCS, provisioned at kickoff. Since no GCS project was
 provided for the PoC, LocalStorage is active. Swapping to GCS is a single
@@ -43,10 +43,14 @@ class GCSStorage:
     """
 
     def __init__(self, bucket=None):
-        raise NotImplementedError(
-            "GCSStorage is the production adapter; not provisioned for the PoC. "
-            "See docstring for the wiring."
-        )
+        from google.cloud import storage
+        self._client = storage.Client()
+        self._bucket = self._client.bucket(bucket or os.getenv("GCS_BUCKET", "besque-ad-intel-assets"))
+
+    def save_bytes(self, data: bytes, key: str) -> str:
+        blob = self._bucket.blob(key)
+        blob.upload_from_string(data)
+        return key
 
 
 def get_storage():
@@ -65,6 +69,13 @@ def _backend():
     if _storage is None:
         _storage = get_storage()
     return _storage
+
+
+def download_image_bytes(image_url):
+    """Download an image and return raw bytes (no storage)."""
+    import httpx
+    with httpx.stream("GET", image_url, timeout=30, follow_redirects=True) as r:
+        return r.read()
 
 
 def download_image(image_url, ad_id):
