@@ -313,6 +313,8 @@ let selectedProductId = null;
     document.getElementById('pmDesc').value = p.description || '';
     document.getElementById('pmIngr').value = p.ingredients || '';
     document.getElementById('pmHero').value = p.hero_claim || '';
+    document.getElementById('pmPhoto').value = '';
+    document.getElementById('pmPhotoStatus').textContent = p.image_key ? 'Photo on file: ' + p.image_key : 'No reference photo yet';
     document.getElementById('prodModal').classList.add('open');
   }
 
@@ -334,7 +336,17 @@ let selectedProductId = null;
     });
     if(!JSON.parse(body).name){ alert('Name is required'); return; }
     const url = prodModalId ? '/api/products/'+prodModalId : '/api/products';
-    await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body});
+    const resp = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body});
+    const saved = await resp.json();
+    const pid = prodModalId || saved.id;
+    const photoInput = document.getElementById('pmPhoto');
+    if(pid && photoInput.files && photoInput.files.length){
+      document.getElementById('pmPhotoStatus').textContent = 'Uploading photo...';
+      const bytes = await photoInput.files[0].arrayBuffer();
+      const ur = await fetch('/api/products/'+pid+'/photo', {method:'POST', body: bytes});
+      const ures = await ur.json();
+      if(!ures.ok){ alert('Photo upload failed: ' + (ures.error||'unknown')); }
+    }
     closeProdModal();
     loadProducts();
   }
@@ -489,6 +501,9 @@ setInterval(refreshAll, 3000);
     <textarea id="pmIngr"></textarea>
     <label>Hero claim</label>
     <input type="text" id="pmHero">
+    <label>Reference product photo</label>
+    <div id="pmPhotoStatus" style="font-size:12px;color:#777;margin-bottom:6px;"></div>
+    <input type="file" id="pmPhoto" accept="image/*">
     <div class="modal-actions">
       <button class="mini" onclick="closeProdModal()">Cancel</button>
       <button class="run" onclick="saveProdModal()">Save</button>

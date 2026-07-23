@@ -222,9 +222,9 @@ def init_products():
 
 def get_products():
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT id, name, description, ingredients, hero_claim FROM products ORDER BY id")
+        cur.execute("SELECT id, name, description, ingredients, hero_claim, image_key FROM products ORDER BY id")
         return [
-            {"id": r[0], "name": r[1], "description": r[2], "ingredients": r[3], "hero_claim": r[4]}
+            {"id": r[0], "name": r[1], "description": r[2], "ingredients": r[3], "hero_claim": r[4], "image_key": r[5] or ""}
             for r in cur.fetchall()
         ]
 
@@ -257,11 +257,11 @@ def delete_product(product_id):
 
 def get_product(product_id):
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT id, name, description, ingredients, hero_claim FROM products WHERE id=%s", (product_id,))
+        cur.execute("SELECT id, name, description, ingredients, hero_claim, image_key FROM products WHERE id=%s", (product_id,))
         r = cur.fetchone()
         if r is None:
             return None
-        return {"id": r[0], "name": r[1], "description": r[2], "ingredients": r[3], "hero_claim": r[4]}
+        return {"id": r[0], "name": r[1], "description": r[2], "ingredients": r[3], "hero_claim": r[4], "image_key": r[5] or ""}
 
 
 def update_artifact_copy(ad_id, generated_copy):

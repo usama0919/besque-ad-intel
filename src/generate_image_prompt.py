@@ -50,15 +50,23 @@ BRAND_RULES = (
 )
 
 
-def generate_image(blueprint, ad_id, product=None):
+def generate_image(blueprint, ad_id, product=None, reference_bytes=None):
     """Single-pass image generation from the blueprint. One image, no iteration.
     Saves to assets/<ad_id>_draft.png and returns the path. Returns None on failure."""
     prompt = build_image_prompt(blueprint, product=product)
     try:
         client = genai.Client(vertexai=True, project="besque-martech", location="global")
+        if reference_bytes:
+            from google.genai import types as genai_types
+            contents = [
+                genai_types.Part.from_bytes(data=reference_bytes, mime_type="image/png"),
+                "REFERENCE PRODUCT PHOTO ABOVE: this is the EXACT Besque product. Reproduce this bottle, its label, and its design faithfully in the ad - do not redesign, relabel, or alter it. " + prompt,
+            ]
+        else:
+            contents = prompt
         response = client.models.generate_content(
             model="gemini-3.1-flash-image",
-            contents=prompt,
+            contents=contents,
         )
         image_bytes = None
         for part in response.candidates[0].content.parts:

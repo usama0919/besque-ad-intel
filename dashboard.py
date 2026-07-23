@@ -250,6 +250,30 @@ async def api_update_product(product_id: int, request: Request):
     return JSONResponse({"ok": True, "id": product_id})
 
 
+@app.post("/api/products/{product_id}/photo")
+async def api_product_photo(product_id: int, request: Request):
+    """Upload a reference product photo. Body: raw image bytes. Stores to bucket."""
+    data = await request.body()
+    if not data or len(data) < 100:
+        return JSONResponse({"ok": False, "error": "no image data"}, status_code=400)
+    if len(data) > 10 * 1024 * 1024:
+        return JSONResponse({"ok": False, "error": "image too large (max 10MB)"}, status_code=400)
+    key = f"product_{product_id}_ref.png"
+    try:
+        from google.cloud import storage
+        bucket = storage.Client().bucket(os.getenv("ASSET_BUCKET", "besque-ad-intel-assets"))
+        bucket.blob(key).upload_from_string(data, content_type="image/png")
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": f"upload failed: {e}"})
+    p = dedupe.get_product(product_id)
+    if p is None:
+        return JSONResponse({"ok": False, "error": "product not found"}, status_code=404)
+    with dedupe.get_conn() as conn, conn.cursor() as cur:
+        cur.execute("UPDATE products SET image_key=%s WHERE id=%s", (key, product_id))
+        conn.commit()
+    return JSONResponse({"ok": True, "image_key": key})
+
+
 @app.post("/api/products/{product_id}/delete")
 def api_delete_product(product_id: int):
     dedupe.delete_product(product_id)

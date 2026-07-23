@@ -11,7 +11,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("pipeline")
 
 
-def process_ad(ad, product=None):
+def process_ad(ad, product=None, reference_bytes=None):
     """Run one ad through the full pipeline. Returns processed/skipped/failed."""
     ad_id = ad.get("ad_id")
     if not ad_id:
@@ -36,7 +36,7 @@ def process_ad(ad, product=None):
             log.warning("Ad %s failed compliance check: %s", ad_id, issues)
             return "failed"
         try:
-            draft_image = generate_image_prompt.generate_image(blueprint, ad_id, product=product)
+            draft_image = generate_image_prompt.generate_image(blueprint, ad_id, product=product, reference_bytes=reference_bytes)
         except Exception as e:
             log.warning("Image generation slow/failed for %s, continuing without draft image: %s", ad_id, e)
             draft_image = None
@@ -82,6 +82,16 @@ def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product
     dedupe.init_competitors()
     dedupe.init_products()
     product = dedupe.get_product(product_id) if product_id else None
+    reference_bytes = None
+    if product and product.get("image_key"):
+        try:
+            from google.cloud import storage as _storage
+            import os as _os
+            _blob = _storage.Client().bucket(_os.getenv("ASSET_BUCKET", "besque-ad-intel-assets")).blob(product["image_key"])
+            if _blob.exists():
+                reference_bytes = _blob.download_as_bytes()
+        except Exception as _e:
+            print(f"Reference photo fetch failed (non-fatal): {_e}")
     should_stop = should_stop or (lambda: False)
 
     competitors = dedupe.get_competitors()
@@ -104,7 +114,7 @@ def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product
             if should_stop():
                 log.info("Stop requested, halting run.")
                 break
-            summary[process_ad(ad, product=product)] += 1
+            summary[process_ad(ad, product=product, reference_bytes=reference_bytes)] += 1
 
     log.info("Run complete: %s", summary)
     return summary
