@@ -133,11 +133,18 @@ def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product
         except Exception as e:
             log.error("Scrape failed for %s: %s (clean skip)", name, e)
             continue
+        processed_this_comp = 0
         for ad in ads:
             if should_stop():
                 log.info("Stop requested, halting run.")
                 break
-            summary[process_ad(ad, product=product, reference_bytes=reference_bytes)] += 1
+            if processed_this_comp >= max_per_competitor:
+                log.info("Reached cap of %s new ads for %s, stopping.", max_per_competitor, name)
+                break
+            result = process_ad(ad, product=product, reference_bytes=reference_bytes)
+            summary[result] += 1
+            if result == "processed":
+                processed_this_comp += 1
 
     log.info("Run complete: %s", summary)
     return summary
