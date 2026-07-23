@@ -261,7 +261,7 @@ async function loadLog(){
   if(!data.length){ el.innerHTML='<div class="empty">No decisions yet</div>'; return; }
   el.innerHTML = data.map(d=>`<div class="log-item">
     <span class="log-dec ${d.decision}">${d.decision.toUpperCase()}</span>
-    <span style="font-size:11px;color:#aaa;">${d.ad_id}</span>
+    <span style="font-size:11px;color:#aaa;">${d.ad_id}${d.reason?(' \u2014 '+d.reason):''}</span>
     <span class="log-at">${d.at}</span></div>`).join('');
 }
 

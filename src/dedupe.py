@@ -74,9 +74,9 @@ def get_decisions(ad_id: str = None):
     """Return decisions, optionally filtered by ad_id. List of (ad_id, decision, decided_at)."""
     with get_conn() as conn, conn.cursor() as cur:
         if ad_id:
-            cur.execute("SELECT ad_id, decision, decided_at FROM review_decisions WHERE ad_id = %s ORDER BY decided_at", (ad_id,))
+            cur.execute("SELECT ad_id, decision, decided_at, reason FROM review_decisions WHERE ad_id = %s ORDER BY decided_at", (ad_id,))
         else:
-            cur.execute("SELECT ad_id, decision, decided_at FROM review_decisions ORDER BY decided_at")
+            cur.execute("SELECT ad_id, decision, decided_at, reason FROM review_decisions ORDER BY decided_at")
         return cur.fetchall()
 
 

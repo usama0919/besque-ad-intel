@@ -73,8 +73,8 @@ def api_decisions():
     dedupe.init_decisions()
     rows = dedupe.get_decisions()[-20:][::-1]
     return JSONResponse([
-        {"ad_id": a, "decision": d, "at": t.strftime("%Y-%m-%d %H:%M")}
-        for a, d, t in rows
+        {"ad_id": r[0], "decision": r[1], "at": r[2].strftime("%Y-%m-%d %H:%M"), "reason": (r[3] if len(r) > 3 else "") or ""}
+        for r in rows
     ])
 
 
