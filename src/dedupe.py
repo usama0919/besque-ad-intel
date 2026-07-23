@@ -102,7 +102,7 @@ def init_artifacts():
         conn.commit()
 
 
-def save_artifact(ad_id, page_name, image_path, blueprint, generated_copy, draft_image, metadata):
+def save_artifact(ad_id, page_name, image_path, blueprint, generated_copy, draft_image, metadata, image_prompt="", copy_prompt="", model_info=""):
     """Persist all artifacts for one ad with a timestamp. Skips if ad_id already stored."""
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("SELECT 1 FROM artifacts WHERE ad_id = %s", (ad_id,))
@@ -110,11 +110,11 @@ def save_artifact(ad_id, page_name, image_path, blueprint, generated_copy, draft
             return
         cur.execute(
             """INSERT INTO artifacts
-               (ad_id, page_name, image_path, blueprint, generated_copy, draft_image, metadata)
-               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+               (ad_id, page_name, image_path, blueprint, generated_copy, draft_image, metadata, image_prompt, copy_prompt, model_info)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (ad_id, page_name, image_path,
              _json.dumps(blueprint), _json.dumps(generated_copy),
-             draft_image, _json.dumps(metadata)),
+             draft_image, _json.dumps(metadata), image_prompt, copy_prompt, model_info),
         )
         conn.commit()
 
@@ -188,7 +188,7 @@ def get_artifacts_full(limit=50):
         cur.execute("""
             SELECT a.ad_id, a.page_name, a.image_path, a.blueprint,
                    a.generated_copy, a.draft_image, a.metadata, a.created_at,
-                   d.decision
+                   d.decision, a.image_prompt, a.copy_prompt, a.model_info
             FROM artifacts a
             LEFT JOIN LATERAL (
                 SELECT decision FROM review_decisions r

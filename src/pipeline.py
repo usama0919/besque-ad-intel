@@ -41,6 +41,8 @@ def process_ad(ad, product=None, reference_bytes=None):
             log.warning("Image generation slow/failed for %s, continuing without draft image: %s", ad_id, e)
             draft_image = None
 
+        img_prompt = getattr(generate_image_prompt.generate_image, "last_prompt", "")
+        cp_prompt = getattr(generate_copy.generate_copy_live, "last_prompt", "")
         dedupe.save_artifact(
             ad_id=ad_id,
             page_name=ad.get("page_name", ""),
@@ -48,6 +50,9 @@ def process_ad(ad, product=None, reference_bytes=None):
             blueprint=blueprint,
             generated_copy=copy,
             draft_image=draft_image,
+            image_prompt=img_prompt,
+            copy_prompt=cp_prompt,
+            model_info="image: gemini-3.1-flash-image (vertex) | copy: claude-sonnet-4-6",
             metadata={
                 "start_date": ad.get("start_date", ""),
                 "cta": ad.get("cta", ""),

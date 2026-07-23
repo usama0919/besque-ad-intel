@@ -170,6 +170,11 @@ function openEditModal(adId){
   editModalAdId = adId;
   document.getElementById('aeInst').value = '';
   document.getElementById('aeStatus').textContent = '';
+  const a = (window._cardsCache||[]).find(x=>x.ad_id===adId) || {};
+  document.getElementById('aeModelInfo').textContent = a.model_info || 'Prompts recorded for ads generated from now on.';
+  document.getElementById('aeImgPrompt').value = a.image_prompt || '(not recorded for this ad)';
+  document.getElementById('aeCopyPrompt').value = a.copy_prompt || '(not recorded for this ad)';
+  document.getElementById('aePrompts').style.display = 'none';
   document.getElementById('adEditModal').classList.add('open');
 }
 
@@ -532,6 +537,18 @@ setInterval(refreshAll, 3000);
       <option value="4:5">Portrait 4:5</option>
       <option value="1.91:1">Landscape 1.91:1</option>
     </select>
+    <div style="margin-top:14px;">
+      <button class="mini" onclick="document.getElementById('aePrompts').style.display = document.getElementById('aePrompts').style.display==='none'?'block':'none'">View prompts used</button>
+      <div id="aePrompts" style="display:none;margin-top:10px;">
+        <div style="font-size:11px;color:#999;" id="aeModelInfo"></div>
+        <label style="margin-top:8px;">Image prompt (nano banana)</label>
+        <textarea id="aeImgPrompt" readonly style="min-height:70px;font-size:11px;background:#faf8f4;"></textarea>
+        <button class="mini" onclick="navigator.clipboard.writeText(document.getElementById('aeImgPrompt').value)">Copy</button>
+        <label style="margin-top:8px;">Copy prompt (Claude)</label>
+        <textarea id="aeCopyPrompt" readonly style="min-height:70px;font-size:11px;background:#faf8f4;"></textarea>
+        <button class="mini" onclick="navigator.clipboard.writeText(document.getElementById('aeCopyPrompt').value)">Copy</button>
+      </div>
+    </div>
     <div id="aeStatus" style="margin-top:12px;font-size:13px;color:#777;"></div>
     <div class="modal-actions">
       <button class="mini" onclick="closeEditModal()">Cancel</button>

@@ -59,6 +59,9 @@ def api_artifacts():
             "draft_image": ("/assets/" + os.path.basename(draft.replace("\\", "/"))) if draft else "",
             "blueprint": r.get("blueprint") or {},
             "copy": r.get("generated_copy") or {},
+            "image_prompt": r.get("image_prompt") or "",
+            "copy_prompt": r.get("copy_prompt") or "",
+            "model_info": r.get("model_info") or "",
             "decision": r.get("decision"),
             "created_at": r["created_at"].strftime("%Y-%m-%d %H:%M") if r.get("created_at") else "",
         })

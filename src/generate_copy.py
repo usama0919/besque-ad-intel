@@ -72,6 +72,7 @@ def generate_copy_live(blueprint, brand_voice="", approved_claims="", product=No
     """Send a blueprint to Claude and return validated Besque-adapted copy.
     Makes ONE API call. Raises if the response is missing required fields."""
     prompt = build_copy_prompt(blueprint, brand_voice, approved_claims, product=product)
+    generate_copy_live.last_prompt = prompt
 
     client = anthropic.Anthropic(timeout=60.0, max_retries=1)  # reads ANTHROPIC_API_KEY from env
     message = client.messages.create(

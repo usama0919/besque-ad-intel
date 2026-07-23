@@ -87,6 +87,7 @@ def generate_image(blueprint, ad_id, product=None, reference_bytes=None):
             blob.upload_from_string(image_bytes, content_type="image/png")
         except Exception as e:
             print(f"Bucket upload failed (non-fatal): {e}")
+        generate_image.last_prompt = prompt
         return str(dest)
     except Exception as e:
         import traceback
