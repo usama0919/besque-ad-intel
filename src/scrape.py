@@ -49,4 +49,7 @@ def scrape_ads(search_term, max_results=50, image_only=True):
         mapped = _map_ad(raw)
         if mapped["ad_id"] and mapped["image_url"] and _page_matches(mapped.get("page_name", ""), search_term):
             ads.append(mapped)
+        else:
+            reason = "no ad_id" if not mapped["ad_id"] else ("no image (video ad?)" if not mapped["image_url"] else f"page mismatch: got page_name={mapped.get('page_name','')!r} vs search={search_term!r}")
+            print(f"[scrape] rejected ad {mapped.get('ad_id','?')}: {reason}")
     return ads
