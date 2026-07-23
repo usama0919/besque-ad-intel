@@ -30,7 +30,7 @@ def _page_matches(page_name, search_term):
     return bool(a) and bool(b) and (a in b or b in a)
 
 
-def scrape_ads(search_term, max_results=50, image_only=True):
+def scrape_ads(search_term, max_results=50, image_only=True, page_id=None):
     """Run the Apify actor. Returns mapped ad dicts, filtered to image ads
     that have both an ad_id and a downloadable image URL."""
     token = os.getenv("APIFY_TOKEN")
@@ -39,7 +39,14 @@ def scrape_ads(search_term, max_results=50, image_only=True):
 
     client = ApifyClient(token)
     fetch_cap = int(os.getenv("SCRAPE_FETCH_CAP", "15"))
-    run_input = {"searchTerms": [search_term], "maxResults": fetch_cap, "maxAds": fetch_cap}
+    use_page = bool(page_id) and str(page_id).strip() != "" and str(page_id).strip() != str(search_term).strip()
+    if use_page:
+        pid = str(page_id).strip()
+        if "facebook.com" not in pid:
+            pid = f"https://www.facebook.com/ads/library/?active_status=active&ad_type=all&country=ALL&view_all_page_id={pid}"
+        run_input = {"urls": [pid], "maxAds": fetch_cap, "mediaType": "image"}
+    else:
+        run_input = {"searchTerms": [search_term], "maxResults": fetch_cap, "maxAds": fetch_cap, "mediaType": "image"}
     run = client.actor(APIFY_ACTOR).call(run_input=run_input)
 
     ads = []
@@ -47,7 +54,7 @@ def scrape_ads(search_term, max_results=50, image_only=True):
         if image_only and raw.get("media_type") != "IMAGE":
             continue
         mapped = _map_ad(raw)
-        if mapped["ad_id"] and mapped["image_url"] and _page_matches(mapped.get("page_name", ""), search_term):
+        if mapped["ad_id"] and mapped["image_url"] and (use_page or _page_matches(mapped.get("page_name", ""), search_term)):
             ads.append(mapped)
         else:
             reason = "no ad_id" if not mapped["ad_id"] else ("no image (video ad?)" if not mapped["image_url"] else f"page mismatch: got page_name={mapped.get('page_name','')!r} vs search={search_term!r}")

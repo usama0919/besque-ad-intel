@@ -105,7 +105,7 @@ def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product
             break
         name = competitor.get("name", "?")
         try:
-            ads = with_retry(lambda: scrape.scrape_ads(name, max_results=max_per_competitor),
+            ads = with_retry(lambda: scrape.scrape_ads(name, max_results=max_per_competitor, page_id=competitor.get("page_id")),
                              attempts=2, delay=2)
         except Exception as e:
             log.error("Scrape failed for %s: %s (clean skip)", name, e)

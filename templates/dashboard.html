@@ -366,6 +366,7 @@ let selectedProductId = null;
   }
   async function loadCompetitors(){
   const r = await fetch('/api/competitors'); const data = await r.json();
+  window._compsCache = data;
   const el = document.getElementById('competitors');
   if(selectedCompetitorId !== null && !data.some(c=>c.id===selectedCompetitorId)){
     selectedCompetitorId = null; selectedCompetitorName = null;
@@ -410,8 +411,11 @@ async function addCompetitorRow(){
 function editCompetitor(id){
   const row = document.querySelector('.comp-row[data-id="'+id+'"]');
   const current = row.querySelector('.comp-name').textContent;
-  row.innerHTML = `<div class="comp-edit">
-      <input value="${esc(current)}" id="edit-${id}">
+  const comp = (window._compsCache||[]).find(x=>x.id===id) || {};
+  const pid = (comp.page_id && comp.page_id !== comp.name) ? comp.page_id : '';
+  row.innerHTML = `<div class="comp-edit" style="flex-direction:column;align-items:stretch;gap:6px;">
+      <input value="${esc(current)}" id="edit-${id}" placeholder="Name">
+      <input value="${esc(pid)}" id="editpid-${id}" placeholder="Meta page ID or Ad Library URL (optional, exact match)">
       <div class="comp-actions">
         <button class="mini" onclick="saveCompetitor(${id})">Save</button>
         <button class="mini" onclick="loadCompetitors()">Cancel</button>
@@ -422,7 +426,8 @@ function editCompetitor(id){
 async function saveCompetitor(id){
   const val = document.getElementById('edit-'+id).value.trim();
   if(!val){ return; }
-  await fetch('/api/competitors/'+id+'?name='+encodeURIComponent(val), {method:'PUT'});
+  const pidv = (document.getElementById('editpid-'+id)||{value:''}).value.trim();
+  await fetch('/api/competitors/'+id+'?name='+encodeURIComponent(val)+(pidv?('&page_id='+encodeURIComponent(pidv)):''), {method:'PUT'});
   loadCompetitors();
 }
 

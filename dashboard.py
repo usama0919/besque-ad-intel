@@ -296,8 +296,8 @@ def api_add_competitor(name: str):
 
 
 @app.put("/api/competitors/{competitor_id}")
-def api_update_competitor(competitor_id: int, name: str):
-    dedupe.update_competitor(competitor_id, name, name)
+def api_update_competitor(competitor_id: int, name: str, page_id: str = None):
+    dedupe.update_competitor(competitor_id, name, page_id if page_id else name)
     return JSONResponse({"ok": True, "id": competitor_id, "name": name})
 
 
