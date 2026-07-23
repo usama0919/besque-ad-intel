@@ -159,8 +159,8 @@ def add_competitor(name: str, page_id: str) -> int:
 def get_competitors():
     """Return all competitors, oldest first. List of dicts: id, name, page_id, created_at."""
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT id, name, page_id, created_at FROM competitors ORDER BY id")
-        cols = ["id", "name", "page_id", "created_at"]
+        cur.execute("SELECT id, name, page_id, created_at, suggested_name FROM competitors ORDER BY id")
+        cols = ["id", "name", "page_id", "created_at", "suggested_name"]
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
@@ -281,3 +281,9 @@ def get_artifact(ad_id):
         bp = r[2] if isinstance(r[2], dict) else _j.loads(r[2] or "{}")
         cp = r[3] if isinstance(r[3], dict) else _j.loads(r[3] or "{}")
         return {"ad_id": r[0], "page_name": r[1], "blueprint": bp, "generated_copy": cp, "draft_image": r[4]}
+
+
+def set_suggested_name(competitor_id, suggested):
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("UPDATE competitors SET suggested_name = %s WHERE id = %s", (suggested or "", competitor_id))
+        conn.commit()

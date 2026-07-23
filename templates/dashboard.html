@@ -372,6 +372,12 @@ let selectedProductId = null;
   async function loadCompetitors(){
   const r = await fetch('/api/competitors'); const data = await r.json();
   window._compsCache = data;
+  const sugg = data.find(x => x.suggested_name && x.suggested_name.trim());
+  if (sugg && !window._askedSugg) {
+    window._askedSugg = true;
+    const yes = confirm('Meta\'s actual page for "' + sugg.name + '" is named "' + sugg.suggested_name + '". Update your list to the correct name?');
+    fetch('/api/competitors/' + sugg.id + '/accept_name?accept=' + (yes ? 'true' : 'false'), {method: 'POST'}).then(() => loadCompetitors());
+  }
   const el = document.getElementById('competitors');
   if(selectedCompetitorId !== null && !data.some(c=>c.id===selectedCompetitorId)){
     selectedCompetitorId = null; selectedCompetitorName = null;

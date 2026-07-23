@@ -230,6 +230,18 @@ async def api_edit_copy(ad_id: str, request: Request):
         return JSONResponse({"ok": False, "error": str(e)})
 
 
+@app.post("/api/competitors/{competitor_id}/accept_name")
+def api_accept_name(competitor_id: int, accept: bool = True):
+    comps = dedupe.get_competitors()
+    comp = next((x for x in comps if x["id"] == competitor_id), None)
+    if comp is None:
+        return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
+    if accept and comp.get("suggested_name"):
+        dedupe.update_competitor(competitor_id, comp["suggested_name"], comp.get("page_id") or comp["suggested_name"])
+    dedupe.set_suggested_name(competitor_id, "")
+    return JSONResponse({"ok": True})
+
+
 @app.get("/api/products")
 def api_products():
     dedupe.init_products()

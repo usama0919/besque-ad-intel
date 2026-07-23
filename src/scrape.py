@@ -25,10 +25,21 @@ def _map_ad(raw):
 
 
 def _page_matches(page_name, search_term):
-    """True if the ad's page matches the competitor searched (case-insensitive)."""
+    """True if the ad's page matches the competitor searched.
+    Contains-match OR fuzzy similarity (catches near-miss names like
+    '40 Plus & Fabulous' vs 'Over 40 & Fabulous')."""
+    from difflib import SequenceMatcher
     a = (page_name or "").strip().lower()
     b = (search_term or "").strip().lower()
-    return bool(a) and bool(b) and (a in b or b in a)
+    if not a or not b:
+        return False
+    if a in b or b in a:
+        return True
+    if SequenceMatcher(None, a, b).ratio() >= 0.65:
+        return True
+    wa, wb = set(a.replace("&", " ").split()), set(b.replace("&", " ").split())
+    overlap = len(wa & wb) / max(1, min(len(wa), len(wb)))
+    return overlap >= 0.6
 
 
 def scrape_ads(search_term, max_results=50, image_only=True, page_id=None):

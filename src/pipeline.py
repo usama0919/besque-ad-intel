@@ -112,6 +112,14 @@ def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product
         try:
             ads = with_retry(lambda: scrape.scrape_ads(name, max_results=max_per_competitor, page_id=competitor.get("page_id")),
                              attempts=2, delay=2)
+            # suggest the real page name if it differs from our list
+            try:
+                if ads:
+                    real = (ads[0].get("page_name") or "").strip()
+                    if real and real.lower() != str(name).strip().lower():
+                        dedupe.set_suggested_name(competitor["id"], real)
+            except Exception as _e:
+                log.warning("name suggestion failed (non-fatal): %s", _e)
             # auto-capture: lock the exact page id from the first matched ad
             try:
                 current_pid = str(competitor.get("page_id") or "").strip()
