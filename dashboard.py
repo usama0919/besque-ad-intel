@@ -242,6 +242,40 @@ def api_accept_name(competitor_id: int, accept: bool = True):
     return JSONResponse({"ok": True})
 
 
+@app.get("/api/page_lookup")
+def api_page_lookup(q: str = ""):
+    """Read-only: group existing artifacts by page_name into Meta-style cards.
+    q filters by name (case-insensitive substring). Empty q returns all pages."""
+    dedupe.init_artifacts()
+    rows = dedupe.get_artifacts_full(limit=500)
+    ql = (q or "").strip().lower()
+    pages = {}
+    for r in rows:
+        pn = (r.get("page_name") or "").strip()
+        if not pn:
+            continue
+        if ql and ql not in pn.lower():
+            continue
+        p = pages.get(pn)
+        img = r.get("image_path") or ""
+        preview = ("/assets/" + os.path.basename(img.replace("\\", "/"))) if img else ""
+        if p is None:
+            pages[pn] = {"page_name": pn, "ad_count": 1,
+                         "latest": r.get("created_at"), "preview": preview}
+        else:
+            p["ad_count"] += 1
+            if r.get("created_at") and (not p["latest"] or r["created_at"] > p["latest"]):
+                p["latest"] = r["created_at"]
+            if not p["preview"] and preview:
+                p["preview"] = preview
+    out = []
+    for p in pages.values():
+        out.append({"page_name": p["page_name"], "ad_count": p["ad_count"],
+                    "latest": p["latest"].strftime("%d %b %Y") if p["latest"] else "",
+                    "preview": p["preview"]})
+    out.sort(key=lambda x: x["ad_count"], reverse=True)
+    return JSONResponse(out)
+
 @app.get("/api/products")
 def api_products():
     dedupe.init_products()

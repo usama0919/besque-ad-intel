@@ -84,6 +84,19 @@
   .layout > div:last-child { position: sticky; top: 24px; align-self: start; }
   #competitors { max-height: 320px; overflow-y: auto; }
   .log { position: static; max-height: 380px; overflow-y: auto; padding-top: 8px; }
+  /* Discover Pages cards */
+  .discover-search { width:100%; padding:10px 14px; border:1px solid #ccc; border-radius:8px; font-size:14px; margin-bottom:12px; box-sizing:border-box; }
+  .pg-card { display:flex; gap:12px; padding:12px; border:1px solid #e5e0d8; border-radius:10px; margin-bottom:10px; background:#fff; align-items:center; }
+  .pg-card img { width:52px; height:52px; border-radius:8px; object-fit:cover; background:#f0ece4; flex-shrink:0; }
+  .pg-info { flex:1; min-width:0; }
+  .pg-name { font-weight:600; font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .pg-meta { font-size:11px; color:#888; margin-top:2px; }
+  .pg-status { display:inline-block; font-size:10px; font-weight:600; padding:2px 8px; border-radius:20px; margin-bottom:4px; }
+  .pg-status.found { background:#f0ece4; color:#999; }
+  .pg-status.tracked { background:#e3f5e9; color:#1a7f42; }
+  .pg-track { background:#1a1a1a; color:#fff; border:none; padding:7px 12px; border-radius:7px; font-size:12px; font-weight:600; cursor:pointer; flex-shrink:0; }
+  .pg-track:hover { background:#333; }
+  .pg-track:disabled { background:#e3f5e9; color:#1a7f42; cursor:default; }
 </style>
 </head>
 <body>
@@ -119,6 +132,11 @@
     <div id="cards"><div class="empty">Loading…</div></div>
   </div>
   <div>
+    <h2>Discover Pages</h2>
+    <div class="comp-panel">
+      <input class="discover-search" id="discoverSearch" placeholder="Search a brand name or paste a page ID…" oninput="discoverDebounced()">
+      <div id="discoverResults"><div class="empty">Type to search tracked pages</div></div>
+    </div>
     <h2>Products</h2>
       <div class="comp-panel">
         <div class="comp-add-row">
@@ -387,7 +405,35 @@ let selectedProductId = null;
     if(selectedProductName){ txt += '  -  Product: ' + selectedProductName; }
     el.textContent = txt;
   }
-  async function loadCompetitors(){
+  async let _discTimer = null;
+function discoverDebounced(){
+  clearTimeout(_discTimer);
+  _discTimer = setTimeout(runDiscover, 250);
+}
+async function runDiscover(){
+  const q = (document.getElementById('discoverSearch').value||'').trim();
+  const el = document.getElementById('discoverResults');
+  try {
+    const r = await fetch('/api/page_lookup?q=' + encodeURIComponent(q));
+    const data = await r.json();
+    if(!data.length){ el.innerHTML = '<div class="empty">No pages found. Paste a page ID to track a new brand.</div>'; return; }
+    const tracked = (window._compsCache||[]).map(c=>(c.name||'').toLowerCase());
+    el.innerHTML = data.slice(0,8).map(p=>{
+      const isT = tracked.includes((p.page_name||'').toLowerCase());
+      const status = isT ? '<span class="pg-status tracked">Tracked</span>' : '<span class="pg-status found">Found</span>';
+      const btn = isT ? '<button class="pg-track" disabled>Tracked</button>'
+        : `<button class="pg-track" onclick="trackPage('${p.page_name.replace(/'/g,"\\'")}')">Track this page</button>`;
+      const img = p.preview ? `<img onerror="imgFallback(this)" src="${p.preview}">` : '<img>';
+      return `<div class="pg-card">${img}<div class="pg-info">${status}<div class="pg-name">${esc(p.page_name)}</div><div class="pg-meta">${p.ad_count} ad(s) · latest ${p.latest||'—'}</div></div>${btn}</div>`;
+    }).join('');
+  } catch(e){ el.innerHTML = '<div class="empty">Search failed. Try again.</div>'; }
+}
+async function trackPage(name){
+  await fetch('/api/competitors?name=' + encodeURIComponent(name), {method:'POST'});
+  await loadCompetitors();
+  runDiscover();
+}
+function loadCompetitors(){
   const r = await fetch('/api/competitors'); const data = await r.json();
   window._compsCache = data;
   const sugg = data.find(x => x.suggested_name && x.suggested_name.trim());
