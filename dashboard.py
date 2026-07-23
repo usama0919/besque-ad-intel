@@ -46,7 +46,7 @@ def home(request: Request):
 @app.get("/api/artifacts")
 def api_artifacts():
     dedupe.init_artifacts()
-    rows = dedupe.get_artifacts_full(limit=30)
+    rows = dedupe.get_artifacts_full(limit=500)
     # Make datetimes / paths JSON-friendly
     out = []
     for r in rows:
