@@ -44,7 +44,7 @@ def scrape_ads(search_term, max_results=50, image_only=True, page_id=None):
         pid = str(page_id).strip()
         if "facebook.com" not in pid:
             pid = f"https://www.facebook.com/ads/library/?active_status=active&ad_type=all&country=ALL&view_all_page_id={pid}"
-        run_input = {"urls": [pid], "maxAds": fetch_cap, "mediaType": "image"}
+        run_input = {"urls": [{"url": pid}], "maxAds": fetch_cap, "mediaType": "image"}
     else:
         run_input = {"searchTerms": [search_term], "maxResults": fetch_cap, "maxAds": fetch_cap, "mediaType": "image"}
     run = client.actor(APIFY_ACTOR).call(run_input=run_input)
