@@ -479,7 +479,13 @@ async function runPipeline(){
       updateRunButtonState();
       st.textContent='Loading new ads into the feed...';
       await loadCards(); await loadLog();
-      st.textContent='Done'+(elapsed?(' in '+elapsed[1]):'')+': '+JSON.stringify(s.last_summary); }
+      const sm = s.last_summary || {};
+      let msg;
+      if(sm.error){ msg = 'Run failed: ' + sm.error; }
+      else if((sm.processed||0) > 0){ msg = 'Done' + (elapsed?(' in '+elapsed[1]):'') + ' - ' + sm.processed + ' new ad' + (sm.processed>1?'s':'') + ' added' + ((sm.skipped||0)>0?(', ' + sm.skipped + ' already processed'):''); }
+      else if((sm.skipped||0) > 0){ msg = 'No new ads - all ' + sm.skipped + ' current ads from this competitor are already processed.'; }
+      else { msg = 'No new image ads found for this competitor right now.'; }
+      st.textContent = msg; }
   },3000);
 }
 
