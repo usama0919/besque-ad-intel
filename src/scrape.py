@@ -39,7 +39,7 @@ def scrape_ads(search_term, max_results=50, image_only=True):
 
     client = ApifyClient(token)
     fetch_cap = int(os.getenv("SCRAPE_FETCH_CAP", "15"))
-    run_input = {"searchTerms": [search_term], "maxResults": fetch_cap}
+    run_input = {"searchTerms": [search_term], "maxResults": fetch_cap, "maxAds": fetch_cap}
     run = client.actor(APIFY_ACTOR).call(run_input=run_input)
 
     ads = []
