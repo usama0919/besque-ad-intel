@@ -91,6 +91,12 @@
   <div class="sub" id="clock"></div>
 </header>
 <div class="bar">
+  <select id="adCount" style="padding:9px;border:1px solid #ccc;border-radius:7px;font-size:13px;">
+    <option value="1">1 ad</option>
+    <option value="2" selected>2 ads</option>
+    <option value="3">3 ads</option>
+    <option value="5">5 ads</option>
+  </select>
   <button class="run" id="runBtn" onclick="runPipeline()" disabled>Run Pipeline</button>
   <button class="stop" id="stopBtn" onclick="stopPipeline()" disabled>Stop</button>
   <span id="selectedCompName">No competitor selected</span>
@@ -414,17 +420,49 @@ async function removeCompetitor(id){
   loadCompetitors();
 }
 
+const PROGRESS_STAGES = [
+  [0,   'Starting pipeline job...'],
+  [8,   'Scraping competitor ads from Meta Ad Library...'],
+  [55,  'Analysing creatives with Claude vision...'],
+  [80,  'Generating Besque draft images...'],
+  [110, 'Writing adapted ad copy...'],
+  [140, 'Finishing up - saving results...']
+];
+let progressTimer = null;
+
+function startProgress(compName){
+  const st = document.getElementById('status');
+  const t0 = Date.now();
+  stopProgress();
+  progressTimer = setInterval(()=>{
+    const secs = Math.floor((Date.now()-t0)/1000);
+    const mm = Math.floor(secs/60), ss = String(secs%60).padStart(2,'0');
+    let stage = PROGRESS_STAGES[0][1];
+    for(const pair of PROGRESS_STAGES){ if(secs >= pair[0]) stage = pair[1]; }
+    st.textContent = 'Running ' + compName + ' - ' + stage + ' (' + mm + ':' + ss + ')';
+  }, 1000);
+}
+
+function stopProgress(){
+  if(progressTimer){ clearInterval(progressTimer); progressTimer = null; }
+}
+
 async function runPipeline(){
   if(selectedCompetitorId === null){ return; }
   const btn=document.getElementById('runBtn'), stopBtn=document.getElementById('stopBtn'), st=document.getElementById('status');
   btn.disabled=true; btn.dataset.running='1'; stopBtn.disabled=false;
-  st.textContent='Running '+selectedCompetitorName+' — scraping, analysing, generating…';
-  await fetch('/api/run?n=2&competitor_id='+selectedCompetitorId+(selectedProductId?('&product_id='+selectedProductId):''),{method:'POST'});
+  startProgress(selectedCompetitorName);
+  const nAds = document.getElementById('adCount').value;
+  await fetch('/api/run?n='+nAds+'&competitor_id='+selectedCompetitorId+(selectedProductId?('&product_id='+selectedProductId):''),{method:'POST'});
   const poll=setInterval(async()=>{
     const r=await fetch('/api/run/status'); const s=await r.json();
-    if(!s.running){ clearInterval(poll); delete btn.dataset.running; stopBtn.disabled=true;
+    if(!s.running){ clearInterval(poll);
+      const elapsed = document.getElementById('status').textContent.match(/\((\d+:\d+)\)/);
+      stopProgress(); delete btn.dataset.running; stopBtn.disabled=true;
       updateRunButtonState();
-      st.textContent='Done: '+JSON.stringify(s.last_summary); loadCards(); loadLog(); }
+      st.textContent='Loading new ads into the feed...';
+      await loadCards(); await loadLog();
+      st.textContent='Done'+(elapsed?(' in '+elapsed[1]):'')+': '+JSON.stringify(s.last_summary); }
   },3000);
 }
 

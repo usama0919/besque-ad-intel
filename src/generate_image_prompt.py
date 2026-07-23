@@ -46,6 +46,7 @@ BRAND_RULES = (
     "3) NEVER invent ingredients, percentages, or product names. "
     "4) If no product name is provided, the bottle shows only the word 'Besque'. "
     "5) The product is always a body OIL in a glass bottle unless stated otherwise - never a cream, jar, or tub. "
+    "6) NEVER render any price, discount percentage, or offer text (e.g. '50% OFF', '$29.99') unless it is explicitly provided in the product info. Do NOT copy prices or offers from the competitor ad. "
 )
 
 
