@@ -58,14 +58,14 @@ def init_decisions():
         conn.commit()
 
 
-def record_decision(ad_id: str, decision: str) -> None:
-    """Record an approve/reject decision for an ad, with a timestamp."""
+def record_decision(ad_id: str, decision: str, reason: str = "") -> None:
+    """Record an approve/reject decision for an ad, with a timestamp and optional reason."""
     if decision not in ("approve", "reject"):
         raise ValueError("decision must be 'approve' or 'reject'")
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO review_decisions (ad_id, decision) VALUES (%s, %s)",
-            (ad_id, decision),
+            "INSERT INTO review_decisions (ad_id, decision, reason) VALUES (%s, %s, %s)",
+            (ad_id, decision, reason or ""),
         )
         conn.commit()
 

@@ -79,10 +79,10 @@ def api_decisions():
 
 
 @app.post("/api/decision/{ad_id}/{decision}")
-def api_decision(ad_id: str, decision: str):
+def api_decision(ad_id: str, decision: str, reason: str = ""):
     if decision not in ("approve", "reject"):
         return JSONResponse({"ok": False, "error": "bad decision"}, status_code=400)
-    dedupe.record_decision(ad_id, decision)
+    dedupe.record_decision(ad_id, decision, reason)
     return JSONResponse({"ok": True, "ad_id": ad_id, "decision": decision})
 
 

@@ -249,7 +249,7 @@ function renderCards(data){
       </div>
       <div class="actions">
         <button class="btn-a" onclick="decide('${a.ad_id}','approve')">Approve</button>
-        <button class="btn-r" onclick="decide('${a.ad_id}','reject')">Reject</button>
+        <button class="btn-r" onclick="openRejectModal('${a.ad_id}')">Reject</button>
         <button style="flex:0 0 auto;background:#3b3b3b;color:#fff;" onclick="openEditModal('${a.ad_id}')">Edit</button>
       </div></div>`;
   }).join('');
@@ -564,6 +564,22 @@ setInterval(refreshAll, 3000);
       <button class="mini" onclick="closeEditModal()">Cancel</button>
       <button class="mini" id="aeCopyBtn" onclick="modalEditCopy()">Revise Copy</button>
       <button class="run" id="aeImgBtn" onclick="modalEditImage()">Regenerate Image</button>
+    </div>
+  </div>
+</div>
+<div class="modal-overlay" id="rejModal" onclick="if(event.target===this)closeRejectModal()">
+  <div class="modal">
+    <h3>Why reject this ad?</h3>
+    <div style="display:flex;flex-direction:column;gap:8px;margin-top:10px;">
+      <button class="mini" onclick="submitReject('Wrong product look')">Wrong product look</button>
+      <button class="mini" onclick="submitReject('Weak copy')">Weak copy</button>
+      <button class="mini" onclick="submitReject('Off-brand')">Off-brand</button>
+      <label style="margin-top:6px;">Other</label>
+      <input type="text" id="rejOther" placeholder="Type a reason...">
+      <div class="modal-actions">
+        <button class="mini" onclick="closeRejectModal()">Cancel</button>
+        <button class="btn-r" style="padding:8px 14px;border:none;border-radius:7px;cursor:pointer;" onclick="submitReject(document.getElementById('rejOther').value.trim()||'Other')">Reject</button>
+      </div>
     </div>
   </div>
 </div>
