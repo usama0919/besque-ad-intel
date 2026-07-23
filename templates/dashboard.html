@@ -265,6 +265,16 @@ async function loadLog(){
     <span class="log-at">${d.at}</span></div>`).join('');
 }
 
+
+let rejectAdId = null;
+function openRejectModal(adId){ rejectAdId = adId; document.getElementById('rejOther').value=''; document.getElementById('rejModal').classList.add('open'); }
+function closeRejectModal(){ document.getElementById('rejModal').classList.remove('open'); }
+async function submitReject(reason){
+  closeRejectModal();
+  await fetch('/api/decision/'+rejectAdId+'/reject?reason='+encodeURIComponent(reason), {method:'POST'});
+  await loadCards(); await loadLog();
+}
+
 async function decide(ad,dec){
   await fetch('/api/decision/'+ad+'/'+dec,{method:'POST'});
   await loadCards(); await loadLog();
