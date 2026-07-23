@@ -80,6 +80,10 @@
   .edit-row select { padding:8px; border:1px solid #ccc; border-radius:7px; font-size:12px; }
   .edit-row button:disabled { opacity:0.5; cursor:wait; }
   .img-missing { display:flex; align-items:center; justify-content:center; background:#f4f1ec; color:#999; font-size:12px; min-height:180px; border-radius:8px; }
+  /* independent scroll regions */
+  #cards { max-height: calc(100vh - 260px); overflow-y: auto; padding-right: 6px; }
+  #competitors { max-height: 30vh; overflow-y: auto; }
+  .log { position: static; max-height: calc(100vh - 320px); overflow-y: auto; }
 </style>
 </head>
 <body>
