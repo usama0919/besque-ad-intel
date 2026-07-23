@@ -299,7 +299,7 @@ def api_delete_product(product_id: int):
 def api_competitors():
     dedupe.init_competitors()
     rows = dedupe.get_competitors()
-    return JSONResponse([{"id": r["id"], "name": r["name"], "page_id": r["page_id"]} for r in rows])
+    return JSONResponse([{"id": r["id"], "name": r["name"], "page_id": r["page_id"], "suggested_name": r.get("suggested_name") or ""} for r in rows])
 
 
 @app.post("/api/competitors")

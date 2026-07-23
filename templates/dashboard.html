@@ -166,11 +166,15 @@ function applySearchFilter(){
 
 let editModalAdId = null;
 
-function openEditModal(adId){
+async function openEditModal(adId){
   editModalAdId = adId;
   document.getElementById('aeInst').value = '';
   document.getElementById('aeStatus').textContent = '';
-  const a = (window._cardsCache||[]).find(x=>x.ad_id===adId) || {};
+  let a = (window._cardsCache||[]).find(x=>x.ad_id===adId) || {};
+  if(!a.image_prompt && !a.copy_prompt){
+    try { const r = await fetch('/api/artifacts'); const d = await r.json();
+      a = d.find(x=>x.ad_id===adId) || a; } catch(e) {}
+  }
   document.getElementById('aeModelInfo').textContent = a.model_info || 'Prompts recorded for ads generated from now on.';
   document.getElementById('aeImgPrompt').value = a.image_prompt || '(not recorded for this ad)';
   document.getElementById('aeCopyPrompt').value = a.copy_prompt || '(not recorded for this ad)';
