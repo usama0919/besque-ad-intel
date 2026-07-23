@@ -64,10 +64,20 @@ def generate_image(blueprint, ad_id, product=None, reference_bytes=None):
             ]
         else:
             contents = prompt
-        response = client.models.generate_content(
-            model="gemini-3.1-flash-image",
-            contents=contents,
-        )
+        import time as _time
+        response = None
+        for _attempt in range(3):
+            try:
+                response = client.models.generate_content(
+                    model="gemini-3.1-flash-image",
+                    contents=contents,
+                )
+                break
+            except Exception as _e:
+                if "429" in str(_e) and _attempt < 2:
+                    _time.sleep(20 * (_attempt + 1))
+                    continue
+                raise
         image_bytes = None
         for part in response.candidates[0].content.parts:
             if part.inline_data is not None:

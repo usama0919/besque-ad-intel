@@ -198,7 +198,8 @@ def get_artifacts_full(limit=50):
             LIMIT %s
         """, (limit,))
         cols = ["ad_id", "page_name", "image_path", "blueprint", "generated_copy",
-                "draft_image", "metadata", "created_at", "decision"]
+                "draft_image", "metadata", "created_at", "decision",
+                "image_prompt", "copy_prompt", "model_info"]
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
