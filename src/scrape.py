@@ -13,6 +13,7 @@ def _map_ad(raw):
     return {
         "ad_id": raw.get("ad_archive_id"),
         "page_name": raw.get("page_name", ""),
+        "page_id": str(raw.get("page_id") or raw.get("pageId") or ""),
         "text": text,
         "media_type": raw.get("media_type", ""),
         "image_url": images[0] if images else None,

@@ -107,6 +107,16 @@ def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product
         try:
             ads = with_retry(lambda: scrape.scrape_ads(name, max_results=max_per_competitor, page_id=competitor.get("page_id")),
                              attempts=2, delay=2)
+            # auto-capture: lock the exact page id from the first matched ad
+            try:
+                current_pid = str(competitor.get("page_id") or "").strip()
+                if ads and (not current_pid or current_pid == str(name).strip()):
+                    found = next((a.get("page_id") for a in ads if a.get("page_id")), None)
+                    if found:
+                        dedupe.update_competitor(competitor["id"], name, found)
+                        log.info("Auto-captured page_id %s for %s", found, name)
+            except Exception as _e:
+                log.warning("page_id auto-capture failed (non-fatal): %s", _e)
         except Exception as e:
             log.error("Scrape failed for %s: %s (clean skip)", name, e)
             continue
