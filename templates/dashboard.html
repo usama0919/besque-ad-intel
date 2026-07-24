@@ -405,7 +405,7 @@ let selectedProductId = null;
     if(selectedProductName){ txt += '  -  Product: ' + selectedProductName; }
     el.textContent = txt;
   }
-  async let _discTimer = null;
+  let _discTimer = null;
 function discoverDebounced(){
   clearTimeout(_discTimer);
   _discTimer = setTimeout(runDiscover, 250);
@@ -433,7 +433,7 @@ async function trackPage(name){
   await loadCompetitors();
   runDiscover();
 }
-function loadCompetitors(){
+async function loadCompetitors(){
   const r = await fetch('/api/competitors'); const data = await r.json();
   window._compsCache = data;
   const sugg = data.find(x => x.suggested_name && x.suggested_name.trim());
