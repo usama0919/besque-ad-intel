@@ -8,3 +8,24 @@ samples/
 .pytest_cache/
 assets/
 run_output.txt
+
+# throwaway diagnostic scripts and dumps
+addtracked.py
+checkfeed.py
+checklookup.py
+checkscrape2.py
+dumprawad.py
+dumpscrape.py
+finddedup.py
+findscrape.py
+fixcols.py
+plainmsg.py
+probejob.py
+brandscheme.py
+test_nano_banana_isolated.py
+test_one_ad_debug.py
+*.log
+*_dump*.txt
+*_result.txt
+ad_data_view.json
+brand_scheme.json

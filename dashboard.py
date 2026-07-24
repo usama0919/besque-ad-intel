@@ -268,6 +268,21 @@ def api_page_lookup(q: str = ""):
                 p["latest"] = r["created_at"]
             if not p["preview"] and preview:
                 p["preview"] = preview
+    # include tracked competitors that have no scraped ads yet
+    try:
+        dedupe.init_competitors()
+        existing_lower = {k.lower() for k in pages.keys()}
+        for comp in dedupe.get_competitors():
+            cname = (comp.get("name") or "").strip()
+            if not cname:
+                continue
+            if ql and ql not in cname.lower():
+                continue
+            if cname.lower() not in existing_lower:
+                pages[cname] = {"page_name": cname, "ad_count": 0,
+                                "latest": None, "preview": ""}
+    except Exception:
+        pass
     out = []
     for p in pages.values():
         out.append({"page_name": p["page_name"], "ad_count": p["ad_count"],
