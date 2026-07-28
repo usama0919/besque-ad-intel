@@ -97,7 +97,11 @@ def init_artifacts():
                 generated_copy JSONB,
                 draft_image   TEXT,
                 metadata      JSONB,
-                created_at    TIMESTAMPTZ DEFAULT now()
+                created_at    TIMESTAMPTZ DEFAULT now(),
+                image_prompt  TEXT DEFAULT '',
+                copy_prompt   TEXT DEFAULT '',
+                model_info    TEXT DEFAULT '',
+                archived      BOOLEAN DEFAULT false
             )
         """)
         conn.commit()
