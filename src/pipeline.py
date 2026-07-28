@@ -36,7 +36,7 @@ def process_ad(ad, product=None, reference_bytes=None):
             ad_text=ad.get("text", ""),
             cta=ad.get("cta", ""),
         )
-        copy = generate_copy.generate_copy_live(blueprint)
+        copy = generate_copy.generate_copy_live(blueprint, product=product)
         ok, issues = compliance.check_compliance(copy, ad.get("page_name", ""), ad.get("text", ""))
         if not ok:
             log.warning("Ad %s failed compliance check: %s", ad_id, issues)
