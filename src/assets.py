@@ -11,6 +11,18 @@ from pathlib import Path
 
 ASSET_DIR = Path(os.getenv("ASSET_DIR", "assets"))
 
+DEFAULT_ASSET_BUCKET = "besque-ad-intel-assets"
+
+
+def asset_bucket_name() -> str:
+    """Resolve the asset bucket name. The one place this decision is made.
+
+    ASSET_BUCKET is canonical. GCS_BUCKET is the legacy name that ship.ps1 still
+    sets on the deployed service, so it stays honoured as a fallback - do not
+    drop it without updating deploy config first.
+    """
+    return os.getenv("ASSET_BUCKET") or os.getenv("GCS_BUCKET") or DEFAULT_ASSET_BUCKET
+
 
 class LocalStorage:
     """Stores assets on the local filesystem (active for the PoC)."""
@@ -33,13 +45,13 @@ class GCSStorage:
     Wiring at kickoff (when the GCS project is provided):
         from google.cloud import storage
         client = storage.Client()
-        bucket = client.bucket(os.getenv("GCS_BUCKET"))
+        bucket = client.bucket(asset_bucket_name())
         blob = bucket.blob(key)
         blob.upload_from_string(data)
         return f"gs://{bucket.name}/{key}"
 
-    Selected by STORAGE_BACKEND=gcs; requires GCS_BUCKET and
-    GOOGLE_APPLICATION_CREDENTIALS. No pipeline changes needed.
+    Selected by STORAGE_BACKEND=gcs; requires ASSET_BUCKET (legacy GCS_BUCKET
+    still honoured) and GOOGLE_APPLICATION_CREDENTIALS. No pipeline changes needed.
     """
 
     def __init__(self, bucket=None):
@@ -50,7 +62,7 @@ class GCSStorage:
                 "GCS backend not provisioned: google-cloud-storage not installed"
             ) from e
         self._client = storage.Client()
-        self._bucket = self._client.bucket(bucket or os.getenv("GCS_BUCKET", "besque-ad-intel-assets"))
+        self._bucket = self._client.bucket(bucket or asset_bucket_name())
 
     def save_bytes(self, data: bytes, key: str) -> str:
         blob = self._bucket.blob(key)

@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 load_dotenv()
-from src import dedupe
+from src import dedupe, assets
 
 app = FastAPI(title="Besque Ad Intelligence")
 
@@ -25,7 +25,7 @@ def get_asset(filename: str):
         return Response(local.read_bytes(), media_type="image/png")
     try:
         from google.cloud import storage
-        bucket_name = os.getenv("ASSET_BUCKET", "besque-ad-intel-assets")
+        bucket_name = assets.asset_bucket_name()
         blob = storage.Client().bucket(bucket_name).blob(filename)
         if blob.exists():
             return Response(blob.download_as_bytes(), media_type="image/png")
@@ -180,7 +180,7 @@ async def api_edit_image(ad_id: str, request: Request):
     else:
         try:
             from google.cloud import storage
-            blob = storage.Client().bucket(os.getenv("ASSET_BUCKET", "besque-ad-intel-assets")).blob(filename)
+            blob = storage.Client().bucket(assets.asset_bucket_name()).blob(filename)
             if blob.exists():
                 current = blob.download_as_bytes()
         except Exception:
@@ -336,7 +336,7 @@ async def api_product_photo(product_id: int, request: Request):
     key = f"product_{product_id}_ref.png"
     try:
         from google.cloud import storage
-        bucket = storage.Client().bucket(os.getenv("ASSET_BUCKET", "besque-ad-intel-assets"))
+        bucket = storage.Client().bucket(assets.asset_bucket_name())
         bucket.blob(key).upload_from_string(data, content_type="image/png")
     except Exception as e:
         return JSONResponse({"ok": False, "error": f"upload failed: {e}"})

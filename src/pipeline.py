@@ -100,8 +100,7 @@ def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product
     if product and product.get("image_key"):
         try:
             from google.cloud import storage as _storage
-            import os as _os
-            _blob = _storage.Client().bucket(_os.getenv("ASSET_BUCKET", "besque-ad-intel-assets")).blob(product["image_key"])
+            _blob = _storage.Client().bucket(assets.asset_bucket_name()).blob(product["image_key"])
             if _blob.exists():
                 reference_bytes = _blob.download_as_bytes()
         except Exception as _e:
@@ -119,7 +118,7 @@ def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product
             break
         name = competitor.get("name", "?")
         try:
-            ads = with_retry(lambda: scrape.scrape_ads(name, max_results=max_per_competitor, page_id=competitor.get("page_id")),
+            ads = with_retry(lambda: scrape.scrape_ads(name, page_id=competitor.get("page_id")),
                              attempts=2, delay=2)
             # suggest the real page name if it differs from our list
             try:

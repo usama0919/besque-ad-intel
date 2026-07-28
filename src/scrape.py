@@ -42,15 +42,24 @@ def _page_matches(page_name, search_term):
     return overlap >= 0.6
 
 
-def scrape_ads(search_term, max_results=50, image_only=True, page_id=None):
+def scrape_ads(search_term, max_results=None, image_only=True, page_id=None):
     """Run the Apify actor. Returns mapped ad dicts, filtered to image ads
-    that have both an ad_id and a downloadable image URL."""
+    that have both an ad_id and a downloadable image URL.
+
+    max_results is an explicit per-call cap on how many ads Apify returns.
+    None (the default) means use SCRAPE_FETCH_CAP.
+
+    Deliberately NOT wired to the pipeline's max_per_competitor: that caps how
+    many *new* ads get processed after the seen_ads gate, while this caps the
+    candidate pool fetched before it. Scraping wide and processing narrow is the
+    point - do not couple them again.
+    """
     token = os.getenv("APIFY_TOKEN")
     if not token:
         raise ValueError("APIFY_TOKEN must be set")
 
     client = ApifyClient(token)
-    fetch_cap = int(os.getenv("SCRAPE_FETCH_CAP", "15"))
+    fetch_cap = int(max_results) if max_results is not None else int(os.getenv("SCRAPE_FETCH_CAP", "50"))
     use_page = bool(page_id) and str(page_id).strip() != "" and str(page_id).strip() != str(search_term).strip()
     if use_page:
         pid = str(page_id).strip()

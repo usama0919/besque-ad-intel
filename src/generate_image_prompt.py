@@ -1,5 +1,6 @@
 """Regeneration step (image prompt): turn a blueprint's visual into an image-gen prompt."""
 import os
+from src import assets
 
 IMAGE_MODEL = os.getenv("IMAGE_MODEL", "placeholder-image-model")
 
@@ -117,7 +118,7 @@ def generate_image(blueprint, ad_id, product=None, reference_bytes=None):
             f.write(image_bytes)
         try:
             from google.cloud import storage
-            bucket_name = os.getenv("ASSET_BUCKET", "besque-ad-intel-assets")
+            bucket_name = assets.asset_bucket_name()
             blob = storage.Client().bucket(bucket_name).blob(f"{ad_id}_draft.png")
             blob.upload_from_string(image_bytes, content_type="image/png")
         except Exception as e:
@@ -197,7 +198,7 @@ def edit_image(current_image_bytes, instruction, ad_id, aspect="1:1"):
             f.write(image_bytes)
         try:
             from google.cloud import storage
-            bucket = storage.Client().bucket(os.getenv("ASSET_BUCKET", "besque-ad-intel-assets"))
+            bucket = storage.Client().bucket(assets.asset_bucket_name())
             # Mirror the version alongside the new draft; local assets are ephemeral on Cloud Run.
             bucket.blob(version_name).upload_from_string(current_image_bytes, content_type="image/png")
             bucket.blob(f"{ad_id}_draft.png").upload_from_string(image_bytes, content_type="image/png")
