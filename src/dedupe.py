@@ -223,7 +223,9 @@ def init_products():
                 description TEXT DEFAULT '',
                 ingredients TEXT DEFAULT '',
                 hero_claim TEXT DEFAULT '',
-                created_at TIMESTAMP DEFAULT NOW()
+                created_at TIMESTAMP DEFAULT NOW(),
+                image_key TEXT DEFAULT '',
+                category TEXT DEFAULT ''
             )"""
         )
         conn.commit()
@@ -231,29 +233,31 @@ def init_products():
 
 def get_products():
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT id, name, description, ingredients, hero_claim, image_key FROM products ORDER BY id")
+        cur.execute("SELECT id, name, description, ingredients, hero_claim, image_key, category FROM products ORDER BY id")
         return [
-            {"id": r[0], "name": r[1], "description": r[2], "ingredients": r[3], "hero_claim": r[4], "image_key": r[5] or ""}
+            {"id": r[0], "name": r[1], "description": r[2], "ingredients": r[3], "hero_claim": r[4],
+             "image_key": r[5] or "", "category": r[6] or ""}
             for r in cur.fetchall()
         ]
 
 
-def add_product(name, description="", ingredients="", hero_claim=""):
+def add_product(name, description="", ingredients="", hero_claim="", category=""):
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO products (name, description, ingredients, hero_claim) VALUES (%s, %s, %s, %s) RETURNING id",
-            (name, description, ingredients, hero_claim),
+            "INSERT INTO products (name, description, ingredients, hero_claim, category) "
+            "VALUES (%s, %s, %s, %s, %s) RETURNING id",
+            (name, description, ingredients, hero_claim, category),
         )
         new_id = cur.fetchone()[0]
         conn.commit()
         return new_id
 
 
-def update_product(product_id, name, description, ingredients, hero_claim):
+def update_product(product_id, name, description, ingredients, hero_claim, category=""):
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
-            "UPDATE products SET name=%s, description=%s, ingredients=%s, hero_claim=%s WHERE id=%s",
-            (name, description, ingredients, hero_claim, product_id),
+            "UPDATE products SET name=%s, description=%s, ingredients=%s, hero_claim=%s, category=%s WHERE id=%s",
+            (name, description, ingredients, hero_claim, category, product_id),
         )
         conn.commit()
 
@@ -266,11 +270,12 @@ def delete_product(product_id):
 
 def get_product(product_id):
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT id, name, description, ingredients, hero_claim, image_key FROM products WHERE id=%s", (product_id,))
+        cur.execute("SELECT id, name, description, ingredients, hero_claim, image_key, category FROM products WHERE id=%s", (product_id,))
         r = cur.fetchone()
         if r is None:
             return None
-        return {"id": r[0], "name": r[1], "description": r[2], "ingredients": r[3], "hero_claim": r[4], "image_key": r[5] or ""}
+        return {"id": r[0], "name": r[1], "description": r[2], "ingredients": r[3], "hero_claim": r[4],
+                "image_key": r[5] or "", "category": r[6] or ""}
 
 
 def update_artifact_copy(ad_id, generated_copy):

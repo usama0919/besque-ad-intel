@@ -104,6 +104,12 @@
   .edit-row select { padding:8px; border:1px solid #ccc; border-radius:7px; font-size:12px; }
   .edit-row button:disabled { opacity:0.5; cursor:wait; }
   .img-missing { display:flex; align-items:center; justify-content:center; background:#f4f1ec; color:#999; font-size:12px; min-height:180px; border-radius:8px; }
+  /* Category badge: ad's inferred category vs the selected Besque product's, so a
+     mismatch is visible without opening anything. Amber = the two disagree. */
+  .cat-badge { display:inline-block; font-size:10px; font-weight:600; letter-spacing:.02em; padding:2px 7px; border-radius:999px; background:#eef2ee; color:#4a6b52; border:1px solid #d8e2da; }
+  .cat-badge.cat-mismatch { background:#fdf3e0; color:#8a5a12; border-color:#f0dcb4; }
+  .cat-badge.cat-none { background:#f4f1ec; color:#a8a8a8; border-color:#e8e4dd; font-weight:400; }
+  .cat-badge.cat-notproduct { background:#f0eef4; color:#6b5a80; border-color:#ded8e6; }
   /* sticky sidebar with its own independent scroll */
   .layout > div:last-child { position: sticky; top: 90px; align-self: start; max-height: calc(100vh - 110px); overflow-y: auto; padding-right: 8px; }
   #competitors { max-height: 320px; overflow-y: auto; }
@@ -204,10 +210,13 @@ async function loadCards(force){
 // the editable .ov overlays mid-typing).
 let _lastRenderSig = null;
 function cardSig(list, q){
-  return q + '##' + list.map(a=>{
+  // selectedProductCategory() is part of the sig because the badge renders it, so
+  // changing the selected product must invalidate an otherwise-identical poll.
+  return q + '##' + selectedProductCategory() + '##' + list.map(a=>{
     const bp=a.blueprint||{}, c=a.copy||{};
     return [a.ad_id, a.decision, a.original_image, a.draft_image, a.created_at,
             a.page_name, bp.angle, bp.format,
+            (bp.product_category||{}).category, (bp.product_category||{}).confidence,
             c.headline, c.primary_text, c.cta].join('||');
   }).join('##');
 }
@@ -354,15 +363,36 @@ function ovToggles(a){
     + ` onclick="ovToggle('${a.ad_id}','${f.key}',this)">${f.label}</button>`).join('') + `</div>`;
 }
 
+// The selected Besque product's own category, for side-by-side comparison on each card.
+function selectedProductCategory(){
+  const p = (_productsCache||[]).find(x=>x.id===selectedProductId);
+  return p ? (p.category||'') : '';
+}
+
+// "body_oil vs serum" - both categories on the card, amber when they disagree.
+function catBadge(bp){
+  const adCat = ((bp.product_category||{}).category)||'';
+  const selCat = selectedProductCategory();
+  if(!adCat){ return '<span class="cat-badge cat-none">no category</span>'; }
+  const mismatch = selCat && adCat !== selCat;
+  const cls = adCat==='not_product' ? ' cat-notproduct' : (mismatch ? ' cat-mismatch' : '');
+  const conf = ((bp.product_category||{}).confidence)||'';
+  const title = 'Competitor ad: ' + adCat + (conf?(' ('+conf+' confidence)'):'')
+    + (selCat ? ('  |  your product: ' + selCat) : '  |  no product selected');
+  return `<span class="cat-badge${cls}" title="${esc(title)}">${esc(adCat)}`
+    + (selCat ? (' vs ' + esc(selCat)) : '') + `</span>`;
+}
+
 function renderCards(data){
   const el = document.getElementById('cards');
   if(!data.length){ el.innerHTML='<div class="empty">No ads yet. Click Run Pipeline.</div>'; return; }
   el.innerHTML = data.map(a=>{
     const bp=a.blueprint||{}, c=a.copy||{};
     const dec=a.decision;
-    const badge = dec==='approve'?'<span class="badge approve">Approved</span>'
+    const badge = catBadge(bp) + ' '
+      + (dec==='approve'?'<span class="badge approve">Approved</span>'
       : dec==='reject'?'<span class="badge reject">Rejected</span>'
-      : '<span class="badge pending">Pending</span>';
+      : '<span class="badge pending">Pending</span>');
     const orig = a.original_image?`<img onerror="imgFallback(this)" src="${a.original_image}">`:'';
     const draft = a.draft_image
       ? `<div class="draft-wrap"><img onerror="imgFallback(this)" src="${a.draft_image}">${ovLayer(a)}</div>${ovToggles(a)}`
@@ -434,7 +464,9 @@ let selectedProductId = null;
             <button class="mini mini-r" onclick="removeProduct(${p.id})">Remove</button>
           </div>
         </div>
-        <div class="prod-detail" style="font-size:12px;color:#777;margin-top:4px;cursor:pointer;" onclick="editProduct(${p.id})">${esc(p.description||'').slice(0,140)}</div>
+        <div class="prod-detail" style="font-size:12px;color:#777;margin-top:4px;cursor:pointer;" onclick="editProduct(${p.id})">
+          <span class="cat-badge${p.category?'':' cat-none'}">${esc(p.category||'no category')}</span>
+          ${esc(p.description||'').slice(0,120)}</div>
       </div>`).join('');
   }
 
@@ -443,6 +475,8 @@ let selectedProductId = null;
     else { selectedProductId = id; selectedProductName = name; }
     loadProducts();
     updateSelectionLabel();
+    // Explicit user action: re-render so every card's "ad vs product" badge updates.
+    applySearchFilter(true);
   }
 
   function addProductRow(){
@@ -462,6 +496,7 @@ let selectedProductId = null;
     document.getElementById('pmDesc').value = p.description || '';
     document.getElementById('pmIngr').value = p.ingredients || '';
     document.getElementById('pmHero').value = p.hero_claim || '';
+    document.getElementById('pmCat').value = p.category || '';
     document.getElementById('pmPhoto').value = '';
     document.getElementById('pmPhotoStatus').textContent = p.image_key ? 'Photo on file: ' + p.image_key : 'No reference photo yet';
     document.getElementById('prodModal').classList.add('open');
@@ -470,7 +505,7 @@ let selectedProductId = null;
   function openNewProdModal(){
     prodModalId = null;
     document.getElementById('prodModalTitle').textContent = 'New Product';
-    ['pmName','pmDesc','pmIngr','pmHero'].forEach(i=>document.getElementById(i).value='');
+    ['pmName','pmDesc','pmIngr','pmHero','pmCat'].forEach(i=>document.getElementById(i).value='');
     document.getElementById('prodModal').classList.add('open');
   }
 
@@ -482,6 +517,7 @@ let selectedProductId = null;
       description: document.getElementById('pmDesc').value.trim(),
       ingredients: document.getElementById('pmIngr').value.trim(),
       hero_claim: document.getElementById('pmHero').value.trim(),
+      category: document.getElementById('pmCat').value,
     });
     if(!JSON.parse(body).name){ alert('Name is required'); return; }
     const url = prodModalId ? '/api/products/'+prodModalId : '/api/products';
@@ -510,7 +546,10 @@ let selectedProductId = null;
   function updateSelectionLabel(){
     const el = document.getElementById('selectedCompName');
     let txt = selectedCompetitorName ? ('Selected: ' + selectedCompetitorName) : 'No competitor selected';
-    if(selectedProductName){ txt += '  -  Product: ' + selectedProductName; }
+    if(selectedProductName){
+      const pc = selectedProductCategory();
+      txt += '  -  Product: ' + selectedProductName + (pc ? (' [' + pc + ']') : ' [no category]');
+    }
     el.textContent = txt;
   }
   let _discTimer = null;
@@ -713,6 +752,12 @@ document.addEventListener('focusout', e=>{
     <textarea id="pmIngr"></textarea>
     <label>Hero claim</label>
     <input type="text" id="pmHero">
+    <label>Category</label>
+    <select id="pmCat" style="width:100%;padding:9px 12px;border:1px solid #ccc;border-radius:7px;font-size:13px;">
+      <option value="">(not set)</option>
+      {% for c in product_categories %}<option value="{{ c }}">{{ c }}</option>
+      {% endfor %}
+    </select>
     <label>Reference product photo</label>
     <div id="pmPhotoStatus" style="font-size:12px;color:#777;margin-bottom:6px;"></div>
     <input type="file" id="pmPhoto" accept="image/*">

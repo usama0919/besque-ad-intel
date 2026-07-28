@@ -77,6 +77,20 @@
         "offer_led", "comparison", "listicle_tips", "founder_story",
         "ingredient_focus", "lifestyle_scene", "text_led_editorial"
       ]
+    },
+    "product_category": {
+      "type": "object",
+      "properties": {
+        "category": {
+          "type": "string",
+          "enum": [
+            "body_oil", "face_oil", "serum", "moisturiser", "cleanser",
+            "haircare", "supplement", "firming", "other", "not_product"
+          ]
+        },
+        "confidence": { "type": "string", "enum": ["high", "medium", "low"] },
+        "signals": { "type": "array", "items": { "type": "string" } }
+      }
     }
   }
 }

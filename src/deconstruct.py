@@ -36,6 +36,20 @@ The JSON must have exactly these fields:
     hybrid = studio-grade product quality inside casual framing (e.g. hero-lit product on a real countertop, or polished product with handwritten annotation). Only choose hybrid when both are genuinely present — do not use it as a hedge when uncertain.
 - creative_format (string): exactly one of testimonial_review, before_after, problem_solution, product_hero, offer_led, comparison, listicle_tips, founder_story, ingredient_focus, lifestyle_scene, text_led_editorial
     (production_style and creative_format are two independent axes — a testimonial can be UGC or studio.)
+- product_category (object): {{ "category": one of body_oil/face_oil/serum/moisturiser/cleanser/haircare/supplement/firming/other/not_product, "confidence": high/medium/low, "signals": array of short phrases justifying the choice }}
+    body_oil = oil intended for the body rather than the face
+    face_oil = facial oil or facial treatment oil
+    serum = lightweight concentrated leave-on treatment, usually water- or gel-based
+    moisturiser = cream, lotion or balm whose main job is hydrating or sealing
+    cleanser = wash-off face or body cleanser — gel, balm, foam or micellar
+    haircare = shampoo, conditioner, scalp or hair treatment
+    supplement = ingestible — capsule, powder, gummy or drink
+    firming = sold primarily on tightening, lifting or firming skin
+    other = a real product is being sold but none of the above categories fit
+    not_product = the ad sells no product at all: tester or ambassador recruitment, brand/founder story with nothing to buy, or a store-wide sale naming no single product
+    (other vs not_product: use other when there IS a product and no category fits; use not_product when nothing is being sold. Never use other as a substitute for not_product.)
+    confidence is one of high/medium/low — never a number.
+    (product_category is a third independent axis, unrelated to production_style and creative_format.)
 """
 
 

@@ -9,6 +9,14 @@ with open(SCHEMA_PATH, "r", encoding="utf-8") as f:
     _SCHEMA = json.load(f)
 
 
+def product_categories() -> list[str]:
+    """The product_category enum, read from the schema so the dashboard dropdown and
+    the products table cannot drift from what the validator actually enforces."""
+    return list(
+        _SCHEMA["properties"]["product_category"]["properties"]["category"]["enum"]
+    )
+
+
 def is_valid(blueprint: dict) -> bool:
     """Return True if the blueprint matches the schema, else False."""
     try:

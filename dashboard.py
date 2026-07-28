@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 load_dotenv()
-from src import dedupe, assets
+from src import dedupe, assets, validator
 
 app = FastAPI(title="Besque Ad Intelligence")
 
@@ -40,7 +40,10 @@ _run_status = {"running": False, "last_summary": None, "stop_requested": False, 
 
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request):
-    return templates.TemplateResponse(request, "dashboard.html")
+    # Categories come from the blueprint schema so the dropdown can't drift from the enum.
+    return templates.TemplateResponse(
+        request, "dashboard.html", {"product_categories": validator.product_categories()}
+    )
 
 
 @app.get("/api/artifacts")
@@ -314,14 +317,16 @@ async def api_add_product(request: Request):
     name = (body.get("name") or "").strip()
     if not name:
         return JSONResponse({"ok": False, "error": "name required"}, status_code=400)
-    new_id = dedupe.add_product(name, body.get("description", ""), body.get("ingredients", ""), body.get("hero_claim", ""))
+    new_id = dedupe.add_product(name, body.get("description", ""), body.get("ingredients", ""),
+                                body.get("hero_claim", ""), body.get("category", ""))
     return JSONResponse({"ok": True, "id": new_id})
 
 
 @app.post("/api/products/{product_id}")
 async def api_update_product(product_id: int, request: Request):
     body = await request.json()
-    dedupe.update_product(product_id, body.get("name", ""), body.get("description", ""), body.get("ingredients", ""), body.get("hero_claim", ""))
+    dedupe.update_product(product_id, body.get("name", ""), body.get("description", ""), body.get("ingredients", ""),
+                          body.get("hero_claim", ""), body.get("category", ""))
     return JSONResponse({"ok": True, "id": product_id})
 
 
