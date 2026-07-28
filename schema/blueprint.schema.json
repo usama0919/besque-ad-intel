@@ -36,6 +36,47 @@
       }
     },
     "cta": { "type": "string" },
-    "destination_url": { "type": "string" }
+    "destination_url": { "type": "string" },
+    "headline_verbatim": { "type": "string" },
+    "offer": {
+      "type": ["object", "null"],
+      "properties": {
+        "type": { "type": "string" },
+        "value": { "type": "string" },
+        "mechanic": { "type": "string" }
+      }
+    },
+    "social_proof": {
+      "type": ["object", "null"],
+      "properties": {
+        "type": { "type": "string" },
+        "owner": { "type": "string" }
+      }
+    },
+    "layout_detail": {
+      "type": "object",
+      "properties": {
+        "text_zone": { "type": "string" },
+        "product_count": { "type": "number" },
+        "background_type": { "type": "string" }
+      }
+    },
+    "legibility_notes": { "type": "string" },
+    "production_style": {
+      "type": "object",
+      "properties": {
+        "style": { "type": "string", "enum": ["ugc_native", "high_spec_studio", "hybrid"] },
+        "confidence": { "type": "string", "enum": ["high", "medium", "low"] },
+        "signals": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "creative_format": {
+      "type": "string",
+      "enum": [
+        "testimonial_review", "before_after", "problem_solution", "product_hero",
+        "offer_led", "comparison", "listicle_tips", "founder_story",
+        "ingredient_focus", "lifestyle_scene", "text_led_editorial"
+      ]
+    }
   }
 }

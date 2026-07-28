@@ -1,6 +1,8 @@
 import os
 import json
 
+from src import json_response
+
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
 
 COPY_PROMPT = """You are a senior copywriter for Besque, a natural skincare brand for women 40+. Using the creative blueprint below, write Besque-adapted ad copy. Match the brand voice guide and use only approved claims.
@@ -41,12 +43,9 @@ def build_copy_prompt(blueprint, brand_voice="", approved_claims="", product=Non
 
 
 def parse_copy(raw_text):
-    cleaned = raw_text.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.split("```")[1]
-        if cleaned.startswith("json"):
-            cleaned = cleaned[4:]
-    return json.loads(cleaned.strip())
+    """Parse Claude's text response into a copy dict. Tolerates markdown fences
+    and surrounding prose - see json_response.extract_json."""
+    return json_response.extract_json(raw_text)
 
 
 REQUIRED_COPY_FIELDS = {"headline", "primary_text", "cta"}
@@ -77,7 +76,7 @@ def generate_copy_live(blueprint, brand_voice="", approved_claims="", product=No
     client = anthropic.Anthropic(timeout=60.0, max_retries=1)  # reads ANTHROPIC_API_KEY from env
     message = client.messages.create(
         model=CLAUDE_MODEL,
-        max_tokens=1024,
+        max_tokens=3072,
         messages=[{"role": "user", "content": prompt}],
     )
     raw_text = message.content[0].text

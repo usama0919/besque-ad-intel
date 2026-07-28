@@ -31,6 +31,28 @@
   .side.orig { border-right:1px solid #f0ece4; background:#fafafa; }
   .side .lbl { font-size:11px; text-transform:uppercase; letter-spacing:1px; color:#aaa; margin-bottom:10px; }
   .side img { width:100%; border-radius:8px; margin-bottom:10px; background:#eee; }
+  /* --- editable text overlay on the Besque draft (client-side only) --- */
+  .draft-wrap { position:relative; margin-bottom:10px; }
+  .draft-wrap img { margin-bottom:0; display:block; }
+  .ov { position:absolute; z-index:2; color:#fff; cursor:text; line-height:1.15;
+        white-space:pre-wrap; overflow-wrap:break-word; border-radius:4px;
+        outline:1px dashed transparent; outline-offset:2px; }
+  .ov:hover { outline-color:rgba(255,255,255,0.75); }
+  .ov:focus { outline:1px solid #4a9eff; background:rgba(0,0,0,0.28); }
+  .ov:empty:before { content:attr(data-ph); opacity:0.5; }
+  .ov-headline { top:15%; left:6%; right:6%; font-size:clamp(16px,3vw,30px); font-weight:800;
+                 letter-spacing:-0.5px; text-shadow:0 2px 12px rgba(0,0,0,0.6); }
+  .ov-offer { top:5%; right:5%; max-width:44%; background:#c0392b; font-size:11px; font-weight:800;
+              text-transform:uppercase; letter-spacing:0.7px; padding:6px 13px; border-radius:999px;
+              box-shadow:0 2px 8px rgba(0,0,0,0.35); }
+  .ov-price { bottom:6%; left:6%; max-width:60%; font-size:16px; font-weight:700;
+              background:rgba(0,0,0,0.6); padding:5px 11px; border-radius:6px; }
+  .ov-hidden { display:none; }
+  .ov-toggles { display:flex; gap:6px; margin-bottom:10px; }
+  .ov-toggles button { padding:3px 10px; font-size:10px; font-weight:600; cursor:pointer;
+                       text-transform:uppercase; letter-spacing:0.5px; border-radius:20px;
+                       border:1px solid #e5e0d8; background:#faf8f4; color:#b3aca0; }
+  .ov-toggles button.on { background:#1a1a1a; border-color:#1a1a1a; color:#fff; }
   .headline { font-weight:600; font-size:15px; margin-bottom:8px; line-height:1.3; }
   .primary { font-size:13px; color:#555; line-height:1.5; margin-bottom:8px; }
   .cta { font-size:12px; font-weight:600; color:#1a1a1a; }
@@ -164,10 +186,10 @@ function esc(s){return (s||"").replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':
 
 let allArtifacts = [];
 
-async function loadCards(){
+async function loadCards(force){
   const r = await fetch('/api/artifacts'); const data = await r.json();
   allArtifacts = data;
-  applySearchFilter();
+  applySearchFilter(force);
 
   fetch('/api/stats').then(r=>r.json()).then(s=>{
     document.getElementById('stat-total').textContent=s.total;
@@ -177,13 +199,31 @@ async function loadCards(){
   });
 }
 
-function applySearchFilter(){
+// Signature over exactly the fields renderCards() and the search filter read, so an
+// unchanged poll is a no-op instead of a full innerHTML rebuild (which would destroy
+// the editable .ov overlays mid-typing).
+let _lastRenderSig = null;
+function cardSig(list, q){
+  return q + '##' + list.map(a=>{
+    const bp=a.blueprint||{}, c=a.copy||{};
+    return [a.ad_id, a.decision, a.original_image, a.draft_image, a.created_at,
+            a.page_name, bp.angle, bp.format,
+            c.headline, c.primary_text, c.cta].join('||');
+  }).join('##');
+}
+
+function applySearchFilter(force){
   const q = (document.getElementById('searchBox').value||'').trim().toLowerCase();
   const list = !q ? allArtifacts : allArtifacts.filter(a=>{
     const bp=a.blueprint||{}, c=a.copy||{};
     const hay = [a.page_name, c.headline, c.primary_text, c.cta, bp.angle].join(' ').toLowerCase();
     return hay.includes(q);
   });
+  const sig = cardSig(list, q);
+  // force: regenerated images reuse the same /assets path, so the sig can be identical
+  // even though the bytes changed - explicit user actions must always re-render.
+  if(!force && sig === _lastRenderSig) return;
+  _lastRenderSig = sig;
   renderCards(list);
 }
 
@@ -223,7 +263,7 @@ async function modalEditImage(){
     const r = await fetch('/api/edit_image/'+editModalAdId, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({instruction: inst, aspect})});
     const res = await r.json();
     if(!res.ok){ _aeBusy(false, 'Failed: ' + (res.error||'unknown')); }
-    else { _aeBusy(false, 'Done.'); closeEditModal(); await loadCards(); }
+    else { _aeBusy(false, 'Done.'); closeEditModal(); await loadCards(true); }
   } catch(e) {
     _aeBusy(false, 'Failed: ' + e);
   }
@@ -237,17 +277,81 @@ async function modalEditCopy(){
     const r = await fetch('/api/edit_copy/'+editModalAdId, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({instruction: inst})});
     const res = await r.json();
     if(!res.ok){ _aeBusy(false, 'Failed: ' + (res.error||'unknown')); }
-    else { _aeBusy(false, 'Done.'); closeEditModal(); await loadCards(); }
+    else { _aeBusy(false, 'Done.'); closeEditModal(); await loadCards(true); }
   } catch(e) {
     _aeBusy(false, 'Failed: ' + e);
   }
 }
 
 function imgFallback(el){
+  // A 404 here is often transient - the dashboard can request an asset while the
+  // pipeline is still writing it. The dirty check means the card won't re-render on
+  // its own, so a one-shot retry in place is the only thing that recovers it.
+  if(!el.dataset.imgRetried){
+    el.dataset.imgRetried = '1';
+    const base = el.src.split('?')[0];
+    setTimeout(()=>{ el.src = base + '?retry=' + Date.now(); }, 1500);
+    return;
+  }
+  const wrap = el.closest('.draft-wrap');
   const d = document.createElement('div');
   d.className = 'img-missing';
   d.textContent = 'No image available';
   el.replaceWith(d);
+  if(wrap){
+    wrap.querySelectorAll('.ov').forEach(n=>n.remove());
+    const t = wrap.nextElementSibling;
+    if(t && t.classList.contains('ov-toggles')) t.remove();
+  }
+}
+
+// --- draft text overlay: per-ad_id state, survives re-render within the session ---
+const overlayState = {};
+const OV_FIELDS = [
+  {key:'headline', label:'Headline', ph:'Your headline here'},
+  {key:'offer',    label:'Offer',    ph:'20% OFF'},
+  {key:'price',    label:'Price',    ph:'From £49'},
+];
+
+function ovGet(a){
+  if(!overlayState[a.ad_id]){
+    const c = a.copy || {};
+    overlayState[a.ad_id] = {
+      headline: {text: c.headline || '', show: true},
+      offer:    {text: '', show: true},
+      price:    {text: '', show: false},
+    };
+  }
+  return overlayState[a.ad_id];
+}
+
+function ovEdit(adId, key, el){
+  const st = overlayState[adId];
+  if(st && st[key]) st[key].text = el.innerText.replace(/\n+$/,'');
+}
+
+function ovToggle(adId, key, btn){
+  const st = overlayState[adId];
+  if(!st || !st[key]) return;
+  st[key].show = !st[key].show;
+  btn.classList.toggle('on', st[key].show);
+  const node = document.getElementById('ov-'+key+'-'+adId);
+  if(node) node.classList.toggle('ov-hidden', !st[key].show);
+}
+
+function ovLayer(a){
+  const st = ovGet(a);
+  return OV_FIELDS.map(f=>`<div class="ov ov-${f.key}${st[f.key].show?'':' ov-hidden'}"`
+    + ` id="ov-${f.key}-${a.ad_id}" contenteditable="true" spellcheck="false"`
+    + ` data-ph="${f.ph}" oninput="ovEdit('${a.ad_id}','${f.key}',this)"`
+    + `>${esc(st[f.key].text)}</div>`).join('');
+}
+
+function ovToggles(a){
+  const st = ovGet(a);
+  return `<div class="ov-toggles">` + OV_FIELDS.map(f=>
+    `<button type="button" class="${st[f.key].show?'on':''}"`
+    + ` onclick="ovToggle('${a.ad_id}','${f.key}',this)">${f.label}</button>`).join('') + `</div>`;
 }
 
 function renderCards(data){
@@ -260,7 +364,9 @@ function renderCards(data){
       : dec==='reject'?'<span class="badge reject">Rejected</span>'
       : '<span class="badge pending">Pending</span>';
     const orig = a.original_image?`<img onerror="imgFallback(this)" src="${a.original_image}">`:'';
-    const draft = a.draft_image?`<img onerror="imgFallback(this)" src="${a.draft_image}">`:'';
+    const draft = a.draft_image
+      ? `<div class="draft-wrap"><img onerror="imgFallback(this)" src="${a.draft_image}">${ovLayer(a)}</div>${ovToggles(a)}`
+      : '';
     return `<div class="card">
       <div class="card-head"><span class="comp">${esc(a.page_name)||'Competitor'} <span style="font-size:11px;color:#aaa;font-weight:400;">· ${a.created_at||''}</span></span>${badge}</div>
       <div class="split">
@@ -296,12 +402,12 @@ function closeRejectModal(){ document.getElementById('rejModal').classList.remov
 async function submitReject(reason){
   closeRejectModal();
   await fetch('/api/decision/'+rejectAdId+'/reject?reason='+encodeURIComponent(reason), {method:'POST'});
-  await loadCards(); await loadLog();
+  await loadCards(true); await loadLog();
 }
 
 async function decide(ad,dec){
   await fetch('/api/decision/'+ad+'/'+dec,{method:'POST'});
-  await loadCards(); await loadLog();
+  await loadCards(true); await loadLog();
 }
 
 let selectedCompetitorId = null;
@@ -555,7 +661,7 @@ async function runPipeline(){
       stopProgress(); delete btn.dataset.running; stopBtn.disabled=true;
       updateRunButtonState();
       st.textContent='Loading new ads into the feed...';
-      await loadCards(); await loadLog();
+      await loadCards(true); await loadLog();
       const sm = s.last_summary || {};
       let msg;
       if(sm.error){ msg = 'Run failed: ' + sm.error; }
@@ -575,8 +681,26 @@ async function stopPipeline(){
 function tick(){document.getElementById('clock').textContent=new Date().toLocaleString();}
 setInterval(tick,1000); tick();
 loadCards(); loadLog(); loadCompetitors(); loadProducts();
-function refreshAll(){ loadCards(); loadLog(); }
+// Never rebuild the feed while a caret sits in an overlay. Defer rather than drop, so a
+// pipeline run that finishes mid-typing still lands once the field loses focus.
+let _refreshPending = false;
+function ovEditing(){
+  const el = document.activeElement;
+  return !!(el && el.closest && el.closest('.ov'));
+}
+function refreshAll(){
+  if(ovEditing()){ _refreshPending = true; return; }
+  loadCards(); loadLog();
+}
 setInterval(refreshAll, 3000);
+document.addEventListener('focusout', e=>{
+  if(!_refreshPending || !e.target || !e.target.closest || !e.target.closest('.ov')) return;
+  // focusout fires before the next element gains focus; let it settle, then re-check so
+  // tabbing from one overlay straight into another stays paused.
+  setTimeout(()=>{
+    if(_refreshPending && !ovEditing()){ _refreshPending = false; refreshAll(); }
+  }, 0);
+});
 </script>
 <div class="modal-overlay" id="prodModal" onclick="if(event.target===this)closeProdModal()">
   <div class="modal">

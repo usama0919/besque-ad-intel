@@ -17,10 +17,11 @@ def test_process_ad_dedupes_seen(monkeypatch):
 
 def _mock_all_stages(monkeypatch):
     monkeypatch.setattr(pipeline.assets, "download_image", lambda url, aid: "fake.jpg")
+    monkeypatch.setattr(pipeline.assets, "download_image_bytes", lambda url: b"fake-bytes")
     monkeypatch.setattr(pipeline.deconstruct, "deconstruct_image", lambda **k: {"format": "hero", "angle": "a"})
     monkeypatch.setattr(pipeline.generate_copy, "generate_copy_live", lambda bp: {"headline": "H", "primary_text": "P", "cta": "C"})
     monkeypatch.setattr(pipeline.compliance, "check_compliance", lambda copy, name, text: (True, []))
-    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image", lambda bp, aid: "draft.png")
+    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image", lambda bp, aid, product=None, reference_bytes=None: "draft.png")
     monkeypatch.setattr(pipeline.slack_review, "post_review", lambda *a, **k: {"ts": "123"})
     monkeypatch.setattr(pipeline.dedupe, "save_artifact", lambda **k: None)
 

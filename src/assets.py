@@ -43,7 +43,12 @@ class GCSStorage:
     """
 
     def __init__(self, bucket=None):
-        from google.cloud import storage
+        try:
+            from google.cloud import storage
+        except ModuleNotFoundError as e:
+            raise NotImplementedError(
+                "GCS backend not provisioned: google-cloud-storage not installed"
+            ) from e
         self._client = storage.Client()
         self._bucket = self._client.bucket(bucket or os.getenv("GCS_BUCKET", "besque-ad-intel-assets"))
 
@@ -72,9 +77,11 @@ def _backend():
 
 
 def download_image_bytes(image_url):
-    """Download an image and return raw bytes (no storage)."""
+    """Download an image and return raw bytes (no storage). Raises on HTTP error so a
+    CDN error body is never passed to the vision call as if it were an image."""
     import httpx
     with httpx.stream("GET", image_url, timeout=30, follow_redirects=True) as r:
+        r.raise_for_status()
         return r.read()
 
 

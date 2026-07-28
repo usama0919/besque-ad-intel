@@ -10,6 +10,8 @@ assets/
 run_output.txt
 
 # throwaway diagnostic scripts and dumps
+text_fidelity_probe.py
+text_fidelity_out/
 addtracked.py
 checkfeed.py
 checklookup.py
@@ -24,6 +26,8 @@ probejob.py
 brandscheme.py
 test_nano_banana_isolated.py
 test_one_ad_debug.py
+backfill_classify.py
+cleanup_testbrand.py
 *.log
 *_dump*.txt
 *_result.txt

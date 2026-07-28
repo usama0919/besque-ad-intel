@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 DB_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/besque")
+FORCE_REPROCESS = os.getenv("FORCE_REPROCESS") == "1"
 
 
 def get_conn():
@@ -105,9 +106,12 @@ def init_artifacts():
 def save_artifact(ad_id, page_name, image_path, blueprint, generated_copy, draft_image, metadata, image_prompt="", copy_prompt="", model_info=""):
     """Persist all artifacts for one ad with a timestamp. Skips if ad_id already stored."""
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT 1 FROM artifacts WHERE ad_id = %s", (ad_id,))
-        if cur.fetchone() is not None:
-            return
+        if FORCE_REPROCESS:
+            cur.execute("DELETE FROM artifacts WHERE ad_id = %s", (ad_id,))
+        else:
+            cur.execute("SELECT 1 FROM artifacts WHERE ad_id = %s", (ad_id,))
+            if cur.fetchone() is not None:
+                return
         cur.execute(
             """INSERT INTO artifacts
                (ad_id, page_name, image_path, blueprint, generated_copy, draft_image, metadata, image_prompt, copy_prompt, model_info)
@@ -269,6 +273,14 @@ def update_artifact_copy(ad_id, generated_copy):
     """Replace the generated copy for one artifact."""
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("UPDATE artifacts SET generated_copy=%s WHERE ad_id=%s", (_json.dumps(generated_copy), ad_id))
+        conn.commit()
+
+
+def update_artifact_image_prompt(ad_id, image_prompt):
+    """Replace the recorded image prompt for one artifact, so the prompt shown in the
+    dashboard matches the PNG currently on disk after an image edit."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("UPDATE artifacts SET image_prompt=%s WHERE ad_id=%s", (image_prompt, ad_id))
         conn.commit()
 
 

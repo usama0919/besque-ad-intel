@@ -191,6 +191,17 @@ async def api_edit_image(ad_id: str, request: Request):
     result = generate_image_prompt.edit_image(current, instruction, ad_id, aspect=aspect)
     if result is None:
         return JSONResponse({"ok": False, "error": "image edit failed"})
+    # Record the prompt that actually produced the PNG now on disk, so the Edit modal stops
+    # showing the original generation prompt after an edit. Read straight after the call,
+    # the same way pipeline.py picks up generate_image.last_prompt.
+    img_prompt = getattr(generate_image_prompt.edit_image, "last_prompt", "")
+    if img_prompt:
+        # Non-fatal: the edited image is already saved, so a bookkeeping failure here must
+        # not report the edit itself as failed.
+        try:
+            dedupe.update_artifact_image_prompt(ad_id, img_prompt)
+        except Exception as e:
+            print(f"[api_edit_image] ad_id={ad_id} prompt record failed (non-fatal): {e}")
     return JSONResponse({"ok": True, "ad_id": ad_id})
 
 
@@ -215,7 +226,7 @@ async def api_edit_copy(ad_id: str, request: Request):
         client = anthropic.Anthropic(timeout=60.0, max_retries=1)
         message = client.messages.create(
             model=os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6"),
-            max_tokens=1024,
+            max_tokens=3072,
             messages=[{"role": "user", "content": prompt}],
         )
         raw = message.content[0].text.strip()
@@ -352,11 +363,13 @@ def api_competitors():
 
 
 @app.post("/api/competitors")
-def api_add_competitor(name: str):
-    """Append a new competitor to the watchlist table. Never overwrites existing rows."""
+def api_add_competitor(name: str, page_id: str = ""):
+    """Append a new competitor to the watchlist table. Never overwrites existing rows.
+    page_id falls back to name when omitted, matching the PUT handler below."""
     dedupe.init_competitors()
-    new_id = dedupe.add_competitor(name, name)
-    return JSONResponse({"ok": True, "id": new_id, "name": name, "page_id": name})
+    resolved_page_id = page_id or name
+    new_id = dedupe.add_competitor(name, resolved_page_id)
+    return JSONResponse({"ok": True, "id": new_id, "name": name, "page_id": resolved_page_id})
 
 
 @app.put("/api/competitors/{competitor_id}")

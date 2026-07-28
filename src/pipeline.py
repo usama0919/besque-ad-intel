@@ -3,12 +3,16 @@
 One scheduled run across the watchlist. Each ad is failure-isolated: one bad
 ad or failed stage is skipped cleanly without stopping the run.
 """
+import os
 import logging
 from src import dedupe, scrape, assets, deconstruct, generate_copy, generate_image_prompt, slack_review, compliance
 from src.retry import with_retry
 
+FORCE_REPROCESS = os.getenv("FORCE_REPROCESS") == "1"
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("pipeline")
+log.info("FORCE_REPROCESS=%s", FORCE_REPROCESS)
 
 
 def process_ad(ad, product=None, reference_bytes=None):
@@ -17,7 +21,7 @@ def process_ad(ad, product=None, reference_bytes=None):
     if not ad_id:
         return "failed"
     try:
-        if not dedupe.is_new(ad_id):
+        if not FORCE_REPROCESS and not dedupe.is_new(ad_id):
             log.info("Ad %s already seen, skipping", ad_id)
             return "skipped"
 
@@ -29,6 +33,8 @@ def process_ad(ad, product=None, reference_bytes=None):
             source_page=ad.get("page_name", ""),
             captured_at=ad.get("start_date", ""),
             destination_url=ad.get("destination_url", ""),
+            ad_text=ad.get("text", ""),
+            cta=ad.get("cta", ""),
         )
         copy = generate_copy.generate_copy_live(blueprint)
         ok, issues = compliance.check_compliance(copy, ad.get("page_name", ""), ad.get("text", ""))
@@ -38,8 +44,11 @@ def process_ad(ad, product=None, reference_bytes=None):
         try:
             draft_image = generate_image_prompt.generate_image(blueprint, ad_id, product=product, reference_bytes=reference_bytes)
         except Exception as e:
-            log.warning("Image generation slow/failed for %s, continuing without draft image: %s", ad_id, e)
+            log.error("Ad %s failed: image generation raised: %s", ad_id, e)
             draft_image = None
+        if not draft_image:
+            log.error("Ad %s failed: no draft image produced - not saving a half-complete artifact", ad_id)
+            return "failed"
 
         img_prompt = getattr(generate_image_prompt.generate_image, "last_prompt", "")
         cp_prompt = getattr(generate_copy.generate_copy_live, "last_prompt", "")
