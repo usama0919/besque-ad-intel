@@ -146,18 +146,19 @@ def init_competitors():
                 id          SERIAL PRIMARY KEY,
                 name        TEXT NOT NULL,
                 page_id     TEXT NOT NULL,
-                created_at  TIMESTAMPTZ DEFAULT now()
+                created_at  TIMESTAMPTZ DEFAULT now(),
+                category    TEXT DEFAULT ''
             )
         """)
         conn.commit()
 
 
-def add_competitor(name: str, page_id: str) -> int:
+def add_competitor(name: str, page_id: str, category: str = "") -> int:
     """Append a new competitor row. Never overwrites existing rows."""
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO competitors (name, page_id) VALUES (%s, %s) RETURNING id",
-            (name, page_id),
+            "INSERT INTO competitors (name, page_id, category) VALUES (%s, %s, %s) RETURNING id",
+            (name, page_id, category),
         )
         new_id = cur.fetchone()[0]
         conn.commit()
@@ -165,18 +166,18 @@ def add_competitor(name: str, page_id: str) -> int:
 
 
 def get_competitors():
-    """Return all competitors, oldest first. List of dicts: id, name, page_id, created_at."""
+    """Return all competitors, oldest first. List of dicts: id, name, page_id, created_at, category."""
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT id, name, page_id, created_at, suggested_name FROM competitors ORDER BY id")
-        cols = ["id", "name", "page_id", "created_at", "suggested_name"]
+        cur.execute("SELECT id, name, page_id, created_at, suggested_name, category FROM competitors ORDER BY id")
+        cols = ["id", "name", "page_id", "created_at", "suggested_name", "category"]
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
-def update_competitor(competitor_id: int, name: str, page_id: str) -> None:
+def update_competitor(competitor_id: int, name: str, page_id: str, category: str = "") -> None:
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
-            "UPDATE competitors SET name = %s, page_id = %s WHERE id = %s",
-            (name, page_id, competitor_id),
+            "UPDATE competitors SET name = %s, page_id = %s, category = %s WHERE id = %s",
+            (name, page_id, category, competitor_id),
         )
         conn.commit()
 

@@ -84,10 +84,14 @@ def process_ad(ad, product=None, reference_bytes=None):
         return "failed"
 
 
-def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product_id=None):
+def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product_id=None, category=None):
     """One scheduled run across the watchlist, or a single competitor if
-    competitor_id is given. should_stop is an optional zero-arg callable
-    checked between ads/competitors to cooperatively halt the run early."""
+    competitor_id is given, or every competitor tagged with `category` if that's
+    given instead. competitor_id takes precedence if both are somehow passed.
+    category="" is treated the same as category=None (no filter, every
+    competitor runs) - it does NOT mean "match competitors with no category set."
+    should_stop is an optional zero-arg callable checked between ads/competitors
+    to cooperatively halt the run early."""
     from src.config_check import validate_config
     validate_config()
     dedupe.init_db()
@@ -110,6 +114,10 @@ def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product
     competitors = dedupe.get_competitors()
     if competitor_id is not None:
         competitors = [c for c in competitors if c.get("id") == competitor_id]
+    elif category:
+        # Falsy check, not `is not None`: category="" must mean "no filter", the
+        # same as category=None, NOT "match untagged competitors."
+        competitors = [c for c in competitors if (c.get("category") or "") == category]
     summary = {"processed": 0, "skipped": 0, "failed": 0}
 
     for competitor in competitors:
@@ -134,7 +142,8 @@ def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product
                 if ads and (not current_pid or current_pid == str(name).strip()):
                     found = next((a.get("page_id") for a in ads if a.get("page_id")), None)
                     if found:
-                        dedupe.update_competitor(competitor["id"], name, found)
+                        dedupe.update_competitor(competitor["id"], name=name, page_id=found,
+                                                  category=competitor.get("category") or "")
                         log.info("Auto-captured page_id %s for %s", found, name)
             except Exception as _e:
                 log.warning("page_id auto-capture failed (non-fatal): %s", _e)

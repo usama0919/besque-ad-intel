@@ -190,6 +190,14 @@
 <script>
 function esc(s){return (s||"").replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
 
+// Same enum products use, so a competitor's category can only ever be one a
+// pipeline run could actually match against.
+const PRODUCT_CATEGORIES = {{ product_categories | tojson }};
+function categoryOptions(selected){
+  return '<option value="">(not set)</option>' + PRODUCT_CATEGORIES.map(c =>
+    `<option value="${esc(c)}"${c===selected?' selected':''}>${esc(c)}</option>`).join('');
+}
+
 let allArtifacts = [];
 
 async function loadCards(force){
@@ -603,6 +611,9 @@ async function loadCompetitors(){
           <button class="mini mini-r" onclick="removeCompetitor(${c.id})">Remove</button>
         </div>
       </div>
+      <div class="prod-detail" style="font-size:12px;color:#777;margin-top:4px;cursor:pointer;" onclick="editCompetitor(${c.id})">
+        <span class="cat-badge${c.category?'':' cat-none'}">${esc(c.category||'no category')}</span>
+      </div>
     </div>`).join('');
   updateRunButtonState();
 }
@@ -638,6 +649,7 @@ function editCompetitor(id){
   row.innerHTML = `<div class="comp-edit" style="flex-direction:column;align-items:stretch;gap:6px;">
       <input value="${esc(current)}" id="edit-${id}" placeholder="Name">
       <input value="${esc(pid)}" id="editpid-${id}" placeholder="Meta page ID or Ad Library URL (optional, exact match)">
+      <select id="editcat-${id}" style="padding:8px;border:1px solid #ccc;border-radius:7px;font-size:12px;">${categoryOptions(comp.category||'')}</select>
       <div class="comp-actions">
         <button class="mini" onclick="saveCompetitor(${id})">Save</button>
         <button class="mini" onclick="loadCompetitors()">Cancel</button>
@@ -649,7 +661,10 @@ async function saveCompetitor(id){
   const val = document.getElementById('edit-'+id).value.trim();
   if(!val){ return; }
   const pidv = (document.getElementById('editpid-'+id)||{value:''}).value.trim();
-  await fetch('/api/competitors/'+id+'?name='+encodeURIComponent(val)+(pidv?('&page_id='+encodeURIComponent(pidv)):''), {method:'PUT'});
+  const catv = (document.getElementById('editcat-'+id)||{value:''}).value;
+  await fetch('/api/competitors/'+id+'?name='+encodeURIComponent(val)
+    +(pidv?('&page_id='+encodeURIComponent(pidv)):'')
+    +'&category='+encodeURIComponent(catv), {method:'PUT'});
   loadCompetitors();
 }
 

@@ -87,6 +87,68 @@ def test_process_ad_compliance_fail_is_failed(monkeypatch):
     assert pipeline.process_ad(ad) == "failed"
 
 
+_FAKE_COMPETITORS = [
+    {"id": 1, "name": "OSEA", "page_id": "1", "category": "body_oil"},
+    {"id": 2, "name": "CeraVe", "page_id": "2", "category": "moisturizer"},
+    {"id": 3, "name": "Kiehl's", "page_id": "3", "category": "body_oil"},
+]
+
+
+def _mock_competitor_selection(monkeypatch):
+    monkeypatch.setattr(pipeline.dedupe, "get_competitors", lambda: _FAKE_COMPETITORS)
+    monkeypatch.setattr(pipeline.scrape, "scrape_ads", lambda *a, **k: [])
+
+
+def test_run_once_competitor_id_selects_exactly_one(monkeypatch):
+    """Regression guard. Adding the category filter to run_once must not disturb the
+    existing single-competitor path: competitor_id alone, or competitor_id together
+    with an (irrelevant) category, must both still select exactly one competitor.
+    We prove "which competitors were selected" by recording every name scrape_ads
+    was called with, rather than asserting on run_once's return value."""
+    _mock_competitor_selection(monkeypatch)
+    selected = []
+    monkeypatch.setattr(pipeline.scrape, "scrape_ads", lambda name, page_id=None: selected.append(name) or [])
+
+    pipeline.run_once(competitor_id=2)
+    assert selected == ["CeraVe"]
+
+    # competitor_id must win even if a category is also passed.
+    selected.clear()
+    pipeline.run_once(competitor_id=2, category="body_oil")
+    assert selected == ["CeraVe"]
+
+
+def test_run_once_empty_string_category_is_not_a_filter(monkeypatch):
+    """Regression guard. category="" must behave like category=None (run every
+    competitor), NOT like a filter matching competitors with no category set -
+    otherwise an empty dropdown selection would silently scope a run down to
+    only untagged competitors instead of running everything."""
+    _mock_competitor_selection(monkeypatch)
+    selected = []
+    monkeypatch.setattr(pipeline.scrape, "scrape_ads", lambda name, page_id=None: selected.append(name) or [])
+
+    pipeline.run_once(category="")
+    assert selected == ["OSEA", "CeraVe", "Kiehl's"]
+
+
+def test_run_once_category_selects_matching_competitors(monkeypatch):
+    _mock_competitor_selection(monkeypatch)
+    selected = []
+    monkeypatch.setattr(pipeline.scrape, "scrape_ads", lambda name, page_id=None: selected.append(name) or [])
+
+    pipeline.run_once(category="body_oil")
+    assert selected == ["OSEA", "Kiehl's"]
+
+
+def test_run_once_no_filter_hits_all_competitors(monkeypatch):
+    _mock_competitor_selection(monkeypatch)
+    selected = []
+    monkeypatch.setattr(pipeline.scrape, "scrape_ads", lambda name, page_id=None: selected.append(name) or [])
+
+    pipeline.run_once()
+    assert selected == ["OSEA", "CeraVe", "Kiehl's"]
+
+
 def test_process_ad_failure_isolated(monkeypatch):
     dedupe.init_db()
     ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"

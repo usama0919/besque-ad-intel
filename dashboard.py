@@ -251,7 +251,9 @@ def api_accept_name(competitor_id: int, accept: bool = True):
     if comp is None:
         return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
     if accept and comp.get("suggested_name"):
-        dedupe.update_competitor(competitor_id, comp["suggested_name"], comp.get("page_id") or comp["suggested_name"])
+        dedupe.update_competitor(competitor_id, name=comp["suggested_name"],
+                                  page_id=(comp.get("page_id") or comp["suggested_name"]),
+                                  category=comp.get("category") or "")
     dedupe.set_suggested_name(competitor_id, "")
     return JSONResponse({"ok": True})
 
@@ -364,23 +366,25 @@ def api_delete_product(product_id: int):
 def api_competitors():
     dedupe.init_competitors()
     rows = dedupe.get_competitors()
-    return JSONResponse([{"id": r["id"], "name": r["name"], "page_id": r["page_id"], "suggested_name": r.get("suggested_name") or ""} for r in rows])
+    return JSONResponse([{"id": r["id"], "name": r["name"], "page_id": r["page_id"],
+                          "suggested_name": r.get("suggested_name") or "",
+                          "category": r.get("category") or ""} for r in rows])
 
 
 @app.post("/api/competitors")
-def api_add_competitor(name: str, page_id: str = ""):
+def api_add_competitor(name: str, page_id: str = "", category: str = ""):
     """Append a new competitor to the watchlist table. Never overwrites existing rows.
     page_id falls back to name when omitted, matching the PUT handler below."""
     dedupe.init_competitors()
     resolved_page_id = page_id or name
-    new_id = dedupe.add_competitor(name, resolved_page_id)
-    return JSONResponse({"ok": True, "id": new_id, "name": name, "page_id": resolved_page_id})
+    new_id = dedupe.add_competitor(name=name, page_id=resolved_page_id, category=category)
+    return JSONResponse({"ok": True, "id": new_id, "name": name, "page_id": resolved_page_id, "category": category})
 
 
 @app.put("/api/competitors/{competitor_id}")
-def api_update_competitor(competitor_id: int, name: str, page_id: str = None):
-    dedupe.update_competitor(competitor_id, name, page_id if page_id else name)
-    return JSONResponse({"ok": True, "id": competitor_id, "name": name})
+def api_update_competitor(competitor_id: int, name: str, page_id: str = None, category: str = ""):
+    dedupe.update_competitor(competitor_id, name=name, page_id=(page_id if page_id else name), category=category)
+    return JSONResponse({"ok": True, "id": competitor_id, "name": name, "category": category})
 
 
 @app.delete("/api/competitors/{competitor_id}")
