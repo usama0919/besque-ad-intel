@@ -1,4 +1,4 @@
-﻿import json
+import json
 import pytest
 from src import generate_copy
 

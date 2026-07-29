@@ -1,4 +1,4 @@
-﻿"""Slack Socket Mode listener: handles Approve/Reject clicks, saves to Postgres.
+"""Slack Socket Mode listener: handles Approve/Reject clicks, saves to Postgres.
 Run alongside the pipeline."""
 import os
 import logging

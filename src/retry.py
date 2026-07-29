@@ -1,4 +1,4 @@
-﻿"""Retry helper: run a flaky operation with a few attempts before giving up.
+"""Retry helper: run a flaky operation with a few attempts before giving up.
 
 Used to wrap the Apify scrape and other network calls so transient failures
 retry, and a persistent failure returns cleanly instead of crashing the run.

@@ -1,4 +1,4 @@
-﻿from src import compliance
+from src import compliance
 
 
 def test_clean_copy_passes():

@@ -1,4 +1,4 @@
-﻿from src import assets
+from src import assets
 
 
 def test_local_storage_saves_bytes(tmp_path):

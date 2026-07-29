@@ -1,4 +1,4 @@
-﻿from src import slack_review
+from src import slack_review
 
 
 def _inputs():

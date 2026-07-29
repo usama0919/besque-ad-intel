@@ -1,4 +1,4 @@
-﻿"""Scheduler: runs the pipeline on a daily cadence.
+"""Scheduler: runs the pipeline on a daily cadence.
 
 For the PoC this runs an immediate pass, then repeats every INTERVAL_HOURS.
 In production, prefer the OS scheduler (cron / Task Scheduler / GCP Cloud

@@ -1,4 +1,4 @@
-﻿"""Compliance check: verifies generated Besque output contains no competitor
+"""Compliance check: verifies generated Besque output contains no competitor
 brand name or verbatim competitor copy. Acceptance criterion enforcement.
 """
 import re
