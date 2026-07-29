@@ -226,39 +226,47 @@ def init_products():
                 hero_claim TEXT DEFAULT '',
                 created_at TIMESTAMP DEFAULT NOW(),
                 image_key TEXT DEFAULT '',
-                category TEXT DEFAULT ''
+                category TEXT DEFAULT '',
+                image_keys JSONB DEFAULT '[]'::jsonb,
+                visual_description TEXT DEFAULT ''
             )"""
         )
         conn.commit()
 
 
+_PRODUCT_COLS = "id, name, description, ingredients, hero_claim, image_key, category, image_keys, visual_description"
+
+
+def _product_row_to_dict(r):
+    return {"id": r[0], "name": r[1], "description": r[2], "ingredients": r[3], "hero_claim": r[4],
+            "image_key": r[5] or "", "category": r[6] or "", "image_keys": r[7] or [],
+            "visual_description": r[8] or ""}
+
+
 def get_products():
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT id, name, description, ingredients, hero_claim, image_key, category FROM products ORDER BY id")
-        return [
-            {"id": r[0], "name": r[1], "description": r[2], "ingredients": r[3], "hero_claim": r[4],
-             "image_key": r[5] or "", "category": r[6] or ""}
-            for r in cur.fetchall()
-        ]
+        cur.execute(f"SELECT {_PRODUCT_COLS} FROM products ORDER BY id")
+        return [_product_row_to_dict(r) for r in cur.fetchall()]
 
 
-def add_product(name, description="", ingredients="", hero_claim="", category=""):
+def add_product(name, description="", ingredients="", hero_claim="", category="", visual_description=""):
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO products (name, description, ingredients, hero_claim, category) "
-            "VALUES (%s, %s, %s, %s, %s) RETURNING id",
-            (name, description, ingredients, hero_claim, category),
+            "INSERT INTO products (name, description, ingredients, hero_claim, category, visual_description) "
+            "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
+            (name, description, ingredients, hero_claim, category, visual_description),
         )
         new_id = cur.fetchone()[0]
         conn.commit()
         return new_id
 
 
-def update_product(product_id, name, description, ingredients, hero_claim, category=""):
+def update_product(product_id, name, description, ingredients, hero_claim, category="", visual_description=""):
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
-            "UPDATE products SET name=%s, description=%s, ingredients=%s, hero_claim=%s, category=%s WHERE id=%s",
-            (name, description, ingredients, hero_claim, category, product_id),
+            "UPDATE products SET name=%s, description=%s, ingredients=%s, hero_claim=%s, category=%s, "
+            "visual_description=%s WHERE id=%s",
+            (name, description, ingredients, hero_claim, category, visual_description, product_id),
         )
         conn.commit()
 
@@ -271,12 +279,79 @@ def delete_product(product_id):
 
 def get_product(product_id):
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT id, name, description, ingredients, hero_claim, image_key, category FROM products WHERE id=%s", (product_id,))
+        cur.execute(f"SELECT {_PRODUCT_COLS} FROM products WHERE id=%s", (product_id,))
         r = cur.fetchone()
         if r is None:
             return None
-        return {"id": r[0], "name": r[1], "description": r[2], "ingredients": r[3], "hero_claim": r[4],
-                "image_key": r[5] or "", "category": r[6] or ""}
+        return _product_row_to_dict(r)
+
+
+MAX_PRODUCT_IMAGES = 4
+
+
+def add_product_image(product_id, key):
+    """Append a reference image key to a product's fixed photo set. Raises ValueError
+    past MAX_PRODUCT_IMAGES rather than silently dropping or replacing an existing photo -
+    the set is meant to be curated, not rotating."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT image_keys FROM products WHERE id=%s", (product_id,))
+        r = cur.fetchone()
+        if r is None:
+            raise ValueError(f"product {product_id} not found")
+        keys = (r[0] or []) + [key]
+        if len(keys) > MAX_PRODUCT_IMAGES:
+            raise ValueError(f"product {product_id} already has {MAX_PRODUCT_IMAGES} reference images")
+        cur.execute("UPDATE products SET image_keys=%s WHERE id=%s", (_json.dumps(keys), product_id))
+        conn.commit()
+
+
+def remove_product_image(product_id, key):
+    """Remove one reference image key from a product's photo set. Does not touch the
+    stored blob - callers that also want the blob deleted must do that themselves."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT image_keys FROM products WHERE id=%s", (product_id,))
+        r = cur.fetchone()
+        if r is None:
+            raise ValueError(f"product {product_id} not found")
+        keys = [k for k in (r[0] or []) if k != key]
+        cur.execute("UPDATE products SET image_keys=%s WHERE id=%s", (_json.dumps(keys), product_id))
+        conn.commit()
+
+
+# ---- Pipeline warnings (durable, so a run triggered via the Cloud Run Job path
+# surfaces problems in the dashboard exactly the same as a local run - the job
+# process's return value is otherwise never seen by anything) ----
+
+def init_pipeline_warnings():
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS pipeline_warnings (
+                id          SERIAL PRIMARY KEY,
+                kind        TEXT NOT NULL,
+                detail      TEXT NOT NULL,
+                created_at  TIMESTAMPTZ DEFAULT now()
+            )
+        """)
+        conn.commit()
+
+
+def record_warning(kind, detail):
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO pipeline_warnings (kind, detail) VALUES (%s, %s)",
+            (kind, detail),
+        )
+        conn.commit()
+
+
+def get_recent_warnings(limit=20):
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, kind, detail, created_at FROM pipeline_warnings ORDER BY id DESC LIMIT %s",
+            (limit,),
+        )
+        cols = ["id", "kind", "detail", "created_at"]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
 def update_artifact_copy(ad_id, generated_copy):

@@ -15,7 +15,51 @@ log = logging.getLogger("pipeline")
 log.info("FORCE_REPROCESS=%s", FORCE_REPROCESS)
 
 
-def process_ad(ad, product=None, reference_bytes=None):
+def effective_image_keys(product):
+    """The reference image keys to use for a product: the fixed multi-photo set if any
+    is configured, else a single-item list from the legacy image_key (frozen, pre-multi-
+    image products), else empty. Isolates the back-compat fallback to one place rather
+    than scattering `image_keys or [image_key]` checks across every caller."""
+    if not product:
+        return []
+    keys = product.get("image_keys") or []
+    if keys:
+        return keys
+    return [product["image_key"]] if product.get("image_key") else []
+
+
+def fetch_reference_images(product):
+    """Fetch bytes for every effective reference image key of `product`. Returns
+    (images, warning) where warning is None, or a (kind, detail) tuple describing
+    either "no images configured" or "N of M configured images failed to fetch" -
+    the caller decides what to do with it (log + persist), so this stays a pure
+    fetch. Never silently returns an empty list without saying why."""
+    keys = effective_image_keys(product)
+    if not keys:
+        return [], ("no_reference_photo",
+                     f"Product '{product.get('name', '?')}' (id={product.get('id', '?')}) "
+                     f"has no reference images configured - generating without a fixed reference.")
+    images = []
+    failed = []
+    for key in keys:
+        try:
+            from google.cloud import storage as _storage
+            blob = _storage.Client().bucket(assets.asset_bucket_name()).blob(key)
+            if blob.exists():
+                images.append(blob.download_as_bytes())
+            else:
+                failed.append(f"{key}: not found in bucket")
+        except Exception as e:
+            failed.append(f"{key}: {e}")
+    if failed:
+        return images, ("reference_photo_fetch_failed",
+                         f"Product '{product.get('name', '?')}' (id={product.get('id', '?')}): "
+                         f"{len(failed)} of {len(keys)} configured reference image(s) failed to fetch - "
+                         + "; ".join(failed))
+    return images, None
+
+
+def process_ad(ad, product=None, reference_images=None):
     """Run one ad through the full pipeline. Returns processed/skipped/failed."""
     ad_id = ad.get("ad_id")
     if not ad_id:
@@ -42,7 +86,7 @@ def process_ad(ad, product=None, reference_bytes=None):
             log.warning("Ad %s failed compliance check: %s", ad_id, issues)
             return "failed"
         try:
-            draft_image = generate_image_prompt.generate_image(blueprint, ad_id, product=product, reference_bytes=reference_bytes)
+            draft_image = generate_image_prompt.generate_image(blueprint, ad_id, product=product, reference_images=reference_images)
         except Exception as e:
             log.error("Ad %s failed: image generation raised: %s", ad_id, e)
             draft_image = None
@@ -100,15 +144,15 @@ def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product
     dedupe.init_competitors()
     dedupe.init_products()
     product = dedupe.get_product(product_id) if product_id else None
-    reference_bytes = None
-    if product and product.get("image_key"):
-        try:
-            from google.cloud import storage as _storage
-            _blob = _storage.Client().bucket(assets.asset_bucket_name()).blob(product["image_key"])
-            if _blob.exists():
-                reference_bytes = _blob.download_as_bytes()
-        except Exception as _e:
-            print(f"Reference photo fetch failed (non-fatal): {_e}")
+    reference_images = []
+    reference_warning = None
+    if product:
+        reference_images, reference_warning = fetch_reference_images(product)
+        if reference_warning:
+            kind, detail = reference_warning
+            log.warning("%s: %s", kind, detail)
+            dedupe.init_pipeline_warnings()
+            dedupe.record_warning(kind, detail)
     should_stop = should_stop or (lambda: False)
 
     competitors = dedupe.get_competitors()
@@ -118,7 +162,7 @@ def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product
         # Falsy check, not `is not None`: category="" must mean "no filter", the
         # same as category=None, NOT "match untagged competitors."
         competitors = [c for c in competitors if (c.get("category") or "") == category]
-    summary = {"processed": 0, "skipped": 0, "failed": 0}
+    summary = {"processed": 0, "skipped": 0, "failed": 0, "reference_photo_warning": reference_warning}
 
     for competitor in competitors:
         if should_stop():
@@ -158,7 +202,7 @@ def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product
             if processed_this_comp >= max_per_competitor:
                 log.info("Reached cap of %s new ads for %s, stopping.", max_per_competitor, name)
                 break
-            result = process_ad(ad, product=product, reference_bytes=reference_bytes)
+            result = process_ad(ad, product=product, reference_images=reference_images)
             summary[result] += 1
             if result == "processed":
                 processed_this_comp += 1

@@ -137,6 +137,7 @@
   </div>
   <div class="sub" id="clock"></div>
 </header>
+<div id="warningsBanner" style="display:none;background:#fdf3e0;color:#8a5a12;border:1px solid #f0dcb4;border-radius:8px;padding:10px 14px;margin:0 24px 12px;font-size:13px;"></div>
 <div class="bar">
   <select id="adCount" style="padding:9px;border:1px solid #ccc;border-radius:7px;font-size:13px;">
     <option value="1">1 ad</option>
@@ -474,6 +475,7 @@ let selectedProductId = null;
         </div>
         <div class="prod-detail" style="font-size:12px;color:#777;margin-top:4px;cursor:pointer;" onclick="editProduct(${p.id})">
           <span class="cat-badge${p.category?'':' cat-none'}">${esc(p.category||'no category')}</span>
+          <span class="cat-badge${(p.image_keys||[]).length?'':' cat-none'}">${(p.image_keys||[]).length}/${MAX_PRODUCT_IMAGES} photos</span>
           ${esc(p.description||'').slice(0,120)}</div>
       </div>`).join('');
   }
@@ -495,6 +497,62 @@ let selectedProductId = null;
   }
 
   let prodModalId = null;
+  const MAX_PRODUCT_IMAGES = 4; // mirrors dedupe.MAX_PRODUCT_IMAGES
+
+  function renderPmPhotoList(p){
+    const el = document.getElementById('pmPhotoList');
+    if(!p){ el.innerHTML=''; document.getElementById('pmPhoto').disabled = true; return; }
+    const keys = p.image_keys || [];
+    let html = '';
+    if(p.image_key){
+      html += `<div style="font-size:12px;color:#999;margin-bottom:4px;">Legacy photo on file (frozen - not replaced by new uploads): ${esc(p.image_key)}</div>`;
+    }
+    if(!keys.length){
+      html += `<div style="font-size:12px;color:#999;">No reference photos yet (0/${MAX_PRODUCT_IMAGES})</div>`;
+    } else {
+      html += keys.map(k => `<div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;padding:3px 0;">`
+        + `<span>${esc(k)}</span>`
+        + `<span style="cursor:pointer;color:#c0392b;font-weight:600;" onclick="removePmPhoto(${p.id},'${esc(k).replace(/'/g,"\\'")}')">Remove</span></div>`).join('')
+        + `<div style="font-size:11px;color:#999;margin-top:4px;">${keys.length}/${MAX_PRODUCT_IMAGES} photos</div>`;
+    }
+    el.innerHTML = html;
+    document.getElementById('pmPhoto').disabled = keys.length >= MAX_PRODUCT_IMAGES;
+  }
+
+  async function refreshPmPhotoList(pid){
+    const r = await fetch('/api/products'); const all = await r.json();
+    _productsCache = all;
+    renderPmPhotoList(all.find(x=>x.id===pid));
+  }
+
+  async function onPmPhotoSelected(){
+    const input = document.getElementById('pmPhoto');
+    if(!input.files || !input.files.length) return;
+    if(!prodModalId){
+      alert('Save the product first, then add photos.');
+      input.value = '';
+      return;
+    }
+    const file = input.files[0];
+    input.value = '';
+    document.getElementById('pmPhotoList').innerHTML = '<div style="font-size:12px;color:#777;">Uploading...</div>';
+    const bytes = await file.arrayBuffer();
+    const r = await fetch('/api/products/'+prodModalId+'/photo', {method:'POST', body: bytes});
+    const res = await r.json();
+    if(!res.ok){ alert('Photo upload failed: ' + (res.error||'unknown')); }
+    await refreshPmPhotoList(prodModalId);
+    loadProducts();
+  }
+
+  async function removePmPhoto(pid, key){
+    if(!confirm('Remove this reference photo?')) return;
+    const r = await fetch('/api/products/'+pid+'/photo/remove', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({key})});
+    const res = await r.json();
+    if(!res.ok){ alert('Remove failed: ' + (res.error||'unknown')); }
+    else if(res.warning){ alert(res.warning); }
+    await refreshPmPhotoList(pid);
+    loadProducts();
+  }
 
   function editProduct(id){
     const p = _productsCache.find(x=>x.id===id); if(!p) return;
@@ -505,15 +563,17 @@ let selectedProductId = null;
     document.getElementById('pmIngr').value = p.ingredients || '';
     document.getElementById('pmHero').value = p.hero_claim || '';
     document.getElementById('pmCat').value = p.category || '';
+    document.getElementById('pmVisDesc').value = p.visual_description || '';
     document.getElementById('pmPhoto').value = '';
-    document.getElementById('pmPhotoStatus').textContent = p.image_key ? 'Photo on file: ' + p.image_key : 'No reference photo yet';
+    renderPmPhotoList(p);
     document.getElementById('prodModal').classList.add('open');
   }
 
   function openNewProdModal(){
     prodModalId = null;
     document.getElementById('prodModalTitle').textContent = 'New Product';
-    ['pmName','pmDesc','pmIngr','pmHero','pmCat'].forEach(i=>document.getElementById(i).value='');
+    ['pmName','pmDesc','pmIngr','pmHero','pmCat','pmVisDesc'].forEach(i=>document.getElementById(i).value='');
+    renderPmPhotoList(null);
     document.getElementById('prodModal').classList.add('open');
   }
 
@@ -526,19 +586,20 @@ let selectedProductId = null;
       ingredients: document.getElementById('pmIngr').value.trim(),
       hero_claim: document.getElementById('pmHero').value.trim(),
       category: document.getElementById('pmCat').value,
+      visual_description: document.getElementById('pmVisDesc').value.trim(),
     });
     if(!JSON.parse(body).name){ alert('Name is required'); return; }
     const url = prodModalId ? '/api/products/'+prodModalId : '/api/products';
     const resp = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body});
     const saved = await resp.json();
-    const pid = prodModalId || saved.id;
-    const photoInput = document.getElementById('pmPhoto');
-    if(pid && photoInput.files && photoInput.files.length){
-      document.getElementById('pmPhotoStatus').textContent = 'Uploading photo...';
-      const bytes = await photoInput.files[0].arrayBuffer();
-      const ur = await fetch('/api/products/'+pid+'/photo', {method:'POST', body: bytes});
-      const ures = await ur.json();
-      if(!ures.ok){ alert('Photo upload failed: ' + (ures.error||'unknown')); }
+    if(!prodModalId && saved.id){
+      // Newly created: stay open in edit mode so photos can be added immediately,
+      // instead of forcing a reopen just to attach the first reference photo.
+      prodModalId = saved.id;
+      document.getElementById('prodModalTitle').textContent = 'Edit Product';
+      await refreshPmPhotoList(prodModalId);
+      loadProducts();
+      return;
     }
     closeProdModal();
     loadProducts();
@@ -732,9 +793,28 @@ async function stopPipeline(){
   await fetch('/api/run/stop', {method:'POST'});
 }
 
+// Warnings written by pipeline.py itself (src/pipeline.py), so they surface here whether
+// a run was triggered locally or via the Cloud Run Job - unlike run_once's return value,
+// which the Job path never reads back.
+let _dismissedWarningIds = new Set();
+async function loadWarnings(){
+  try{
+    const r = await fetch('/api/warnings');
+    const all = await r.json();
+    const visible = all.filter(w => !_dismissedWarningIds.has(w.id));
+    const el = document.getElementById('warningsBanner');
+    if(!visible.length){ el.style.display = 'none'; el.innerHTML = ''; return; }
+    el.style.display = 'block';
+    el.innerHTML = visible.map(w => `<div style="display:flex;justify-content:space-between;gap:10px;padding:2px 0;">`
+      + `<span><b>${esc(w.kind)}</b>: ${esc(w.detail)}</span>`
+      + `<span style="cursor:pointer;font-weight:600;" onclick="dismissWarning(${w.id})">&times;</span></div>`).join('');
+  } catch(e){ /* non-fatal: a warnings-fetch failure must not block the rest of the dashboard */ }
+}
+function dismissWarning(id){ _dismissedWarningIds.add(id); loadWarnings(); }
+
 function tick(){document.getElementById('clock').textContent=new Date().toLocaleString();}
 setInterval(tick,1000); tick();
-loadCards(); loadLog(); loadCompetitors(); loadProducts();
+loadCards(); loadLog(); loadCompetitors(); loadProducts(); loadWarnings();
 // Never rebuild the feed while a caret sits in an overlay. Defer rather than drop, so a
 // pipeline run that finishes mid-typing still lands once the field loses focus.
 let _refreshPending = false;
@@ -744,7 +824,7 @@ function ovEditing(){
 }
 function refreshAll(){
   if(ovEditing()){ _refreshPending = true; return; }
-  loadCards(); loadLog();
+  loadCards(); loadLog(); loadWarnings();
 }
 setInterval(refreshAll, 3000);
 document.addEventListener('focusout', e=>{
@@ -767,15 +847,17 @@ document.addEventListener('focusout', e=>{
     <textarea id="pmIngr"></textarea>
     <label>Hero claim</label>
     <input type="text" id="pmHero">
+    <label>Visual description (for image generation - fixed visual facts: bottle, cap, label, colour)</label>
+    <textarea id="pmVisDesc" placeholder="e.g. amber glass bottle, gold pump top, maroon label with BESQUE MAGIC in gold serif, warm golden amber oil"></textarea>
     <label>Category</label>
     <select id="pmCat" style="width:100%;padding:9px 12px;border:1px solid #ccc;border-radius:7px;font-size:13px;">
       <option value="">(not set)</option>
       {% for c in product_categories %}<option value="{{ c }}">{{ c }}</option>
       {% endfor %}
     </select>
-    <label>Reference product photo</label>
-    <div id="pmPhotoStatus" style="font-size:12px;color:#777;margin-bottom:6px;"></div>
-    <input type="file" id="pmPhoto" accept="image/*">
+    <label>Reference product photos (2-4 recommended, same bottle from different angles)</label>
+    <div id="pmPhotoList" style="margin-bottom:6px;"></div>
+    <input type="file" id="pmPhoto" accept="image/*" onchange="onPmPhotoSelected()">
     <div class="modal-actions">
       <button class="mini" onclick="closeProdModal()">Cancel</button>
       <button class="run" onclick="saveProdModal()">Save</button>

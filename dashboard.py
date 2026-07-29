@@ -320,7 +320,8 @@ async def api_add_product(request: Request):
     if not name:
         return JSONResponse({"ok": False, "error": "name required"}, status_code=400)
     new_id = dedupe.add_product(name, body.get("description", ""), body.get("ingredients", ""),
-                                body.get("hero_claim", ""), body.get("category", ""))
+                                body.get("hero_claim", ""), body.get("category", ""),
+                                body.get("visual_description", ""))
     return JSONResponse({"ok": True, "id": new_id})
 
 
@@ -328,38 +329,84 @@ async def api_add_product(request: Request):
 async def api_update_product(product_id: int, request: Request):
     body = await request.json()
     dedupe.update_product(product_id, body.get("name", ""), body.get("description", ""), body.get("ingredients", ""),
-                          body.get("hero_claim", ""), body.get("category", ""))
+                          body.get("hero_claim", ""), body.get("category", ""),
+                          body.get("visual_description", ""))
     return JSONResponse({"ok": True, "id": product_id})
 
 
 @app.post("/api/products/{product_id}/photo")
 async def api_product_photo(product_id: int, request: Request):
-    """Upload a reference product photo. Body: raw image bytes. Stores to bucket."""
+    """Upload one reference product photo into the product's fixed photo set (up to
+    dedupe.MAX_PRODUCT_IMAGES). Body: raw image bytes. Each upload gets a unique key -
+    legacy image_key is frozen and never written by this path."""
     data = await request.body()
     if not data or len(data) < 100:
         return JSONResponse({"ok": False, "error": "no image data"}, status_code=400)
     if len(data) > 10 * 1024 * 1024:
         return JSONResponse({"ok": False, "error": "image too large (max 10MB)"}, status_code=400)
-    key = f"product_{product_id}_ref.png"
+    p = dedupe.get_product(product_id)
+    if p is None:
+        return JSONResponse({"ok": False, "error": "product not found"}, status_code=404)
+    if len(p["image_keys"]) >= dedupe.MAX_PRODUCT_IMAGES:
+        return JSONResponse({"ok": False, "error": f"already has {dedupe.MAX_PRODUCT_IMAGES} reference images - remove one first"})
+    import uuid
+    key = f"product_{product_id}_ref_{uuid.uuid4().hex[:8]}.png"
     try:
         from google.cloud import storage
         bucket = storage.Client().bucket(assets.asset_bucket_name())
         bucket.blob(key).upload_from_string(data, content_type="image/png")
     except Exception as e:
         return JSONResponse({"ok": False, "error": f"upload failed: {e}"})
-    p = dedupe.get_product(product_id)
-    if p is None:
-        return JSONResponse({"ok": False, "error": "product not found"}, status_code=404)
-    with dedupe.get_conn() as conn, conn.cursor() as cur:
-        cur.execute("UPDATE products SET image_key=%s WHERE id=%s", (key, product_id))
-        conn.commit()
-    return JSONResponse({"ok": True, "image_key": key})
+    dedupe.add_product_image(product_id, key)
+    return JSONResponse({"ok": True, "image_keys": dedupe.get_product(product_id)["image_keys"]})
+
+
+@app.post("/api/products/{product_id}/photo/remove")
+async def api_product_photo_remove(product_id: int, request: Request):
+    """Remove one reference photo: deletes the stored blob and the image_keys entry
+    together, so a remove never leaves an orphaned blob in the bucket."""
+    body = await request.json()
+    key = (body.get("key") or "").strip()
+    if not key:
+        return JSONResponse({"ok": False, "error": "key required"}, status_code=400)
+    blob_error = None
+    try:
+        from google.cloud import storage
+        storage.Client().bucket(assets.asset_bucket_name()).blob(key).delete()
+    except Exception as e:
+        blob_error = str(e)
+    dedupe.remove_product_image(product_id, key)
+    resp = {"ok": True, "image_keys": dedupe.get_product(product_id)["image_keys"]}
+    if blob_error:
+        # DB is now consistent either way; surface the blob-delete failure rather than
+        # swallowing it, since it means the blob itself is now orphaned in the bucket.
+        resp["warning"] = f"blob delete failed (now orphaned): {blob_error}"
+    return JSONResponse(resp)
 
 
 @app.post("/api/products/{product_id}/delete")
 def api_delete_product(product_id: int):
+    p = dedupe.get_product(product_id)
+    blob_errors = []
+    if p:
+        all_keys = list(p["image_keys"]) + ([p["image_key"]] if p["image_key"] else [])
+        for key in all_keys:
+            try:
+                from google.cloud import storage
+                storage.Client().bucket(assets.asset_bucket_name()).blob(key).delete()
+            except Exception as e:
+                blob_errors.append(f"{key}: {e}")
     dedupe.delete_product(product_id)
-    return JSONResponse({"ok": True, "id": product_id})
+    resp = {"ok": True, "id": product_id}
+    if blob_errors:
+        resp["warning"] = f"{len(blob_errors)} blob(s) failed to delete (now orphaned): " + "; ".join(blob_errors)
+    return JSONResponse(resp)
+
+
+@app.get("/api/warnings")
+def api_warnings():
+    dedupe.init_pipeline_warnings()
+    return JSONResponse(dedupe.get_recent_warnings())
 
 
 @app.get("/api/competitors")

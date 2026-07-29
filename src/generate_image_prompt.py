@@ -14,9 +14,11 @@ def build_image_prompt(blueprint: dict, product: dict = None) -> str:
     prod_style = (blueprint.get("production_style") or {}).get("style", "")
 
     if product:
+        visual_desc = product.get("visual_description", "")
         product_desc = (
             f"The featured product is {product.get('name', 'a Besque product')}: {product.get('description', '')} "
-            f"If any label or ingredient text appears on the product, it must show ONLY these real ingredients: "
+            + (f"Its fixed visual appearance: {visual_desc}. " if visual_desc else "")
+            + f"If any label or ingredient text appears on the product, it must show ONLY these real ingredients: "
             f"{product.get('ingredients', '')}. Key claim: {product.get('hero_claim', '')}. "
             f"Never invent ingredients or label text not listed here. "
         )
@@ -77,18 +79,37 @@ PRODUCTION_STYLE_GUIDANCE = {
 DEFAULT_STYLE_GUIDANCE = "Style: clean, editorial, aspirational, natural light. "
 
 
-def generate_image(blueprint, ad_id, product=None, reference_bytes=None):
+def _reference_framing(count):
+    """Framing text placed after the reference image block(s). Explicit about multiple
+    photos being the SAME bottle from different angles, not a product range - BRAND_RULES
+    rule 7 already collapses multi-product layouts to one product, and without this an
+    ad-gen model handed 2-4 images can easily misread them as separate SKUs to feature."""
+    if count <= 1:
+        return ("REFERENCE PRODUCT PHOTO ABOVE: this is the EXACT Besque product. Reproduce "
+                "this bottle, its label, and its design faithfully in the ad - do not redesign, "
+                "relabel, or alter it. ")
+    return (
+        f"REFERENCE PRODUCT PHOTOS ABOVE ({count} images): these are ALL PHOTOS OF THE SAME "
+        f"SINGLE BOTTLE, shown from different angles/sides - NOT multiple products, NOT a "
+        f"product range or bundle. Reproduce this one bottle, its label, and its design "
+        f"faithfully in the ad, exactly one bottle in the final image, do not redesign, "
+        f"relabel, or alter it. "
+    )
+
+
+def generate_image(blueprint, ad_id, product=None, reference_images=None):
     """Single-pass image generation from the blueprint. One image, no iteration.
     Saves to assets/<ad_id>_draft.png and returns the path. Returns None on failure."""
     prompt = build_image_prompt(blueprint, product=product)
     try:
         client = genai.Client(vertexai=True, project="besque-martech", location="global")
-        if reference_bytes:
+        reference_images = reference_images or []
+        if reference_images:
             from google.genai import types as genai_types
-            contents = [
-                genai_types.Part.from_bytes(data=reference_bytes, mime_type="image/png"),
-                "REFERENCE PRODUCT PHOTO ABOVE: this is the EXACT Besque product. Reproduce this bottle, its label, and its design faithfully in the ad - do not redesign, relabel, or alter it. " + prompt,
-            ]
+            contents = (
+                [genai_types.Part.from_bytes(data=img, mime_type="image/png") for img in reference_images]
+                + [_reference_framing(len(reference_images)) + prompt]
+            )
         else:
             contents = prompt
         import time as _time

@@ -1,4 +1,4 @@
-﻿"""Tests for the pipeline orchestrator. All live stages monkeypatched - no network, no spend."""
+"""Tests for the pipeline orchestrator. All live stages monkeypatched - no network, no spend."""
 import uuid
 from src import pipeline, dedupe
 
@@ -21,7 +21,7 @@ def _mock_all_stages(monkeypatch):
     monkeypatch.setattr(pipeline.deconstruct, "deconstruct_image", lambda **k: {"format": "hero", "angle": "a"})
     monkeypatch.setattr(pipeline.generate_copy, "generate_copy_live", lambda bp, product=None: {"headline": "H", "primary_text": "P", "cta": "C"})
     monkeypatch.setattr(pipeline.compliance, "check_compliance", lambda copy, name, text: (True, []))
-    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image", lambda bp, aid, product=None, reference_bytes=None: "draft.png")
+    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image", lambda bp, aid, product=None, reference_images=None: "draft.png")
     monkeypatch.setattr(pipeline.slack_review, "post_review", lambda *a, **k: {"ts": "123"})
     monkeypatch.setattr(pipeline.dedupe, "save_artifact", lambda **k: None)
 
@@ -58,22 +58,113 @@ def test_process_ad_passes_product_to_copy_and_image(monkeypatch):
         seen["copy"] = product
         return {"headline": "H", "primary_text": "P", "cta": "C"}
 
-    def capture_image(bp, aid, product=None, reference_bytes=None):
+    def capture_image(bp, aid, product=None, reference_images=None):
         seen["image"] = product
+        seen["reference_images"] = reference_images
         return "draft.png"
 
     monkeypatch.setattr(pipeline.generate_copy, "generate_copy_live", capture_copy)
     monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image", capture_image)
 
-    assert pipeline.process_ad(ad, product=product) == "processed"
+    reference_images = [b"photo-1-bytes", b"photo-2-bytes", b"photo-3-bytes"]
+    assert pipeline.process_ad(ad, product=product, reference_images=reference_images) == "processed"
 
     # Identity, not equality: if the kwarg is dropped the stub defaults to None and this fails.
     assert seen["copy"] is product, "product did not reach generate_copy_live"
     assert seen["image"] is product, "product did not reach generate_image"
 
+    # All three reference images must arrive, not just the first.
+    assert seen["reference_images"] == reference_images, "not all reference images reached generate_image"
+
     # The four fields the copy prompt actually needs must be present on what arrived.
     for key in ("name", "description", "ingredients", "hero_claim"):
         assert key in seen["copy"], f"{key} missing from product handed to generate_copy_live"
+
+
+def test_effective_image_keys_prefers_multi_image_set():
+    product = {"image_key": "legacy.png", "image_keys": ["a.png", "b.png"]}
+    assert pipeline.effective_image_keys(product) == ["a.png", "b.png"]
+
+
+def test_effective_image_keys_falls_back_to_legacy_image_key():
+    """Products created before the multi-image change only have image_key set -
+    effective_image_keys must still find that single photo."""
+    product = {"image_key": "legacy.png", "image_keys": []}
+    assert pipeline.effective_image_keys(product) == ["legacy.png"]
+
+
+def test_effective_image_keys_empty_when_neither_set():
+    assert pipeline.effective_image_keys({"image_key": "", "image_keys": []}) == []
+    assert pipeline.effective_image_keys(None) == []
+
+
+def test_fetch_reference_images_warns_when_none_configured(monkeypatch):
+    product = {"id": 1, "name": "Magic Body Oil", "image_key": "", "image_keys": []}
+    images, warning = pipeline.fetch_reference_images(product)
+    assert images == []
+    assert warning is not None
+    kind, detail = warning
+    assert kind == "no_reference_photo"
+    assert "Magic Body Oil" in detail
+
+
+def test_fetch_reference_images_fetches_all_configured(monkeypatch):
+    product = {"id": 1, "name": "Magic Body Oil", "image_key": "", "image_keys": ["k1.png", "k2.png"]}
+
+    class FakeBlob:
+        def __init__(self, key):
+            self.key = key
+        def exists(self):
+            return True
+        def download_as_bytes(self):
+            return f"bytes-for-{self.key}".encode()
+
+    class FakeBucket:
+        def blob(self, key):
+            return FakeBlob(key)
+
+    class FakeClient:
+        def bucket(self, name):
+            return FakeBucket()
+
+    monkeypatch.setattr(pipeline.assets, "asset_bucket_name", lambda: "fake-bucket")
+    import google.cloud.storage as gcs_storage
+    monkeypatch.setattr(gcs_storage, "Client", FakeClient)
+
+    images, warning = pipeline.fetch_reference_images(product)
+    assert warning is None
+    assert images == [b"bytes-for-k1.png", b"bytes-for-k2.png"]
+
+
+def test_fetch_reference_images_warns_on_partial_failure(monkeypatch):
+    product = {"id": 1, "name": "Magic Body Oil", "image_key": "", "image_keys": ["k1.png", "missing.png"]}
+
+    class FakeBlob:
+        def __init__(self, key):
+            self.key = key
+        def exists(self):
+            return self.key != "missing.png"
+        def download_as_bytes(self):
+            return b"ok-bytes"
+
+    class FakeBucket:
+        def blob(self, key):
+            return FakeBlob(key)
+
+    class FakeClient:
+        def bucket(self, name):
+            return FakeBucket()
+
+    monkeypatch.setattr(pipeline.assets, "asset_bucket_name", lambda: "fake-bucket")
+    import google.cloud.storage as gcs_storage
+    monkeypatch.setattr(gcs_storage, "Client", FakeClient)
+
+    images, warning = pipeline.fetch_reference_images(product)
+    assert images == [b"ok-bytes"]  # the one that succeeded, not silently dropped without a trace
+    assert warning is not None
+    kind, detail = warning
+    assert kind == "reference_photo_fetch_failed"
+    assert "missing.png" in detail
 
 
 def test_process_ad_compliance_fail_is_failed(monkeypatch):
