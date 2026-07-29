@@ -72,9 +72,86 @@ Don't remove it without updating deploy config first.
 `id SERIAL` is the only key, so duplicate `ad_id` rows are possible. `get_artifact` reads
 `ORDER BY id DESC LIMIT 1`. Update or delete a single row by `id`, never by `ad_id`.
 
+## Competitor `category` axis mirrors products — `category=""` is NOT a filter
+`competitors.category` (TEXT DEFAULT '') was added by explicit `ALTER TABLE ... ADD
+COLUMN IF NOT EXISTS` — like `products.category`, `CREATE TABLE IF NOT EXISTS` in
+`init_competitors()` is a no-op against an already-existing table, so a new column
+always needs its own migration.
+
+`run_once(..., category=None)` (`pipeline.py:146`) selects every competitor tagged with
+`category`, unless `competitor_id` is also given (that wins). The filter is
+`elif category:` (`pipeline.py:176`) — a **truthy** check, not `is not None` — so
+`category=""` behaves exactly like `category=None` (no filter, every competitor runs).
+An `is not None` check would instead match every *untagged* competitor, the opposite of
+what an empty dropdown selection should mean.
+
+## Product `image_keys` (up to 4) — `image_key` is FROZEN
+`products.image_keys` (JSONB, default `'[]'`) holds a product's fixed reference-photo
+set, capped at `dedupe.MAX_PRODUCT_IMAGES` (4, `dedupe.py:289`). The legacy single
+`image_key` column is **frozen** — new uploads never write it, only `image_keys`. Always
+resolve the effective set through `pipeline.effective_image_keys(product)`
+(`pipeline.py:18`), which falls back to `[image_key]` for pre-multi-image products;
+never read `image_keys`/`image_key` directly elsewhere.
+
+Verified in the dashboard: reference photos reliably carry the label artwork and the
+glass/oil colour — but anything the photos disagree on across the set, or don't make
+unambiguous (e.g. pump colour, which face is "front"), gets averaged or guessed wrong by
+Gemini unless it's also stated explicitly in `visual_description`
+(`generate_image_prompt.py:24`). Confirmed cases: photos alone produced a wholly gold
+pump (the real one is a black head on a gold collar) and a back-facing label — both
+fixed only once `visual_description` said so in words.
+
+## `pipeline_warnings` — the only run-status channel that works for both run paths
+`dashboard.py`'s `/api/run/status` (`api_run_status`, `dashboard.py:143`) reports Cloud
+Run **execution** counts (`dashboard.py:161`) — it never reads `run_once`'s return dict;
+that return value only reaches anything via the dead local-thread path
+(`_run_pipeline_bg`, never actually called — `/api/run` always triggers the Cloud Run
+Job). So anything `run_once` wants a human to see has to be written to the DB from
+inside `pipeline.py` itself: `dedupe.record_warning(kind, detail)` into
+`pipeline_warnings` (`dedupe.py:325-353`), read back by `GET /api/warnings`
+(`dashboard.py:407`) and rendered as a dismissible banner. This is the **only**
+path-agnostic way to surface a run-time problem — don't add a return-dict counter and
+assume anyone sees it.
+
+## Compliance guardrails — `compliance_rules.py` (prompt) + `compliance.py` (mechanical)
+Six rules (C1-C6), added after a generated draft fabricated a customer testimonial.
+`COMPLIANCE_RULES` (`src/compliance_rules.py`) is a single shared constant imported by
+both `generate_image_prompt.py` (appended after `BRAND_RULES` rule 7 — 6/7 unmodified)
+and `generate_copy.py`. Never duplicate this text in either file.
+
+**C1, C4, C6 are prompt-only for images — no mechanical enforcement.** Only C2
+(fabricated testimonials / unapproved numeric claims) has a mechanical backstop, and
+it's regex/keyword pattern-matching, not semantic understanding.
+
+Discount percentages ("20% off") are exempt via a **tight adjacency regex**
+(`DISCOUNT_PERCENTAGE_PATTERN`, `compliance.py:75`), not a character-distance window — a
+window was tried first and wrongly exempted an unrelated fabricated efficacy percentage
+sitting a few words away in the same copy.
+
+`process_ad` retries copy generation once on a compliance failure (`MAX_COPY_ATTEMPTS =
+2`, `pipeline.py:83`), feeding the specific issues back via `compliance_feedback` (same
+blueprint reused). Final failure is recorded via
+`dedupe.record_warning("compliance_failed", ...)` (`pipeline.py:101`), not just logged.
+
 ## Working conventions
 - **Show the diff before writing.** Say which hunks are mine and which are pre-existing
   uncommitted work — this repo usually has some.
 - Edit via the Edit tool. Never rewrite a file by computing string offsets and splicing
   (`s[:i] + new + s[j:]`) — especially not a live template.
 - No destructive DB or filesystem commands without asking; dry-run and show counts first.
+
+## Known gaps (as of 2026-07-29)
+- `brand_voice`, `approved_claims`, `approved_testimonials` are empty at every real call
+  site — compliance mechanical checks are correspondingly strict-by-default until real
+  approved material is wired through.
+- Dashboard sidebar Remove/category-save buttons are broken in the frontend JS; the
+  underlying API endpoints work (verified directly) — a `dashboard.html` wiring bug, not
+  backend.
+- Slack posting fails with `invalid_auth` (`slack_review.post_review`) — non-fatal to the
+  pipeline, but review cards aren't reaching Slack.
+- 2 ads remain unclassified after the backfill: one schema-validation failure, one
+  transient Anthropic `529`. Left untouched, no category invented.
+- Only competitors id=42 (Bangn Body) and id=48 (The Ayurveda Experience) are tagged
+  `body_oil` — a category-scoped run currently hits just those two.
+- Nothing deployed since 27 Jul 2026 — everything above is committed and pushed to
+  `main`, but Cloud Run is still running the 27 Jul build.
