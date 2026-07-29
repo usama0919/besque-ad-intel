@@ -19,7 +19,7 @@ def _mock_all_stages(monkeypatch):
     monkeypatch.setattr(pipeline.assets, "download_image", lambda url, aid: "fake.jpg")
     monkeypatch.setattr(pipeline.assets, "download_image_bytes", lambda url: b"fake-bytes")
     monkeypatch.setattr(pipeline.deconstruct, "deconstruct_image", lambda **k: {"format": "hero", "angle": "a"})
-    monkeypatch.setattr(pipeline.generate_copy, "generate_copy_live", lambda bp, product=None: {"headline": "H", "primary_text": "P", "cta": "C"})
+    monkeypatch.setattr(pipeline.generate_copy, "generate_copy_live", lambda bp, product=None, **k: {"headline": "H", "primary_text": "P", "cta": "C"})
     monkeypatch.setattr(pipeline.compliance, "check_compliance", lambda copy, name, text: (True, []))
     monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image", lambda bp, aid, product=None, reference_images=None: "draft.png")
     monkeypatch.setattr(pipeline.slack_review, "post_review", lambda *a, **k: {"ts": "123"})
@@ -168,14 +168,34 @@ def test_fetch_reference_images_warns_on_partial_failure(monkeypatch):
 
 
 def test_process_ad_compliance_fail_is_failed(monkeypatch):
+    """Also verifies the fail-soft retry: a compliance failure must trigger exactly one
+    retry (2 attempts total) before giving up, and the final failure must be recorded
+    as a visible warning - not just logged - per the "counter nobody sees is the same
+    silent failure in a new coat" requirement from the multi-image work."""
     dedupe.init_db()
+    dedupe.init_pipeline_warnings()
     ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
     ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
           "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
     _mock_all_stages(monkeypatch)
-    # Force compliance to fail
-    monkeypatch.setattr(pipeline.compliance, "check_compliance", lambda copy, name, text: (False, ["competitor name"]))
-    assert pipeline.process_ad(ad) == "failed"
+    # Force compliance to fail on every attempt
+    call_count = {"n": 0}
+
+    def always_fail(copy, name, text):
+        call_count["n"] += 1
+        return (False, ["competitor name"])
+
+    monkeypatch.setattr(pipeline.compliance, "check_compliance", always_fail)
+    try:
+        assert pipeline.process_ad(ad) == "failed"
+        assert call_count["n"] == 2, "expected exactly one retry (2 attempts), not immediate failure"
+        warnings = dedupe.get_recent_warnings(limit=50)
+        assert any(ad_id in w["detail"] and w["kind"] == "compliance_failed" for w in warnings), \
+            "compliance failure must be recorded as a visible warning, not just logged"
+    finally:
+        with dedupe.get_conn() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM pipeline_warnings WHERE detail LIKE %s", (f"%{ad_id}%",))
+            conn.commit()
 
 
 _FAKE_COMPETITORS = [

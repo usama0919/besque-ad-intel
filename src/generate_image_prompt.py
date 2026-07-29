@@ -1,6 +1,7 @@
 """Regeneration step (image prompt): turn a blueprint's visual into an image-gen prompt."""
 import os
 from src import assets
+from src.compliance_rules import COMPLIANCE_RULES
 
 IMAGE_MODEL = os.getenv("IMAGE_MODEL", "placeholder-image-model")
 
@@ -8,6 +9,12 @@ IMAGE_MODEL = os.getenv("IMAGE_MODEL", "placeholder-image-model")
 def build_image_prompt(blueprint: dict, product: dict = None) -> str:
     """Construct a Besque-adapted image generation prompt from the blueprint's visual notes."""
     visual = blueprint.get("visual", {})
+    # visual.subject is deliberately NOT read here. In practice it's where the vision
+    # deconstruct step puts rich, identity-carrying descriptions of the competitor ad's
+    # model (hair colour, build, pose, clothing - e.g. "Blonde athletic woman 40+ in dark
+    # bikini..."). Wiring it into this prompt would hand that description straight to the
+    # image model. If a future change needs `subject` for better composition, it must
+    # come with an explicit compliance override alongside it, not instead of one.
     layout = visual.get("layout", "clean centered composition")
     palette = visual.get("palette_mood", "warm, natural tones")
     text_placement = visual.get("text_placement", "minimal")
@@ -27,7 +34,9 @@ def build_image_prompt(blueprint: dict, product: dict = None) -> str:
     prompt = (
         BRAND_RULES +
         f"A premium skincare advertisement image for Besque, a natural body-oil brand for women 40+. "
-        f"Composition and setting: {layout}. Place the Besque product described below as the subject "
+        f"Composition and setting: {layout}. (If this implies a person, render them per compliance "
+        f"rule C1 - a generic, non-identifiable model, never the specific individual described.) "
+        f"Place the Besque product described below as the subject "
         f"within this setting; do not render the competitor's product. "
         + product_desc +
         f"Palette and mood: {palette}. Text placement: {text_placement}. "
@@ -54,7 +63,7 @@ BRAND_RULES = (
     "5) The product is always a body OIL in a glass bottle unless stated otherwise - never a cream, jar, or tub. "
     "6) TEXT POLICY (STRICT): the Besque product's own printed label — exactly as shown on the reference product photo — is the ONLY text permitted anywhere in the image. NEVER render any headline, price, discount, percentage, offer, badge, sticker, sticky note, caption, tagline, watermark, or extra logo, whether copied from the competitor ad or invented. "
     "7) PRODUCT POLICY (STRICT): the single product in the reference product photo is the ONLY product permitted anywhere in the image — exactly one bottle, and it is that one. If no reference product photo is supplied, exactly one Besque bottle matching the product description is permitted. A multi-product range, collection, bundle, gift set or line-up in the source ad is a layout to borrow, not an inventory to reproduce: keep its composition, lighting and mood, collapse it to a single-product composition, and leave the freed area as clean negative space. NEVER add a second bottle, a variant, a size sibling, a refill, a carton, a box, or any further SKU, whether copied from the competitor ad or invented. "
-)
+) + COMPLIANCE_RULES
 
 # Per-production-style guidance, keyed by blueprint.production_style.style. Swapped in as a
 # single Style clause so ugc_native does not fight the studio-look wording it replaces.

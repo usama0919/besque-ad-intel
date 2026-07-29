@@ -3,6 +3,7 @@ import os
 import json
 
 from src import json_response
+from src.compliance_rules import COMPLIANCE_RULES
 
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
 
@@ -10,7 +11,7 @@ CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
 # inline with the rest of the run log rather than on a separate stream.
 log = logging.getLogger("generate_copy")
 
-COPY_PROMPT = """You are a senior copywriter for Besque, a natural skincare brand for women 40+. Using the creative blueprint below, write Besque-adapted ad copy, following the voice and claim rules given below.
+COPY_PROMPT = """You are a senior copywriter for Besque, a natural skincare brand for women 40+. Using the creative blueprint below, write Besque-adapted ad copy, following the voice, claim, and compliance rules given below.
 
 Return ONLY valid JSON, no preamble or markdown, with exactly these fields:
 - headline (string)
@@ -23,11 +24,16 @@ Rules:
 - Keep claims within the APPROVED CLAIMS section below. Where it says none are supplied, stay strictly within the PRODUCT facts.
 - A section reading "None supplied." means that material genuinely does not exist. Write the copy from what IS given; do not ask for the missing material and do not decline.
 
+{compliance_rules}
+
 BRAND VOICE GUIDE:
 {brand_voice}
 
 APPROVED CLAIMS:
 {approved_claims}
+
+APPROVED TESTIMONIALS:
+{approved_testimonials}
 
 PRODUCT (use ONLY these facts, never invent claims or ingredients):
 {product_info}
@@ -47,6 +53,10 @@ NO_APPROVED_CLAIMS = (
     "None supplied. Make claims using ONLY the PRODUCT facts below - do not introduce "
     "efficacy, clinical or timescale claims those facts do not support."
 )
+NO_APPROVED_TESTIMONIALS = (
+    "None supplied. Do not invent, quote, or imply any customer testimonial, review, "
+    "star rating, or first-person endorsement - per compliance rule C2 above."
+)
 NO_PRODUCT = (
     "None supplied. Refer to a Besque natural body oil in general terms only; do not "
     "invent a product name, ingredients, percentages or numeric results."
@@ -65,13 +75,27 @@ def _product_facts(product):
     return json.dumps(facts, indent=2) if facts else NO_PRODUCT
 
 
-def build_copy_prompt(blueprint, brand_voice="", approved_claims="", product=None):
-    return COPY_PROMPT.format(
+def build_copy_prompt(blueprint, brand_voice="", approved_claims="", product=None,
+                       approved_testimonials="", compliance_feedback=None):
+    """compliance_feedback is the list of issue strings from a prior failed
+    check_compliance call - only passed on a retry, so it's appended as an explicit
+    revision instruction rather than a template placeholder that's usually empty."""
+    prompt = COPY_PROMPT.format(
         brand_voice=brand_voice or NO_BRAND_VOICE,
         approved_claims=approved_claims or NO_APPROVED_CLAIMS,
+        approved_testimonials=approved_testimonials or NO_APPROVED_TESTIMONIALS,
+        compliance_rules=COMPLIANCE_RULES,
         blueprint=json.dumps(blueprint, indent=2),
         product_info=_product_facts(product),
     )
+    if compliance_feedback:
+        issues_text = "\n".join(f"- {issue}" for issue in compliance_feedback)
+        prompt += (
+            "\n\nREVISION REQUIRED: your previous attempt was rejected for the following "
+            "compliance issue(s). Fix these specific problems while keeping everything else "
+            "on-brief:\n" + issues_text + "\n"
+        )
+    return prompt
 
 
 def parse_copy(raw_text):
@@ -134,14 +158,18 @@ def _log_parse_failure(attempt, total, max_tokens, message, raw_text, exc):
         log.error("raw_text repr (last 500): %r", raw_text[-500:])
 
 
-def generate_copy_live(blueprint, brand_voice="", approved_claims="", product=None):
+def generate_copy_live(blueprint, brand_voice="", approved_claims="", product=None,
+                        approved_testimonials="", compliance_feedback=None):
     """Send a blueprint to Claude and return validated Besque-adapted copy.
 
     Normally ONE API call. If the response cannot be parsed into the required fields,
     retries ONCE with a larger max_tokens and a JSON-only system prompt. Raises if the
-    retry fails too.
+    retry fails too. (compliance_feedback is a separate, outer retry driven by
+    pipeline.py's fail-soft loop after a compliance check - not this JSON-parsing retry.)
     """
-    prompt = build_copy_prompt(blueprint, brand_voice, approved_claims, product=product)
+    prompt = build_copy_prompt(blueprint, brand_voice, approved_claims, product=product,
+                                approved_testimonials=approved_testimonials,
+                                compliance_feedback=compliance_feedback)
     client = anthropic.Anthropic(timeout=60.0, max_retries=1)  # reads ANTHROPIC_API_KEY from env
 
     total = len(_COPY_ATTEMPTS)

@@ -80,10 +80,25 @@ def process_ad(ad, product=None, reference_images=None):
             ad_text=ad.get("text", ""),
             cta=ad.get("cta", ""),
         )
-        copy = generate_copy.generate_copy_live(blueprint, product=product)
-        ok, issues = compliance.check_compliance(copy, ad.get("page_name", ""), ad.get("text", ""))
+        MAX_COPY_ATTEMPTS = 2
+        ok, issues = False, []
+        for copy_attempt in range(1, MAX_COPY_ATTEMPTS + 1):
+            copy_kwargs = {"product": product}
+            if copy_attempt > 1:
+                # Fail-soft: feed the SPECIFIC prior failure back rather than discarding
+                # the ad outright. On-category pool is small (36 ads) - throwing one away
+                # over a fixable copy issue is expensive. Same blueprint, only copy retried.
+                copy_kwargs["compliance_feedback"] = issues
+            copy = generate_copy.generate_copy_live(blueprint, **copy_kwargs)
+            ok, issues = compliance.check_compliance(copy, ad.get("page_name", ""), ad.get("text", ""))
+            if ok:
+                break
+            log.warning("Ad %s failed compliance check (attempt %s/%s): %s",
+                        ad_id, copy_attempt, MAX_COPY_ATTEMPTS, issues)
         if not ok:
-            log.warning("Ad %s failed compliance check: %s", ad_id, issues)
+            reason = f"Ad {ad_id} ({ad.get('page_name', '?')}) failed compliance after {MAX_COPY_ATTEMPTS} attempt(s): {issues}"
+            dedupe.init_pipeline_warnings()
+            dedupe.record_warning("compliance_failed", reason)
             return "failed"
         try:
             draft_image = generate_image_prompt.generate_image(blueprint, ad_id, product=product, reference_images=reference_images)
