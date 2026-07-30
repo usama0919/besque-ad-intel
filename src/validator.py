@@ -17,6 +17,16 @@ def product_categories() -> list[str]:
     )
 
 
+def production_styles() -> list[str]:
+    """The production_style.style enum, read from the schema so every other reader
+    (deconstruct.py's classifier prompt, generate_image_prompt.py's guidance lookup, the
+    dashboard's realism dropdown) consumes this instead of repeating the literal list -
+    the same reasoning as product_categories() above."""
+    return list(
+        _SCHEMA["properties"]["production_style"]["properties"]["style"]["enum"]
+    )
+
+
 def is_valid(blueprint: dict) -> bool:
     """Return True if the blueprint matches the schema, else False."""
     try:

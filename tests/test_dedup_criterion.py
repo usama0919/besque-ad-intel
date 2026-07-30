@@ -20,7 +20,7 @@ def test_three_consecutive_runs_zero_duplicates(monkeypatch):
     monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image", lambda bp, aid, product=None, reference_images=None, angle_slug=None: "draft.png")
     monkeypatch.setattr(pipeline.slack_review, "post_review", lambda *a, **k: {"ts": "1"})
     monkeypatch.setattr(pipeline, "with_retry", lambda fn, **k: fn())
-    monkeypatch.setattr(pipeline.scrape, "scrape_ads", lambda name, max_results=5, page_id=None: fixed_ads)
+    monkeypatch.setattr(pipeline.scrape, "scrape_ads", lambda name, max_results=None, page_id=None: fixed_ads)
     monkeypatch.setattr(pipeline.dedupe, "get_competitors", lambda: [{"name": "Brand"}])
     monkeypatch.setattr(pipeline.dedupe, "save_artifact", lambda **k: None)
 

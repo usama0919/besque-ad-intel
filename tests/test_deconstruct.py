@@ -47,3 +47,13 @@ def test_deconstruct_invalid_response_raises():
 def test_build_prompt_inserts_values():
     prompt = deconstruct.build_prompt("AD1", "PageX", "2026-01-01", "https://x.com")
     assert "AD1" in prompt and "PageX" in prompt
+
+
+def test_build_prompt_production_style_options_match_validator():
+    """production_style_options is built from validator.production_styles(), not a
+    repeated literal - so it can't drift from what validation_error() actually accepts."""
+    from src import validator
+    prompt = deconstruct.build_prompt("AD1", "PageX", "2026-01-01")
+    for style in validator.production_styles():
+        assert style in prompt
+    assert "illustrated" in prompt

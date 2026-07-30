@@ -65,7 +65,7 @@
     "production_style": {
       "type": "object",
       "properties": {
-        "style": { "type": "string", "enum": ["ugc_native", "high_spec_studio", "hybrid"] },
+        "style": { "type": "string", "enum": ["ugc_native", "high_spec_studio", "hybrid", "illustrated"] },
         "confidence": { "type": "string", "enum": ["high", "medium", "low"] },
         "signals": { "type": "array", "items": { "type": "string" } }
       }

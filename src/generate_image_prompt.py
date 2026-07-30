@@ -83,7 +83,23 @@ PRODUCTION_STYLE_GUIDANCE = {
         "is hero-lit with deliberate studio-grade lighting and polished, while the surrounding "
         "scene feels natural and lived-in. "
     ),
+    "illustrated": (
+        "Style: not a photograph - a whiteboard-style diagram, clean 3D render, or comic-strip/"
+        "illustrated panel, flat or lightly shaded colour, clear linework, diagrammatic labelling "
+        "where relevant. No photographic lighting, no camera grain, no realistic skin or material "
+        "texture - this is drawn or rendered, not shot. "
+    ),
 }
+# Every real production_style value must have an explicit entry above - assert it here so a
+# schema addition can't silently fall through to DEFAULT_STYLE_GUIDANCE unnoticed (that
+# fallback is only for blueprint.production_style being absent/null, not for a recognized
+# style someone forgot to add guidance for).
+from src import validator as _validator
+assert set(_validator.production_styles()) <= set(PRODUCTION_STYLE_GUIDANCE), (
+    "PRODUCTION_STYLE_GUIDANCE is missing an entry for one of validator.production_styles()"
+)
+del _validator
+
 # Used when production_style is absent/null/unknown — preserves the previous hardcoded look.
 DEFAULT_STYLE_GUIDANCE = "Style: clean, editorial, aspirational, natural light. "
 

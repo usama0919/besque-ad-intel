@@ -48,6 +48,19 @@ def test_bad_enum_value_fails():
     bp = _valid_blueprint()
     bp["awareness_stage"] = "not_a_real_stage"
     assert validator.is_valid(bp) is False
+
+
+def test_production_styles_returns_canonical_list():
+    styles = validator.production_styles()
+    assert set(styles) == {"ugc_native", "high_spec_studio", "hybrid", "illustrated"}
+
+
+def test_illustrated_production_style_validates():
+    """glp1's seeded default_realism is "illustrated" - this is the prerequisite check
+    that a blueprint carrying it doesn't fail schema validation."""
+    bp = _valid_blueprint()
+    bp["production_style"] = {"style": "illustrated", "confidence": "high", "signals": ["whiteboard diagram"]}
+    assert validator.is_valid(bp) is True
 def test_config_loads_competitors():
     from src import config_loader
     competitors = config_loader.get_competitors()

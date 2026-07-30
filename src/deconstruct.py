@@ -30,10 +30,11 @@ The JSON must have exactly these fields:
 - social_proof (object): {{ "type": ..., "owner": ... }} — owner is the brand/body the proof belongs to, or null
 - layout_detail (object): {{ "text_zone": ..., "product_count": number, "background_type": ... }}
 - legibility_notes (string): whether in-image text is readable at feed size
-- production_style (object): {{ "style": one of ugc_native/high_spec_studio/hybrid, "confidence": high/medium/low, "signals": array of short phrases justifying the choice }}
+- production_style (object): {{ "style": one of {production_style_options}, "confidence": high/medium/low, "signals": array of short phrases justifying the choice }}
     ugc_native = phone-camera framing, natural/available light, real hands or skin, imperfect staging
     high_spec_studio = controlled premium lighting, deliberate composition, macro texture, editorial typography
     hybrid = studio-grade product quality inside casual framing (e.g. hero-lit product on a real countertop, or polished product with handwritten annotation). Only choose hybrid when both are genuinely present — do not use it as a hedge when uncertain.
+    illustrated = not a photograph at all - a whiteboard-style diagram, 3D render, or comic-strip/illustrated panel. Choose this when the ad is drawn or rendered rather than shot.
 - creative_format (string): exactly one of testimonial_review, before_after, problem_solution, product_hero, offer_led, comparison, listicle_tips, founder_story, ingredient_focus, lifestyle_scene, text_led_editorial
     (production_style and creative_format are two independent axes — a testimonial can be UGC or studio.)
 - product_category (object): {{ "category": one of body_oil/face_oil/serum/moisturiser/cleanser/haircare/supplement/firming/other/not_product, "confidence": high/medium/low, "signals": array of short phrases justifying the choice }}
@@ -59,6 +60,10 @@ def build_prompt(ad_id, source_page, captured_at, destination_url=""):
         source_page=source_page,
         captured_at=captured_at,
         destination_url=destination_url,
+        # Read from the schema via validator.production_styles() rather than repeating
+        # the enum as a literal here, so this prompt can't drift from what
+        # validator.is_valid() actually accepts.
+        production_style_options="/".join(validator.production_styles()),
     )
 
 

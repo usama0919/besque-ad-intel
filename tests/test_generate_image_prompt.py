@@ -59,3 +59,21 @@ def test_prompt_has_defensive_clause_near_layout():
     layout_pos = prompt.index("portrait, subject centered")
     nearby = prompt[layout_pos:layout_pos + 300]
     assert "generic, non-identifiable model" in nearby
+
+
+def test_illustrated_production_style_has_its_own_guidance_not_the_default():
+    """glp1's seeded default_realism is "illustrated" - this is the prerequisite check
+    that build_image_prompt gives it real guidance rather than silently falling through
+    to DEFAULT_STYLE_GUIDANCE (which would happen for any unrecognized/missing style)."""
+    bp = _blueprint()
+    bp["production_style"] = {"style": "illustrated"}
+    prompt = generate_image_prompt.build_image_prompt(bp)
+    assert generate_image_prompt.PRODUCTION_STYLE_GUIDANCE["illustrated"] in prompt
+    assert generate_image_prompt.DEFAULT_STYLE_GUIDANCE not in prompt
+
+
+def test_production_style_guidance_has_every_canonical_style():
+    """Mirrors the module-level assertion in generate_image_prompt.py - a schema addition
+    to validator.production_styles() can't silently ship without matching guidance text."""
+    from src import validator
+    assert set(validator.production_styles()) <= set(generate_image_prompt.PRODUCTION_STYLE_GUIDANCE)
