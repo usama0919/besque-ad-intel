@@ -131,11 +131,24 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
             dedupe.init_pipeline_warnings()
             dedupe.record_warning("compliance_failed", reason)
             return "failed"
+        if text_in_image and not copy.get("headline"):
+            # Compliance passed but the copy has no usable headline (e.g. an empty string
+            # slipped past validate_copy's key-presence check) - rule 6 will silently fall
+            # back to its default blanket text ban, producing a plain, textless image with
+            # no visible explanation of why the requested headline never appeared.
+            dedupe.init_pipeline_warnings()
+            dedupe.record_warning(
+                "text_in_image_no_headline",
+                f"Ad {ad_id} ({ad.get('page_name', '?')}): text_in_image was requested but "
+                f"generated copy had no headline - image rendered without in-image text.",
+            )
         try:
             draft_image = generate_image_prompt.generate_image(
                 blueprint, ad_id, product=product, reference_images=reference_images, angle_slug=angle_slug,
                 include_product=include_product, text_in_image=text_in_image,
                 headline=copy.get("headline"), subtext=copy.get("primary_text"),
+                messaging_angle=messaging_angle, realism=realism,
+                body_area=body_area, offer_text=offer_text,
             )
         except Exception as e:
             log.error("Ad %s failed: image generation raised: %s", ad_id, e)

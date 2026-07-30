@@ -105,3 +105,28 @@ def test_save_and_get_artifact():
     assert len(rows) == 1
     assert rows[0][1]["format"] == "hero"
     assert rows[0][2]["headline"] == "H"
+
+
+def test_get_artifact_returns_angle_id_and_text_in_image():
+    """dashboard.py's api_edit_image reads these back to restore the original generation's
+    rule-6 mode on edit - get_artifact must actually return them, not just accept angle_id
+    as a disambiguation param."""
+    from src import dedupe
+    import uuid
+    dedupe.init_artifacts()
+    ad_id = f"ART_{uuid.uuid4().hex[:8]}"
+    try:
+        dedupe.save_artifact(
+            ad_id=ad_id, page_name="TestBrand", image_path="assets/x.jpg",
+            blueprint={"format": "hero"}, generated_copy={"headline": "H"},
+            draft_image="assets/x_draft.png",
+            metadata={"cta": "Shop", "destination_url": "http://x"},
+            angle_id=None, text_in_image=True,
+        )
+        art = dedupe.get_artifact(ad_id)
+        assert art["angle_id"] is None
+        assert art["text_in_image"] is True
+    finally:
+        with dedupe.get_conn() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM artifacts WHERE ad_id=%s", (ad_id,))
+            conn.commit()

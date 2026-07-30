@@ -115,7 +115,7 @@ def test_process_ad_forwards_toggles_and_copy_to_generate_image(monkeypatch):
     captured = {}
 
     def capture_image(bp, aid, product=None, reference_images=None, angle_slug=None,
-                       include_product=True, text_in_image=False, headline=None, subtext=None):
+                       include_product=True, text_in_image=False, headline=None, subtext=None, **k):
         captured.update(include_product=include_product, text_in_image=text_in_image,
                          headline=headline, subtext=subtext)
         return "draft.png"
@@ -127,6 +127,54 @@ def test_process_ad_forwards_toggles_and_copy_to_generate_image(monkeypatch):
     assert captured["text_in_image"] is True
     assert captured["headline"] == "H"
     assert captured["subtext"] == "P"
+
+
+def test_process_ad_forwards_angle_realism_body_area_offer_text_to_generate_image(monkeypatch):
+    """Part 5 regression guard: messaging_angle/realism/body_area/offer_text must reach
+    generate_image_prompt.generate_image, which is the only place any of them are actually
+    consumed (by the Claude prompt-writer pass). Without this, the run-strip controls
+    thread all the way to process_ad and then silently go nowhere."""
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+          "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    _mock_all_stages(monkeypatch)
+    captured = {}
+
+    def capture_image(bp, aid, **kwargs):
+        captured.update(kwargs)
+        return "draft.png"
+
+    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image", capture_image)
+
+    angle = {"id": 7, "slug": "crepey_skin", "name": "Crepey Skin"}
+    assert pipeline.process_ad(ad, messaging_angle=angle, realism="ugc_native",
+                                body_area="knees", offer_text="20% off") == "processed"
+    assert captured["messaging_angle"] is angle
+    assert captured["realism"] == "ugc_native"
+    assert captured["body_area"] == "knees"
+    assert captured["offer_text"] == "20% off"
+
+
+def test_process_ad_warns_when_text_in_image_requested_but_headline_missing(monkeypatch):
+    """If copy generation produces no usable headline (e.g. an empty string) while
+    text_in_image was requested, rule 6 silently falls back to the blanket text ban -
+    a text-free image with no visible explanation. Must record a pipeline_warning."""
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    dedupe.init_pipeline_warnings()
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+          "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    _mock_all_stages(monkeypatch)
+    monkeypatch.setattr(pipeline.generate_copy, "generate_copy_live",
+                        lambda bp, product=None, **k: {"headline": "", "primary_text": "P", "cta": "C"})
+    warnings = []
+    monkeypatch.setattr(pipeline.dedupe, "record_warning", lambda kind, detail: warnings.append((kind, detail)))
+
+    assert pipeline.process_ad(ad, text_in_image=True) == "processed"
+    assert any(kind == "text_in_image_no_headline" for kind, detail in warnings)
 
 
 def test_effective_image_keys_prefers_multi_image_set():

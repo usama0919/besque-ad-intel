@@ -496,11 +496,15 @@ def get_artifact(ad_id, angle_id=None):
     """Return the latest artifact for one (ad_id, angle_id) pair. angle_id=None matches
     the pre-angle behaviour exactly. Without angle_id, ORDER BY id DESC LIMIT 1 would
     return whichever angle-variant was generated most recently, not necessarily the one
-    the caller means."""
+    the caller means.
+
+    Returns angle_id/text_in_image too - callers editing a draft (dashboard.py's
+    api_edit_image) need these to restore the ORIGINAL generation's rule-6 mode rather
+    than falling back to brand_rules()'s hardcoded defaults."""
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
-            "SELECT ad_id, page_name, blueprint, generated_copy, draft_image FROM artifacts "
-            "WHERE ad_id=%s AND angle_id IS NOT DISTINCT FROM %s ORDER BY id DESC LIMIT 1",
+            "SELECT ad_id, page_name, blueprint, generated_copy, draft_image, angle_id, text_in_image "
+            "FROM artifacts WHERE ad_id=%s AND angle_id IS NOT DISTINCT FROM %s ORDER BY id DESC LIMIT 1",
             (ad_id, angle_id),
         )
         r = cur.fetchone()
@@ -509,7 +513,8 @@ def get_artifact(ad_id, angle_id=None):
         import json as _j
         bp = r[2] if isinstance(r[2], dict) else _j.loads(r[2] or "{}")
         cp = r[3] if isinstance(r[3], dict) else _j.loads(r[3] or "{}")
-        return {"ad_id": r[0], "page_name": r[1], "blueprint": bp, "generated_copy": cp, "draft_image": r[4]}
+        return {"ad_id": r[0], "page_name": r[1], "blueprint": bp, "generated_copy": cp,
+                "draft_image": r[4], "angle_id": r[5], "text_in_image": r[6]}
 
 
 def set_suggested_name(competitor_id, suggested):

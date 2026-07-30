@@ -234,7 +234,18 @@ async def api_edit_image(ad_id: str, request: Request):
     if current is None:
         return JSONResponse({"ok": False, "error": "no existing draft image to edit"}, status_code=404)
     from src import generate_image_prompt
-    result = generate_image_prompt.edit_image(current, instruction, ad_id, aspect=aspect, angle_slug=angle_slug)
+    # Restore the ORIGINAL generation's rule-6 mode rather than falling back to
+    # brand_rules()'s hardcoded defaults - without this, editing a text-in-image draft
+    # would silently drop its baked-in headline. Read from the stored artifact, never
+    # ask the operator to re-specify. include_product has no column to read back from
+    # (a known gap, not fixed here) - edit_image's rule 7 stays at its default either way.
+    generated_copy = art.get("generated_copy") or {}
+    result = generate_image_prompt.edit_image(
+        current, instruction, ad_id, aspect=aspect, angle_slug=angle_slug,
+        text_in_image=bool(art.get("text_in_image")),
+        headline=generated_copy.get("headline"),
+        subtext=generated_copy.get("primary_text"),
+    )
     if result is None:
         return JSONResponse({"ok": False, "error": "image edit failed"})
     # Record the prompt that actually produced the PNG now on disk, so the Edit modal stops

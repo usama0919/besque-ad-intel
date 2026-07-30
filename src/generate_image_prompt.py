@@ -1,17 +1,26 @@
 """Regeneration step (image prompt): turn a blueprint's visual into an image-gen prompt."""
 import os
-from src import assets
+from src import assets, generate_image_prompt_writer
 from src.compliance_rules import COMPLIANCE_RULES
 
 IMAGE_MODEL = os.getenv("IMAGE_MODEL", "placeholder-image-model")
 
 
 def build_image_prompt(blueprint: dict, product: dict = None, include_product: bool = True,
-                        text_in_image: bool = False, headline: str = None, subtext: str = None) -> str:
+                        text_in_image: bool = False, headline: str = None, subtext: str = None,
+                        creative_description: str = None) -> str:
     """Construct a Besque-adapted image generation prompt from the blueprint's visual notes.
-    include_product=True, text_in_image=False (today's defaults) reproduce the prior output
-    exactly for a given blueprint/product - both toggles are additive branches, not a
-    rewrite of the default path."""
+    include_product=True, text_in_image=False, creative_description=None (today's defaults)
+    reproduce the prior output exactly for a given blueprint/product - none of these are a
+    rewrite of the default path.
+
+    creative_description, if given, is the Claude prompt-writer's output
+    (generate_image_prompt_writer.write_creative_description) - it REPLACES the
+    template-assembled scene/composition/palette/production-style text (the writer's job
+    is composition, mood, and how the angle is expressed), but brand_rules()/compliance and
+    the product's factual description (product_clause, below) are still always assembled
+    mechanically regardless of what the writer returned - the writer never controls the
+    guardrails."""
     visual = blueprint.get("visual", {})
     # visual.subject is deliberately NOT read here. In practice it's where the vision
     # deconstruct step puts rich, identity-carrying descriptions of the competitor ad's
@@ -62,18 +71,33 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
             f"be added later as a separate HTML overlay; no competitor branding anywhere."
         )
 
-    prompt = (
-        brand_rules(include_product=include_product, text_in_image=text_in_image,
-                    headline=headline, subtext=subtext) +
-        f"A premium skincare advertisement image for Besque, a natural body-oil brand for women 40+. "
-        f"Composition and setting: {layout}. (If this implies a person, render them per compliance "
-        f"rule C1 - a generic, non-identifiable model, never the specific individual described.) "
-        + product_clause +
-        f"Palette and mood: {palette}. Text placement: {text_placement}. "
-        f"Square 1:1 aspect ratio composition. "
-        + PRODUCTION_STYLE_GUIDANCE.get(prod_style, DEFAULT_STYLE_GUIDANCE) +
-        closing
-    )
+    if creative_description:
+        # The writer's job (scene/setting, subject, product placement, text styling,
+        # palette, realism) replaces the template-assembled equivalent below - but
+        # product_clause (the product's factual visual_description/ingredients guardrail)
+        # and the mechanical aspect-ratio/closing lines still always follow it, regardless
+        # of what the writer wrote. The writer never controls the guardrails.
+        prompt = (
+            brand_rules(include_product=include_product, text_in_image=text_in_image,
+                        headline=headline, subtext=subtext) +
+            creative_description.strip() + " "
+            + product_clause +
+            f"Square 1:1 aspect ratio composition. " +
+            closing
+        )
+    else:
+        prompt = (
+            brand_rules(include_product=include_product, text_in_image=text_in_image,
+                        headline=headline, subtext=subtext) +
+            f"A premium skincare advertisement image for Besque, a natural body-oil brand for women 40+. "
+            f"Composition and setting: {layout}. (If this implies a person, render them per compliance "
+            f"rule C1 - a generic, non-identifiable model, never the specific individual described.) "
+            + product_clause +
+            f"Palette and mood: {palette}. Text placement: {text_placement}. "
+            f"Square 1:1 aspect ratio composition. "
+            + PRODUCTION_STYLE_GUIDANCE.get(prod_style, DEFAULT_STYLE_GUIDANCE) +
+            closing
+        )
     return prompt
 
 # ---- Live single-pass image generation (nano banana via Gemini API) ----
@@ -247,14 +271,32 @@ def _draft_stem(ad_id, angle_slug=None):
 
 
 def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_slug=None,
-                    include_product=True, text_in_image=False, headline=None, subtext=None):
+                    include_product=True, text_in_image=False, headline=None, subtext=None,
+                    messaging_angle=None, realism=None, body_area=None, offer_text=None):
     """Single-pass image generation from the blueprint. One image, no iteration.
     Saves to assets/<stem>_draft.png (stem = ad_id, or ad_id+angle if angle_slug is given)
     and returns the path. Returns None on failure. include_product/text_in_image/headline/
     subtext are forwarded to build_image_prompt/brand_rules - defaults reproduce today's
-    behaviour exactly."""
+    behaviour exactly.
+
+    messaging_angle (resolved angle dict) gates the Claude prompt-writer pass: only runs
+    when an angle is selected, matching every other angle-driven behaviour in this
+    pipeline. realism/body_area/offer_text are handed to the writer as creative context -
+    this is the first (and only) place any of the three are actually consumed; if the
+    writer doesn't run (no angle), they have no effect. The writer's failure mode is
+    silent-by-design: write_creative_description never raises, it returns None, and
+    build_image_prompt's creative_description=None branch is exactly today's template
+    assembly - so a writer failure degrades to the pre-Part-5 prompt, never to nothing."""
+    creative_description = None
+    if messaging_angle:
+        creative_description = generate_image_prompt_writer.write_creative_description(
+            blueprint, product=product, angle=messaging_angle, realism=realism,
+            body_area=body_area, offer_text=offer_text,
+            reference_image_count=len(reference_images or []),
+        )
     prompt = build_image_prompt(blueprint, product=product, include_product=include_product,
-                                 text_in_image=text_in_image, headline=headline, subtext=subtext)
+                                 text_in_image=text_in_image, headline=headline, subtext=subtext,
+                                 creative_description=creative_description)
     stem = _draft_stem(ad_id, angle_slug)
     try:
         client = genai.Client(vertexai=True, project="besque-martech", location="global")
@@ -326,23 +368,50 @@ def _next_draft_version(ad_id, angle_slug=None):
     return n + 1
 
 
-def edit_image(current_image_bytes, instruction, ad_id, aspect="1:1", angle_slug=None):
+def _edit_text_clause(text_in_image=False):
+    """The text-policy clause appended to an edit-image prompt. Mirrors _rule6_text_policy's
+    two branches - extracted as its own function so it's directly testable without
+    mocking genai.Client, the same way brand_rules' helpers are."""
+    if text_in_image:
+        return (
+            "Render exactly the headline and supporting text specified in rule 6 above as "
+            "in-scene typography - do not leave space for a separate overlay, and do not add "
+            "any other text; no competitor branding anywhere. "
+        )
+    return (
+        "Keep the edited image completely free of overlaid marketing text — only the Besque "
+        "product's own label may appear, exactly as it appears in the image being edited — and "
+        "leave clean, uncluttered negative space where headline and offer text will be added "
+        "later as a separate HTML overlay; no competitor branding anywhere. "
+    )
+
+
+def edit_image(current_image_bytes, instruction, ad_id, aspect="1:1", angle_slug=None,
+                text_in_image=False, headline=None, subtext=None):
     """Edit an existing draft image with a natural-language instruction via nano banana.
     Versions the outgoing draft to {stem}_draft_v{n}.png (stem = ad_id, or ad_id+angle),
     then saves/uploads the result under the same stem's key and returns it. Returns None
-    on failure. Edit Mode itself is unbuilt - this parameter only exists so an angle-variant
-    draft can't be versioned/overwritten under the wrong (ad_id-only) key if this function
-    is ever called against one."""
+    on failure.
+
+    text_in_image/headline/subtext restore the ORIGINAL generation's rule-6 mode for this
+    edit - without them, editing a text-in-image draft would silently fall back to
+    brand_rules()'s defaults (no text permitted) while the closing instruction still told
+    the model to keep the base free of text, directly contradicting a headline that's
+    already baked into the image being edited. Callers should read these back from the
+    artifact row (angle_id + text_in_image + generated_copy), never ask the operator to
+    re-specify. include_product is NOT restorable here - artifacts has no column for it,
+    so an edited productless (e.g. glp1) draft still uses rule 7's default (include_product
+    assumed True); this is a known gap, not a silent choice.
+
+    Edit Mode's angle_slug param exists so an angle-variant draft can't be
+    versioned/overwritten under the wrong (ad_id-only) key if this function is called."""
     from google.genai import types as genai_types
     stem = _draft_stem(ad_id, angle_slug)
     prompt = (
-        brand_rules() +
+        brand_rules(text_in_image=text_in_image, headline=headline, subtext=subtext) +
         f"Edit this Besque skincare advertisement image. Instruction: {instruction}. "
         f"Keep it a premium, editorial skincare ad. Output aspect ratio: {aspect}. "
-        f"Keep the edited image completely free of overlaid marketing text — only the Besque "
-        f"product's own label may appear, exactly as it appears in the image being edited — and "
-        f"leave clean, uncluttered negative space where headline and offer text will be added "
-        f"later as a separate HTML overlay; no competitor branding anywhere. "
+        + _edit_text_clause(text_in_image) +
         f"Do not add or alter ingredients, percentages, or claims."
     )
     try:
