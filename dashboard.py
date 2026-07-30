@@ -49,12 +49,18 @@ def home(request: Request):
 @app.get("/api/artifacts")
 def api_artifacts():
     dedupe.init_artifacts()
+    dedupe.init_angles()
     rows = dedupe.get_artifacts_full(limit=500)
+    # id -> angle dict, so each card can show which angle it was generated for without
+    # a per-row lookup. Small table, fetched once per request.
+    angles_by_id = {a["id"]: a for a in dedupe.get_angles()}
     # Make datetimes / paths JSON-friendly
     out = []
     for r in rows:
         img = r.get("image_path") or ""
         draft = r.get("draft_image") or ""
+        angle_id = r.get("angle_id")
+        angle = angles_by_id.get(angle_id) if angle_id else None
         out.append({
             "ad_id": r["ad_id"],
             "page_name": r.get("page_name", ""),
@@ -67,6 +73,12 @@ def api_artifacts():
             "model_info": r.get("model_info") or "",
             "decision": r.get("decision"),
             "created_at": r["created_at"].strftime("%Y-%m-%d %H:%M") if r.get("created_at") else "",
+            # angle_id/angle_name are about OUR generation choice for this artifact - kept
+            # distinct from blueprint.angle, which is Claude's read of the competitor ad's
+            # own angle. Cards and edit/decide calls key off angle_id, never bp.angle.
+            "angle_id": angle_id,
+            "angle_name": angle["name"] if angle else "",
+            "text_in_image": bool(r.get("text_in_image")),
         })
     return JSONResponse(out)
 
@@ -82,10 +94,10 @@ def api_decisions():
 
 
 @app.post("/api/decision/{ad_id}/{decision}")
-def api_decision(ad_id: str, decision: str, reason: str = ""):
+def api_decision(ad_id: str, decision: str, reason: str = "", angle_id: int = None):
     if decision not in ("approve", "reject"):
         return JSONResponse({"ok": False, "error": "bad decision"}, status_code=400)
-    dedupe.record_decision(ad_id, decision, reason)
+    dedupe.record_decision(ad_id, decision, reason, angle_id=angle_id)
     return JSONResponse({"ok": True, "ad_id": ad_id, "decision": decision})
 
 
@@ -169,13 +181,20 @@ async def api_edit_image(ad_id: str, request: Request):
     body = await request.json()
     instruction = (body.get("instruction") or "").strip()
     aspect = (body.get("aspect") or "1:1").strip()
+    # angle_id disambiguates which artifact row (an ad can now have one per angle) - see
+    # dedupe.get_artifact's docstring. None matches the pre-angle single-row behaviour.
+    angle_id = body.get("angle_id")
     if not instruction:
         return JSONResponse({"ok": False, "error": "instruction required"}, status_code=400)
-    art = dedupe.get_artifact(ad_id)
+    art = dedupe.get_artifact(ad_id, angle_id=angle_id)
     if art is None:
         return JSONResponse({"ok": False, "error": "artifact not found"}, status_code=404)
-    # fetch the current draft image bytes (local first, then bucket)
-    filename = f"{ad_id}_draft.png"
+    angle = dedupe.get_angle(angle_id) if angle_id else None
+    angle_slug = angle["slug"] if angle else None
+    # Fetch the current draft image bytes (local first, then bucket). Read back the
+    # ACTUAL stored path rather than reconstructing "{ad_id}_draft.png" - an angle-variant
+    # draft lives at a different ({ad_id}__{slug}) stem (see generate_image_prompt._draft_stem).
+    filename = os.path.basename((art.get("draft_image") or f"{ad_id}_draft.png").replace("\\", "/"))
     current = None
     local = ASSET_DIR / filename
     if local.exists():
@@ -191,7 +210,7 @@ async def api_edit_image(ad_id: str, request: Request):
     if current is None:
         return JSONResponse({"ok": False, "error": "no existing draft image to edit"}, status_code=404)
     from src import generate_image_prompt
-    result = generate_image_prompt.edit_image(current, instruction, ad_id, aspect=aspect)
+    result = generate_image_prompt.edit_image(current, instruction, ad_id, aspect=aspect, angle_slug=angle_slug)
     if result is None:
         return JSONResponse({"ok": False, "error": "image edit failed"})
     # Record the prompt that actually produced the PNG now on disk, so the Edit modal stops
@@ -202,7 +221,7 @@ async def api_edit_image(ad_id: str, request: Request):
         # Non-fatal: the edited image is already saved, so a bookkeeping failure here must
         # not report the edit itself as failed.
         try:
-            dedupe.update_artifact_image_prompt(ad_id, img_prompt)
+            dedupe.update_artifact_image_prompt(ad_id, img_prompt, angle_id=angle_id)
         except Exception as e:
             print(f"[api_edit_image] ad_id={ad_id} prompt record failed (non-fatal): {e}")
     return JSONResponse({"ok": True, "ad_id": ad_id})
@@ -213,9 +232,10 @@ async def api_edit_copy(ad_id: str, request: Request):
     """Revise the generated copy with a natural-language instruction via Claude."""
     body = await request.json()
     instruction = (body.get("instruction") or "").strip()
+    angle_id = body.get("angle_id")
     if not instruction:
         return JSONResponse({"ok": False, "error": "instruction required"}, status_code=400)
-    art = dedupe.get_artifact(ad_id)
+    art = dedupe.get_artifact(ad_id, angle_id=angle_id)
     if art is None:
         return JSONResponse({"ok": False, "error": "artifact not found"}, status_code=404)
     import anthropic, json as _j
@@ -238,7 +258,7 @@ async def api_edit_copy(ad_id: str, request: Request):
             if raw.startswith("json"):
                 raw = raw[4:]
         new_copy = _j.loads(raw)
-        dedupe.update_artifact_copy(ad_id, new_copy)
+        dedupe.update_artifact_copy(ad_id, new_copy, angle_id=angle_id)
         return JSONResponse({"ok": True, "ad_id": ad_id, "copy": new_copy})
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)})
@@ -401,6 +421,39 @@ def api_delete_product(product_id: int):
     if blob_errors:
         resp["warning"] = f"{len(blob_errors)} blob(s) failed to delete (now orphaned): " + "; ".join(blob_errors)
     return JSONResponse(resp)
+
+
+@app.get("/api/angles")
+def api_angles():
+    dedupe.init_angles()
+    return JSONResponse(dedupe.get_angles())
+
+
+@app.post("/api/angles")
+async def api_add_angle(request: Request):
+    body = await request.json()
+    name = (body.get("name") or "").strip()
+    slug = (body.get("slug") or "").strip()
+    if not name or not slug:
+        return JSONResponse({"ok": False, "error": "name and slug required"}, status_code=400)
+    new_id = dedupe.add_angle(name, slug, body.get("body_area", ""), body.get("default_realism", ""),
+                              bool(body.get("includes_product", True)), body.get("notes", ""))
+    return JSONResponse({"ok": True, "id": new_id})
+
+
+@app.post("/api/angles/{angle_id}")
+async def api_update_angle(angle_id: int, request: Request):
+    body = await request.json()
+    dedupe.update_angle(angle_id, body.get("name", ""), body.get("slug", ""), body.get("body_area", ""),
+                        body.get("default_realism", ""), bool(body.get("includes_product", True)),
+                        body.get("notes", ""))
+    return JSONResponse({"ok": True, "id": angle_id})
+
+
+@app.post("/api/angles/{angle_id}/delete")
+def api_delete_angle(angle_id: int):
+    dedupe.delete_angle(angle_id)
+    return JSONResponse({"ok": True, "id": angle_id})
 
 
 @app.get("/api/warnings")

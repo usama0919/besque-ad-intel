@@ -110,6 +110,9 @@
   .cat-badge.cat-mismatch { background:#fdf3e0; color:#8a5a12; border-color:#f0dcb4; }
   .cat-badge.cat-none { background:#f4f1ec; color:#a8a8a8; border-color:#e8e4dd; font-weight:400; }
   .cat-badge.cat-notproduct { background:#f0eef4; color:#6b5a80; border-color:#ded8e6; }
+  /* The operator-chosen messaging angle for THIS draft - distinct from bp.angle, which is
+     Claude's read of the competitor ad's own angle (shown separately, in .angle below). */
+  .angle-badge { display:inline-block; font-size:10px; font-weight:600; letter-spacing:.02em; padding:2px 7px; border-radius:999px; background:#eef0fa; color:#3a4a8a; border:1px solid #d8dcf0; margin-left:6px; }
   /* sticky sidebar with its own independent scroll */
   .layout > div:last-child { position: sticky; top: 90px; align-self: start; max-height: calc(100vh - 110px); overflow-y: auto; padding-right: 8px; }
   #competitors { max-height: 320px; overflow-y: auto; }
@@ -176,6 +179,14 @@
         </div>
         <div id="products"><div class="empty">Loading...</div></div>
       </div>
+      <h2>Messaging Angles</h2>
+      <div class="comp-panel">
+        <div class="comp-add-row">
+          <input id="newAngleName" placeholder="Angle name (e.g. Crepey Skin)">
+          <button class="run" onclick="addAngleRow()">Add</button>
+        </div>
+        <div id="angles"><div class="empty">Loading...</div></div>
+      </div>
       <h2>Competitors</h2>
     <div class="comp-panel">
       <div class="comp-add-row">
@@ -223,10 +234,13 @@ function cardSig(list, q){
   // changing the selected product must invalidate an otherwise-identical poll.
   return q + '##' + selectedProductCategory() + '##' + list.map(a=>{
     const bp=a.blueprint||{}, c=a.copy||{};
+    // a.angle_id/a.angle_name/a.text_in_image are OUR chosen generation angle - kept
+    // distinct from bp.angle (Claude's read of the competitor ad's own angle) below.
     return [a.ad_id, a.decision, a.original_image, a.draft_image, a.created_at,
             a.page_name, bp.angle, bp.format,
             (bp.product_category||{}).category, (bp.product_category||{}).confidence,
-            c.headline, c.primary_text, c.cta].join('||');
+            c.headline, c.primary_text, c.cta,
+            a.angle_id, a.angle_name, a.text_in_image].join('||');
   }).join('##');
 }
 
@@ -247,15 +261,20 @@ function applySearchFilter(force){
 
 
 let editModalAdId = null;
+let editModalAngleId = null;
 
-async function openEditModal(adId){
+async function openEditModal(adId, angleId){
   editModalAdId = adId;
+  editModalAngleId = angleId ?? null;
   document.getElementById('aeInst').value = '';
   document.getElementById('aeStatus').textContent = '';
-  let a = (window._cardsCache||[]).find(x=>x.ad_id===adId) || {};
+  // Match on angle_id too, so editing a card fetches THAT card's prompts rather than
+  // whichever angle-variant of this ad_id happens to be cached first.
+  const sameAd = x => x.ad_id===adId && (x.angle_id||null)===(editModalAngleId||null);
+  let a = (window._cardsCache||[]).find(sameAd) || {};
   if(!a.image_prompt && !a.copy_prompt){
     try { const r = await fetch('/api/artifacts'); const d = await r.json();
-      a = d.find(x=>x.ad_id===adId) || a; } catch(e) {}
+      a = d.find(sameAd) || a; } catch(e) {}
   }
   document.getElementById('aeModelInfo').textContent = a.model_info || 'Prompts recorded for ads generated from now on.';
   document.getElementById('aeImgPrompt').value = a.image_prompt || '(not recorded for this ad)';
@@ -278,7 +297,7 @@ async function modalEditImage(){
   const aspect = document.getElementById('aeAspect').value;
   _aeBusy(true, 'Regenerating image... this takes 20-30 seconds');
   try {
-    const r = await fetch('/api/edit_image/'+editModalAdId, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({instruction: inst, aspect})});
+    const r = await fetch('/api/edit_image/'+editModalAdId, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({instruction: inst, aspect, angle_id: editModalAngleId})});
     const res = await r.json();
     if(!res.ok){ _aeBusy(false, 'Failed: ' + (res.error||'unknown')); }
     else { _aeBusy(false, 'Done.'); closeEditModal(); await loadCards(true); }
@@ -292,7 +311,7 @@ async function modalEditCopy(){
   if(!inst){ alert('Type an instruction first'); return; }
   _aeBusy(true, 'Revising copy... about 10 seconds');
   try {
-    const r = await fetch('/api/edit_copy/'+editModalAdId, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({instruction: inst})});
+    const r = await fetch('/api/edit_copy/'+editModalAdId, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({instruction: inst, angle_id: editModalAngleId})});
     const res = await r.json();
     if(!res.ok){ _aeBusy(false, 'Failed: ' + (res.error||'unknown')); }
     else { _aeBusy(false, 'Done.'); closeEditModal(); await loadCards(true); }
@@ -398,7 +417,13 @@ function renderCards(data){
   el.innerHTML = data.map(a=>{
     const bp=a.blueprint||{}, c=a.copy||{};
     const dec=a.decision;
-    const badge = catBadge(bp) + ' '
+    // a.angle_id is OUR chosen generation angle (may be null - no angle selected for this
+    // run), distinct from bp.angle/bp.format (Claude's read of the competitor ad's own
+    // angle, shown separately below). angleArg is the literal passed into the button
+    // onclick handlers, quoted as JS null rather than the string "null".
+    const angleArg = (a.angle_id==null) ? 'null' : a.angle_id;
+    const angleBadge = a.angle_name ? `<span class="angle-badge">${esc(a.angle_name)}</span>` : '';
+    const badge = catBadge(bp) + ' ' + angleBadge + ' '
       + (dec==='approve'?'<span class="badge approve">Approved</span>'
       : dec==='reject'?'<span class="badge reject">Rejected</span>'
       : '<span class="badge pending">Pending</span>');
@@ -417,9 +442,9 @@ function renderCards(data){
           <div class="cta">${esc(c.cta||'')}</div></div>
       </div>
       <div class="actions">
-        <button class="btn-a" onclick="decide('${a.ad_id}','approve')">Approve</button>
-        <button class="btn-r" onclick="openRejectModal('${a.ad_id}')">Reject</button>
-        <button style="flex:0 0 auto;background:#3b3b3b;color:#fff;" onclick="openEditModal('${a.ad_id}')">Edit</button>
+        <button class="btn-a" onclick="decide('${a.ad_id}','approve',${angleArg})">Approve</button>
+        <button class="btn-r" onclick="openRejectModal('${a.ad_id}',${angleArg})">Reject</button>
+        <button style="flex:0 0 auto;background:#3b3b3b;color:#fff;" onclick="openEditModal('${a.ad_id}',${angleArg})">Edit</button>
       </div></div>`;
   }).join('');
 }
@@ -436,16 +461,21 @@ async function loadLog(){
 
 
 let rejectAdId = null;
-function openRejectModal(adId){ rejectAdId = adId; document.getElementById('rejOther').value=''; document.getElementById('rejModal').classList.add('open'); }
+let rejectAngleId = null;
+function openRejectModal(adId, angleId){ rejectAdId = adId; rejectAngleId = angleId ?? null; document.getElementById('rejOther').value=''; document.getElementById('rejModal').classList.add('open'); }
 function closeRejectModal(){ document.getElementById('rejModal').classList.remove('open'); }
 async function submitReject(reason){
   closeRejectModal();
-  await fetch('/api/decision/'+rejectAdId+'/reject?reason='+encodeURIComponent(reason), {method:'POST'});
+  const angleQ = rejectAngleId!=null ? ('&angle_id='+rejectAngleId) : '';
+  await fetch('/api/decision/'+rejectAdId+'/reject?reason='+encodeURIComponent(reason)+angleQ, {method:'POST'});
   await loadCards(true); await loadLog();
 }
 
-async function decide(ad,dec){
-  await fetch('/api/decision/'+ad+'/'+dec,{method:'POST'});
+// angleId disambiguates which artifact row is being decided on - an ad can now have one
+// per angle (see dedupe.record_decision). Omit/undefined behaves like today (no angle).
+async function decide(ad, dec, angleId){
+  const angleQ = angleId!=null ? ('?angle_id='+angleId) : '';
+  await fetch('/api/decision/'+ad+'/'+dec+angleQ,{method:'POST'});
   await loadCards(true); await loadLog();
 }
 
@@ -609,6 +639,87 @@ let selectedProductId = null;
     if(!confirm('Remove this product?')) return;
     await fetch('/api/products/'+id+'/delete', {method:'POST'});
     loadProducts();
+  }
+
+  // ---- Messaging angles: same modal-based CRUD shape as products, since an angle has
+  // too many fields (body_area, default_realism, includes_product, notes) for the
+  // competitors-style inline-row edit. ----
+  let _anglesCache = [];
+  async function loadAngles(){
+    const r = await fetch('/api/angles'); const data = await r.json();
+    _anglesCache = data;
+    const el = document.getElementById('angles');
+    if(!data.length){ el.innerHTML='<div class="empty">No angles yet</div>'; return; }
+    el.innerHTML = data.map(a=>`
+      <div class="comp-row" data-id="${a.id}">
+        <div class="comp-view">
+          <span class="comp-name" onclick="editAngle(${a.id})">${esc(a.name)}</span>
+          <div class="comp-actions">
+            <button class="mini" onclick="editAngle(${a.id})">Edit</button>
+            <button class="mini mini-r" onclick="removeAngle(${a.id})">Remove</button>
+          </div>
+        </div>
+        <div style="font-size:12px;color:#777;margin-top:4px;cursor:pointer;" onclick="editAngle(${a.id})">
+          <span class="cat-badge${a.body_area?'':' cat-none'}">${esc(a.body_area||'body area not set')}</span>
+          <span class="cat-badge${a.default_realism?'':' cat-none'}">${esc(a.default_realism||'realism not set')}</span>
+          <span class="cat-badge${a.includes_product?'':' cat-none'}">${a.includes_product?'product':'no product'}</span>
+        </div>
+      </div>`).join('');
+  }
+
+  function addAngleRow(){
+    const input = document.getElementById('newAngleName');
+    const name = input.value.trim();
+    openNewAngleModal();
+    if(name){ document.getElementById('amName').value = name; input.value=''; }
+  }
+
+  let angleModalId = null;
+
+  function editAngle(id){
+    const a = _anglesCache.find(x=>x.id===id); if(!a) return;
+    angleModalId = id;
+    document.getElementById('angleModalTitle').textContent = 'Edit Angle';
+    document.getElementById('amName').value = a.name || '';
+    document.getElementById('amSlug').value = a.slug || '';
+    document.getElementById('amBodyArea').value = a.body_area || '';
+    document.getElementById('amRealism').value = a.default_realism || '';
+    document.getElementById('amIncludesProduct').checked = !!a.includes_product;
+    document.getElementById('amNotes').value = a.notes || '';
+    document.getElementById('angleModal').classList.add('open');
+  }
+
+  function openNewAngleModal(){
+    angleModalId = null;
+    document.getElementById('angleModalTitle').textContent = 'New Angle';
+    ['amName','amSlug','amBodyArea','amRealism','amNotes'].forEach(i=>document.getElementById(i).value='');
+    document.getElementById('amIncludesProduct').checked = true;
+    document.getElementById('angleModal').classList.add('open');
+  }
+
+  function closeAngleModal(){ document.getElementById('angleModal').classList.remove('open'); }
+
+  async function saveAngleModal(){
+    const body = JSON.stringify({
+      name: document.getElementById('amName').value.trim(),
+      slug: document.getElementById('amSlug').value.trim(),
+      body_area: document.getElementById('amBodyArea').value.trim(),
+      default_realism: document.getElementById('amRealism').value.trim(),
+      includes_product: document.getElementById('amIncludesProduct').checked,
+      notes: document.getElementById('amNotes').value.trim(),
+    });
+    const parsed = JSON.parse(body);
+    if(!parsed.name || !parsed.slug){ alert('Name and slug are required'); return; }
+    const url = angleModalId ? '/api/angles/'+angleModalId : '/api/angles';
+    await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body});
+    closeAngleModal();
+    loadAngles();
+  }
+
+  async function removeAngle(id){
+    if(!confirm('Remove this angle?')) return;
+    await fetch('/api/angles/'+id+'/delete', {method:'POST'});
+    loadAngles();
   }
 
 
@@ -814,7 +925,7 @@ function dismissWarning(id){ _dismissedWarningIds.add(id); loadWarnings(); }
 
 function tick(){document.getElementById('clock').textContent=new Date().toLocaleString();}
 setInterval(tick,1000); tick();
-loadCards(); loadLog(); loadCompetitors(); loadProducts(); loadWarnings();
+loadCards(); loadLog(); loadCompetitors(); loadProducts(); loadAngles(); loadWarnings();
 // Never rebuild the feed while a caret sits in an overlay. Defer rather than drop, so a
 // pipeline run that finishes mid-typing still lands once the field loses focus.
 let _refreshPending = false;
@@ -861,6 +972,28 @@ document.addEventListener('focusout', e=>{
     <div class="modal-actions">
       <button class="mini" onclick="closeProdModal()">Cancel</button>
       <button class="run" onclick="saveProdModal()">Save</button>
+    </div>
+  </div>
+</div>
+<div class="modal-overlay" id="angleModal" onclick="if(event.target===this)closeAngleModal()">
+  <div class="modal">
+    <h3 id="angleModalTitle">Angle</h3>
+    <label>Name</label>
+    <input type="text" id="amName">
+    <label>Slug</label>
+    <input type="text" id="amSlug" placeholder="e.g. crepey_skin">
+    <label>Body area (leave empty if not yet confirmed - do not guess)</label>
+    <input type="text" id="amBodyArea" placeholder="e.g. elbow and forearm">
+    <label>Default realism</label>
+    <input type="text" id="amRealism" placeholder="e.g. ugc_native, high_spec_studio, illustrated">
+    <label style="display:flex;align-items:center;gap:8px;margin-top:12px;text-transform:none;letter-spacing:normal;">
+      <input type="checkbox" id="amIncludesProduct" style="width:auto;"> Includes product
+    </label>
+    <label>Notes (guidance for the prompt writer)</label>
+    <textarea id="amNotes"></textarea>
+    <div class="modal-actions">
+      <button class="mini" onclick="closeAngleModal()">Cancel</button>
+      <button class="run" onclick="saveAngleModal()">Save</button>
     </div>
   </div>
 </div>

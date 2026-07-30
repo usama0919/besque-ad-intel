@@ -106,10 +106,22 @@ def _reference_framing(count):
     )
 
 
-def generate_image(blueprint, ad_id, product=None, reference_images=None):
+def _draft_stem(ad_id, angle_slug=None):
+    """Filename/blob-key stem for one (ad_id, angle) draft. angle_slug=None reproduces the
+    pre-angle stem exactly (just ad_id) - existing draft paths on disk/bucket are untouched.
+    A given angle_slug produces a distinct stem, because generate_image/edit_image key their
+    output PNG and bucket blob by this stem alone: without it, a second angle's draft would
+    silently overwrite the first angle's PNG at the same {ad_id}_draft.png path even though
+    their DB rows are correctly distinct."""
+    return ad_id if not angle_slug else f"{ad_id}__{angle_slug}"
+
+
+def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_slug=None):
     """Single-pass image generation from the blueprint. One image, no iteration.
-    Saves to assets/<ad_id>_draft.png and returns the path. Returns None on failure."""
+    Saves to assets/<stem>_draft.png (stem = ad_id, or ad_id+angle if angle_slug is given)
+    and returns the path. Returns None on failure."""
     prompt = build_image_prompt(blueprint, product=product)
+    stem = _draft_stem(ad_id, angle_slug)
     try:
         client = genai.Client(vertexai=True, project="besque-martech", location="global")
         reference_images = reference_images or []
@@ -144,13 +156,13 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None):
             return None
 
         ASSET_DIR.mkdir(exist_ok=True)
-        dest = ASSET_DIR / f"{ad_id}_draft.png"
+        dest = ASSET_DIR / f"{stem}_draft.png"
         with open(dest, "wb") as f:
             f.write(image_bytes)
         try:
             from google.cloud import storage
             bucket_name = assets.asset_bucket_name()
-            blob = storage.Client().bucket(bucket_name).blob(f"{ad_id}_draft.png")
+            blob = storage.Client().bucket(bucket_name).blob(f"{stem}_draft.png")
             blob.upload_from_string(image_bytes, content_type="image/png")
         except Exception as e:
             print(f"Bucket upload failed (non-fatal): {e}")
@@ -163,10 +175,11 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None):
         return None
 
 
-def _next_draft_version(ad_id):
-    """Next free n for {ad_id}_draft_v{n}.png (1-based). Uses a prefix scan rather than
-    glob() so an ad_id containing glob metacharacters can't skew the match."""
-    prefix = f"{ad_id}_draft_v"
+def _next_draft_version(ad_id, angle_slug=None):
+    """Next free n for {stem}_draft_v{n}.png (1-based), stem = _draft_stem(ad_id, angle_slug).
+    Uses a prefix scan rather than glob() so an ad_id containing glob metacharacters can't
+    skew the match."""
+    prefix = f"{_draft_stem(ad_id, angle_slug)}_draft_v"
     n = 0
     if ASSET_DIR.exists():
         for p in ASSET_DIR.iterdir():
@@ -177,11 +190,15 @@ def _next_draft_version(ad_id):
     return n + 1
 
 
-def edit_image(current_image_bytes, instruction, ad_id, aspect="1:1"):
+def edit_image(current_image_bytes, instruction, ad_id, aspect="1:1", angle_slug=None):
     """Edit an existing draft image with a natural-language instruction via nano banana.
-    Versions the outgoing draft to {ad_id}_draft_v{n}.png, then saves/uploads the result
-    under the same key and returns it. Returns None on failure."""
+    Versions the outgoing draft to {stem}_draft_v{n}.png (stem = ad_id, or ad_id+angle),
+    then saves/uploads the result under the same stem's key and returns it. Returns None
+    on failure. Edit Mode itself is unbuilt - this parameter only exists so an angle-variant
+    draft can't be versioned/overwritten under the wrong (ad_id-only) key if this function
+    is ever called against one."""
     from google.genai import types as genai_types
+    stem = _draft_stem(ad_id, angle_slug)
     prompt = (
         BRAND_RULES +
         f"Edit this Besque skincare advertisement image. Instruction: {instruction}. "
@@ -213,12 +230,12 @@ def edit_image(current_image_bytes, instruction, ad_id, aspect="1:1"):
         if image_bytes is None:
             return None
         ASSET_DIR.mkdir(exist_ok=True)
-        dest = ASSET_DIR / f"{ad_id}_draft.png"
+        dest = ASSET_DIR / f"{stem}_draft.png"
         # Preserve the pre-edit draft before overwriting. current_image_bytes is that draft
         # whether the caller read it from disk or the bucket, so this works cache-cold too.
         # Deliberately fatal: if the previous version cannot be preserved we do not
         # overwrite it, since the whole point is that edits stay reversible.
-        version_name = f"{ad_id}_draft_v{_next_draft_version(ad_id)}.png"
+        version_name = f"{stem}_draft_v{_next_draft_version(ad_id, angle_slug)}.png"
         try:
             with open(ASSET_DIR / version_name, "wb") as f:
                 f.write(current_image_bytes)
@@ -232,7 +249,7 @@ def edit_image(current_image_bytes, instruction, ad_id, aspect="1:1"):
             bucket = storage.Client().bucket(assets.asset_bucket_name())
             # Mirror the version alongside the new draft; local assets are ephemeral on Cloud Run.
             bucket.blob(version_name).upload_from_string(current_image_bytes, content_type="image/png")
-            bucket.blob(f"{ad_id}_draft.png").upload_from_string(image_bytes, content_type="image/png")
+            bucket.blob(f"{stem}_draft.png").upload_from_string(image_bytes, content_type="image/png")
         except Exception as e:
             print(f"Bucket upload failed (non-fatal): {e}")
         edit_image.last_prompt = prompt

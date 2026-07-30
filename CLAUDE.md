@@ -155,3 +155,53 @@ blueprint reused). Final failure is recorded via
   `body_oil` — a category-scoped run currently hits just those two.
 - Nothing deployed since 27 Jul 2026 — everything above is committed and pushed to
   `main`, but Cloud Run is still running the 27 Jul build.
+
+## Work in progress — Prompt B (messaging angles + Claude prompt-writer pass)
+
+**Done:**
+- `angles` table + CRUD (`dedupe.py`: `init_angles`, `get_angles`, `get_angle`, `add_angle`,
+  `update_angle`, `delete_angle`) and a sidebar management panel in `dashboard.html`
+  (mirrors the products modal shape — angle has too many fields for the competitors-style
+  inline-row edit).
+- (ad × angle) dedup: `seen_ads`/`artifacts` keyed on `(ad_id, angle_id)` instead of
+  `ad_id` alone (`is_new`, `mark_seen`, `save_artifact`, `get_artifact` all take
+  `angle_id=None`, defaulting to today's exact pre-angle behaviour). Consequential fixes
+  folded in: `update_artifact_copy`/`update_artifact_image_prompt`/`record_decision` also
+  take `angle_id` (without it, editing or deciding on one angle-variant of an ad would
+  silently affect every other angle-variant sharing that `ad_id`), and
+  `get_artifacts_full`'s decision JOIN matches on angle too.
+- Draft-image collision fix: `generate_image_prompt._draft_stem(ad_id, angle_slug)` keys
+  the output PNG/blob so two angles' drafts for the same ad don't overwrite each other at
+  the same `{ad_id}_draft.png` path. Threaded through `generate_image`,
+  `_next_draft_version`, `edit_image`.
+- `messaging_angle` threaded through `pipeline.run_once(angle_id=...)` →
+  `process_ad(..., messaging_angle=...)`. Angle-blindness of `generate_copy_live` is
+  deliberate for now — flagged in a comment at `pipeline.py`'s `copy_kwargs` line as the
+  likely next mismatch once baked-in headlines are angle-specific.
+- `dashboard.py`/`dashboard.html`: `/api/angles` CRUD routes; `/api/decision`,
+  `/api/edit_image`, `/api/edit_copy` all accept `angle_id`; cards show an angle badge and
+  pass `angle_id` through Approve/Reject/Edit.
+
+**NOT started:**
+- `illustrated` as a fourth `production_style` value (schema enum, `deconstruct.py`'s
+  classifier prompt, `PRODUCTION_STYLE_GUIDANCE`, `validator.production_styles()`).
+- The four run-strip operator controls (Angle/Realism/Text-in-image/Include-product
+  dropdowns+toggles) — `run_once`/`process_ad` don't yet accept `realism`,
+  `text_in_image`, or `include_product` at all; only `angle_id` exists so far.
+- Conditional BRAND_RULES 6/7 (`brand_rules(text_in_image, include_product, ...)`
+  replacing the flat `BRAND_RULES` constant) and the matching closing-paragraph fix in
+  `build_image_prompt`.
+- The Claude prompt-writer pass (`generate_image_prompt_writer.py`) and its wiring into
+  `build_image_prompt` via `creative_description`.
+- `text_in_image` is already a real column on `artifacts` (added defensively alongside
+  `angle_id` in the same migration) but nothing sets it to anything other than `False` yet
+  — the dashboard overlay-suppression logic that reads it hasn't been built either.
+
+**Migration not yet run** — `migrate_angles.sql` (gitignored, repo root) has the full
+`seen_ads`/`artifacts`/`review_decisions`/`angles` DDL, reviewed but not executed. Until it
+runs, the live DB and this code disagree: `seen_ads`'s new `CREATE UNIQUE INDEX` in
+`init_db()` fails with `UndefinedColumn` against the current schema, which is currently
+failing 14 tests that call `run_once`/`is_new`/`mark_seen` (confirmed via a full pytest
+run — not a logic bug, just the expected consequence of the live table predating this
+column). `test_dedupe_angles.py` passes standalone since `angles` is a brand-new table
+with no drift to hit.

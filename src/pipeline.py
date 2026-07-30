@@ -59,14 +59,25 @@ def fetch_reference_images(product):
     return images, None
 
 
-def process_ad(ad, product=None, reference_images=None):
-    """Run one ad through the full pipeline. Returns processed/skipped/failed."""
+def process_ad(ad, product=None, reference_images=None, messaging_angle=None):
+    """Run one ad through the full pipeline. Returns processed/skipped/failed.
+    messaging_angle, if given, is a resolved angle dict (dedupe.get_angle's shape) - it
+    changes the dedup identity of this ad to (ad_id, angle_id) instead of ad_id alone, so
+    the same ad can produce one draft per angle rather than being skipped as already seen
+    the second time around."""
     ad_id = ad.get("ad_id")
     if not ad_id:
         return "failed"
+    angle_id = messaging_angle["id"] if messaging_angle else None
+    angle_slug = messaging_angle["slug"] if messaging_angle else None
     try:
-        if not FORCE_REPROCESS and not dedupe.is_new(ad_id):
-            log.info("Ad %s already seen, skipping", ad_id)
+        # angle_id=None here checks the exact same identity as before angle support
+        # existed. All 138 pre-angle artifacts have angle_id NULL, so the first
+        # angle-tagged run against an already-processed ad is EXPECTED to add a second
+        # row alongside the existing NULL-angle one, not replace it - that will look like
+        # duplication the first time it's seen; it is correct, not a bug to "fix".
+        if not FORCE_REPROCESS and not dedupe.is_new(ad_id, angle_id):
+            log.info("Ad %s already seen for angle_id=%s, skipping", ad_id, angle_id)
             return "skipped"
 
         image_bytes = assets.download_image_bytes(ad["image_url"])
@@ -83,6 +94,11 @@ def process_ad(ad, product=None, reference_images=None):
         MAX_COPY_ATTEMPTS = 2
         ok, issues = False, []
         for copy_attempt in range(1, MAX_COPY_ATTEMPTS + 1):
+            # Deliberately angle-blind for now: messaging_angle is not passed here, only
+            # into the image side below. Fine while the image's baked-in text is off by
+            # default, but once text_in_image renders an angle-specific headline into the
+            # image, copy that doesn't know the angle is likely to read mismatched - revisit
+            # generate_copy_live's inputs if that mismatch shows up in practice.
             copy_kwargs = {"product": product}
             if copy_attempt > 1:
                 # Fail-soft: feed the SPECIFIC prior failure back rather than discarding
@@ -101,7 +117,9 @@ def process_ad(ad, product=None, reference_images=None):
             dedupe.record_warning("compliance_failed", reason)
             return "failed"
         try:
-            draft_image = generate_image_prompt.generate_image(blueprint, ad_id, product=product, reference_images=reference_images)
+            draft_image = generate_image_prompt.generate_image(
+                blueprint, ad_id, product=product, reference_images=reference_images, angle_slug=angle_slug
+            )
         except Exception as e:
             log.error("Ad %s failed: image generation raised: %s", ad_id, e)
             draft_image = None
@@ -127,9 +145,10 @@ def process_ad(ad, product=None, reference_images=None):
                 "destination_url": ad.get("destination_url", ""),
                 "media_type": ad.get("media_type", ""),
             },
+            angle_id=angle_id,
         )
 
-        dedupe.mark_seen(ad_id, ad.get("page_name", ""))
+        dedupe.mark_seen(ad_id, ad.get("page_name", ""), angle_id)
 
         try:
             slack_review.post_review(ad, blueprint, copy, image_ref=draft_image or image_path)
@@ -143,14 +162,21 @@ def process_ad(ad, product=None, reference_images=None):
         return "failed"
 
 
-def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product_id=None, category=None):
+def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product_id=None, category=None,
+             angle_id=None):
     """One scheduled run across the watchlist, or a single competitor if
     competitor_id is given, or every competitor tagged with `category` if that's
     given instead. competitor_id takes precedence if both are somehow passed.
     category="" is treated the same as category=None (no filter, every
     competitor runs) - it does NOT mean "match competitors with no category set."
     should_stop is an optional zero-arg callable checked between ads/competitors
-    to cooperatively halt the run early."""
+    to cooperatively halt the run early.
+
+    angle_id, if given, resolves to a messaging angle applied to every ad in this run -
+    it changes dedup identity to (ad_id, angle_id), so an ad already processed with no
+    angle (or a different angle) will be processed again under this one, producing an
+    additional artifact rather than being skipped. angle_id=None behaves exactly as
+    before angle support existed."""
     from src.config_check import validate_config
     validate_config()
     dedupe.init_db()
@@ -158,7 +184,9 @@ def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product
     dedupe.init_artifacts()
     dedupe.init_competitors()
     dedupe.init_products()
+    dedupe.init_angles()
     product = dedupe.get_product(product_id) if product_id else None
+    messaging_angle = dedupe.get_angle(angle_id) if angle_id else None
     reference_images = []
     reference_warning = None
     if product:
@@ -217,7 +245,7 @@ def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product
             if processed_this_comp >= max_per_competitor:
                 log.info("Reached cap of %s new ads for %s, stopping.", max_per_competitor, name)
                 break
-            result = process_ad(ad, product=product, reference_images=reference_images)
+            result = process_ad(ad, product=product, reference_images=reference_images, messaging_angle=messaging_angle)
             summary[result] += 1
             if result == "processed":
                 processed_this_comp += 1
