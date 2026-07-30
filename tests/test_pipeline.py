@@ -21,7 +21,7 @@ def _mock_all_stages(monkeypatch):
     monkeypatch.setattr(pipeline.deconstruct, "deconstruct_image", lambda **k: {"format": "hero", "angle": "a"})
     monkeypatch.setattr(pipeline.generate_copy, "generate_copy_live", lambda bp, product=None, **k: {"headline": "H", "primary_text": "P", "cta": "C"})
     monkeypatch.setattr(pipeline.compliance, "check_compliance", lambda copy, name, text: (True, []))
-    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image", lambda bp, aid, product=None, reference_images=None: "draft.png")
+    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image", lambda bp, aid, product=None, reference_images=None, angle_slug=None: "draft.png")
     monkeypatch.setattr(pipeline.slack_review, "post_review", lambda *a, **k: {"ts": "123"})
     monkeypatch.setattr(pipeline.dedupe, "save_artifact", lambda **k: None)
 
@@ -58,7 +58,7 @@ def test_process_ad_passes_product_to_copy_and_image(monkeypatch):
         seen["copy"] = product
         return {"headline": "H", "primary_text": "P", "cta": "C"}
 
-    def capture_image(bp, aid, product=None, reference_images=None):
+    def capture_image(bp, aid, product=None, reference_images=None, angle_slug=None):
         seen["image"] = product
         seen["reference_images"] = reference_images
         return "draft.png"
