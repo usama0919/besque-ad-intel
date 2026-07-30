@@ -309,22 +309,44 @@ def test_run_once_no_filter_hits_all_competitors(monkeypatch):
 
 
 def test_run_once_threads_realism_and_toggles_to_process_ad(monkeypatch):
-    """Regression guard for the four run-strip controls (Part 3): realism, text_in_image,
-    and include_product must reach process_ad unchanged. This is the "verify locally via
-    pipeline.run_once(...)" check - /api/run only affects the deployed Cloud Run image,
-    never local code, so this is the only way to prove the threading actually works."""
+    """Regression guard for the run-strip controls (Parts 3-4b): realism, text_in_image,
+    include_product, body_area, and offer_text must reach process_ad unchanged. This is
+    the "verify locally via pipeline.run_once(...)" check - /api/run only affects the
+    deployed Cloud Run image, never local code, so this is the only way to prove the
+    threading actually works."""
     _mock_competitor_selection(monkeypatch)
     monkeypatch.setattr(pipeline.scrape, "scrape_ads",
                         lambda name, page_id=None: [{"ad_id": "A1", "page_name": name}])
     captured = []
     monkeypatch.setattr(pipeline, "process_ad", lambda ad, **kwargs: captured.append(kwargs) or "processed")
 
-    pipeline.run_once(competitor_id=2, realism="ugc_native", text_in_image=True, include_product=False)
+    pipeline.run_once(competitor_id=2, realism="ugc_native", text_in_image=True, include_product=False,
+                       body_area="knees", offer_text="20% off launch week")
 
     assert len(captured) == 1
     assert captured[0]["realism"] == "ugc_native"
     assert captured[0]["text_in_image"] is True
     assert captured[0]["include_product"] is False
+    assert captured[0]["body_area"] == "knees"
+    assert captured[0]["offer_text"] == "20% off launch week"
+
+
+def test_run_once_body_area_is_independent_of_angle_body_area(monkeypatch):
+    """Body area varies every run and is NOT fixed per angle (team confirmed) - run_once
+    must forward the explicit per-run body_area, never read it off the resolved angle's
+    own body_area column. A regression here would mean angles.body_area silently became
+    authoritative again, exactly what was ruled out."""
+    _mock_competitor_selection(monkeypatch)
+    monkeypatch.setattr(pipeline.scrape, "scrape_ads",
+                        lambda name, page_id=None: [{"ad_id": "A1", "page_name": name}])
+    monkeypatch.setattr(pipeline.dedupe, "get_angle",
+                        lambda aid: {"id": aid, "slug": "crepey_skin", "body_area": "elbow and forearm"})
+    captured = []
+    monkeypatch.setattr(pipeline, "process_ad", lambda ad, **kwargs: captured.append(kwargs) or "processed")
+
+    pipeline.run_once(competitor_id=2, angle_id=1, body_area="knees")
+
+    assert captured[0]["body_area"] == "knees"
 
 
 def test_process_ad_failure_isolated(monkeypatch):

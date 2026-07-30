@@ -60,7 +60,8 @@ def fetch_reference_images(product):
 
 
 def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
-                realism=None, text_in_image=False, include_product=True):
+                realism=None, text_in_image=False, include_product=True,
+                body_area=None, offer_text=None):
     """Run one ad through the full pipeline. Returns processed/skipped/failed.
     messaging_angle, if given, is a resolved angle dict (dedupe.get_angle's shape) - it
     changes the dedup identity of this ad to (ad_id, angle_id) instead of ad_id alone, so
@@ -72,7 +73,13 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
     overlay-suppression logic) AND forwarded to generate_image, which now enforces the
     conditional brand_rules (rule 6's text allow-list, rule 7's productless mode). realism
     is still inert - nothing yet reads it to change the register of what's generated; that
-    lands with the Claude prompt-writer pass."""
+    lands with the Claude prompt-writer pass.
+
+    body_area/offer_text are per-run free-text operator inputs, threaded exactly like
+    realism - also inert until the writer pass. body_area is NEVER read from
+    messaging_angle["body_area"] here: the team confirmed body area varies every run and
+    isn't fixed per angle, so an angle's stored body_area is only ever a UI pre-fill
+    suggestion in the dashboard, never an authoritative value used in generation."""
     ad_id = ad.get("ad_id")
     if not ad_id:
         return "failed"
@@ -174,7 +181,8 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
 
 
 def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product_id=None, category=None,
-             angle_id=None, realism=None, text_in_image=False, include_product=True):
+             angle_id=None, realism=None, text_in_image=False, include_product=True,
+             body_area=None, offer_text=None):
     """One scheduled run across the watchlist, or a single competitor if
     competitor_id is given, or every competitor tagged with `category` if that's
     given instead. competitor_id takes precedence if both are somehow passed.
@@ -189,9 +197,11 @@ def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product
     additional artifact rather than being skipped. angle_id=None behaves exactly as
     before angle support existed.
 
-    realism/text_in_image/include_product are the other three run-strip controls, applied
-    to every ad in this run - operator-set per run, never auto-detected from the angle or
-    the competitor ad. Defaults (None/False/True) reproduce today's behaviour exactly."""
+    realism/text_in_image/include_product/body_area/offer_text are the other run-strip
+    controls, applied to every ad in this run - operator-set per run, never auto-detected
+    from the angle or the competitor ad. Defaults (None/False/True/None/None) reproduce
+    today's behaviour exactly. body_area is a per-run free-text value, deliberately never
+    read from the resolved angle's own body_area column (see process_ad's docstring)."""
     from src.config_check import validate_config
     validate_config()
     dedupe.init_db()
@@ -261,7 +271,8 @@ def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product
                 log.info("Reached cap of %s new ads for %s, stopping.", max_per_competitor, name)
                 break
             result = process_ad(ad, product=product, reference_images=reference_images, messaging_angle=messaging_angle,
-                                realism=realism, text_in_image=text_in_image, include_product=include_product)
+                                realism=realism, text_in_image=text_in_image, include_product=include_product,
+                                body_area=body_area, offer_text=offer_text)
             summary[result] += 1
             if result == "processed":
                 processed_this_comp += 1

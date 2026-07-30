@@ -122,13 +122,19 @@ def _run_pipeline_bg(n, competitor_id=None):
 @app.post("/api/run")
 def api_run(n: int = 2, competitor_id: int = None, product_id: int = None,
             angle_id: int = None, realism: str = "", text_in_image: bool = False,
-            include_product: bool = True):
+            include_product: bool = True, body_area: str = "", offer_text: str = ""):
     """Trigger the pipeline as a Cloud Run Job (runs to completion, isolated).
 
     NOTE: this always runs the last DEPLOYED image on Cloud Run, not local changes - the
-    four angle/realism/text-in-image/include-product params below only take effect once
-    a fresh image is deployed. Verify local changes via pipeline.run_once(...) directly,
-    not this button.
+    six angle/realism/text-in-image/include-product/body-area/offer-text params below only
+    take effect once a fresh image is deployed. Verify local changes via
+    pipeline.run_once(...) directly, not this button.
+
+    body_area/offer_text are per-run free-text operator inputs, threaded exactly like
+    realism (not persisted anywhere, not sourced from the angle). body_area in particular
+    must never be read from angles.body_area here - the team confirmed body area varies
+    every run and isn't fixed per angle; that column is only ever a UI pre-fill suggestion
+    in dashboard.html's onAngleChange().
     """
     from google.cloud import run_v2
     project = os.getenv("GCP_PROJECT", "besque-martech")
@@ -146,6 +152,8 @@ def api_run(n: int = 2, competitor_id: int = None, product_id: int = None,
                     run_v2.EnvVar(name="RUN_REALISM", value=realism or ""),
                     run_v2.EnvVar(name="RUN_TEXT_IN_IMAGE", value="1" if text_in_image else "0"),
                     run_v2.EnvVar(name="RUN_INCLUDE_PRODUCT", value="1" if include_product else "0"),
+                    run_v2.EnvVar(name="RUN_BODY_AREA", value=body_area or ""),
+                    run_v2.EnvVar(name="RUN_OFFER_TEXT", value=offer_text or ""),
                 ]
             )
         ]

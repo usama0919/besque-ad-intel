@@ -10,9 +10,14 @@
   header { background:#1a1a1a; color:#fff; padding:22px 40px; display:flex; align-items:center; justify-content:space-between; position:sticky; top:0; z-index:100; }
   header h1 { font-size:20px; font-weight:600; letter-spacing:0.5px; }
   header .sub { font-size:13px; color:#b8b8b8; margin-top:2px; }
-  .bar { padding:20px 40px; display:flex; gap:16px; align-items:center; background:#fff; border-bottom:1px solid #e5e0d8; position:sticky; z-index:99; }
-  .bar:nth-of-type(1) { top:66px; }
-  .bar:nth-of-type(2) { top:130px; }
+  /* Both control bars live in one sticky wrapper (.sticky-controls) rather than each
+     being independently sticky at a hardcoded top offset - the run strip's control count
+     varies (and can wrap to a second line), so a fixed offset for the stats bar below it
+     would drift out of sync and overlap it, which is exactly what happened before this
+     fix. Stacking them as normal-flow children of one sticky container means however
+     tall the run strip renders, the stats bar always sits directly beneath it. */
+  .sticky-controls { position:sticky; top:66px; z-index:90; background:#fff; }
+  .bar { padding:20px 40px; display:flex; flex-wrap:wrap; gap:16px; align-items:center; background:#fff; border-bottom:1px solid #e5e0d8; }
   button.run { background:#1a1a1a; color:#fff; border:none; padding:11px 22px; border-radius:8px; font-size:14px; font-weight:600; cursor:pointer; }
   button.run:hover { background:#333; }
   button.run:disabled { background:#999; cursor:wait; }
@@ -91,7 +96,9 @@
   button.stop:disabled { background:#e5c6c2; cursor:not-allowed; }
   #searchBox { padding:10px 14px; border:1px solid #ccc; border-radius:8px; font-size:14px; width:100%; max-width:360px; margin-bottom:14px; }
   #selectedCompName { font-size:12px; color:#888; }
-  .modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.45); z-index:50; }
+  /* Above header (100) and .sticky-controls (90) - a modal must never render behind
+     sticky page furniture at any scroll position. */
+  .modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.45); z-index:200; }
   .modal-overlay.open { display:flex; align-items:center; justify-content:center; }
   .modal { background:#fff; border-radius:14px; width:min(560px, 92vw); max-height:86vh; overflow-y:auto; padding:24px 28px; box-shadow:0 12px 40px rgba(0,0,0,.25); }
   .modal h3 { margin:0 0 16px; }
@@ -141,6 +148,7 @@
   <div class="sub" id="clock"></div>
 </header>
 <div id="warningsBanner" style="display:none;background:#fdf3e0;color:#8a5a12;border:1px solid #f0dcb4;border-radius:8px;padding:10px 14px;margin:0 24px 12px;font-size:13px;"></div>
+<div class="sticky-controls">
 <div class="bar">
   <select id="adCount" style="padding:9px;border:1px solid #ccc;border-radius:7px;font-size:13px;">
     <option value="1">1 ad</option>
@@ -156,6 +164,17 @@
     {% for s in production_styles %}<option value="{{ s }}">{{ s }}</option>
     {% endfor %}
   </select>
+  <!-- Body area is confirmed to vary per run, not fixed per angle - a fixed set would be
+       wrong for how this is actually used, so this is a free-text input with suggestions
+       only (datalist), never a <select>. An angle's stored body_area (if any) only
+       pre-fills this as a starting suggestion (see onAngleChange()), never treated as
+       authoritative. -->
+  <input type="text" id="bodyAreaInput" list="bodyAreaSuggestions" placeholder="Body area (varies per run)" style="padding:9px;border:1px solid #ccc;border-radius:7px;font-size:13px;">
+  <datalist id="bodyAreaSuggestions">
+    <option value="chest"><option value="arms"><option value="legs"><option value="stomach">
+    <option value="back"><option value="knees"><option value="elbows"><option value="neck">
+  </datalist>
+  <input type="text" id="offerTextInput" placeholder="Offer text (optional)" style="padding:9px;border:1px solid #ccc;border-radius:7px;font-size:13px;">
   <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#555;">
     <input type="checkbox" id="textInImageToggle" style="width:auto;"> Text in image
   </label>
@@ -172,6 +191,7 @@
   <div><div style="font-size:26px;font-weight:700;color:#1a7f42;" id="stat-approved">0</div><div style="font-size:12px;color:#888;text-transform:uppercase;letter-spacing:1px;">Approved</div></div>
   <div><div style="font-size:26px;font-weight:700;color:#c0392b;" id="stat-rejected">0</div><div style="font-size:12px;color:#888;text-transform:uppercase;letter-spacing:1px;">Rejected</div></div>
   <div><div style="font-size:26px;font-weight:700;color:#999;" id="stat-pending">0</div><div style="font-size:12px;color:#888;text-transform:uppercase;letter-spacing:1px;">Pending</div></div>
+</div>
 </div>
 <div class="layout">
   <div>
@@ -688,14 +708,18 @@ let selectedProductId = null;
       </div>`).join('');
   }
 
-  // Selecting an angle pre-fills realism/include-product from its stored defaults - the
-  // operator can still change either before clicking Run. Values are read fresh at Run
-  // time from whatever the controls currently show, never re-derived from angle_id.
+  // Selecting an angle pre-fills realism/include-product/body-area from its stored
+  // defaults - the operator can still change any of them before clicking Run. Values are
+  // read fresh at Run time from whatever the controls currently show, never re-derived
+  // from angle_id. angle.body_area is only ever used here, as a starting SUGGESTION - the
+  // team confirmed body area varies every run and is never fixed per angle, so nothing
+  // downstream may treat it as the angle's actual/authoritative body part.
   function onAngleChange(){
     const sel = document.getElementById('angleSelect');
     const angle = _anglesCache.find(a => String(a.id) === sel.value);
     document.getElementById('realismSelect').value = angle ? (angle.default_realism || '') : '';
     document.getElementById('includeProductToggle').checked = angle ? !!angle.includes_product : true;
+    document.getElementById('bodyAreaInput').value = angle ? (angle.body_area || '') : '';
   }
 
   function addAngleRow(){
@@ -914,12 +938,16 @@ async function runPipeline(){
   const realism = document.getElementById('realismSelect').value;
   const textInImage = document.getElementById('textInImageToggle').checked;
   const includeProduct = document.getElementById('includeProductToggle').checked;
+  const bodyArea = document.getElementById('bodyAreaInput').value.trim();
+  const offerText = document.getElementById('offerTextInput').value.trim();
   await fetch('/api/run?n='+nAds+'&competitor_id='+selectedCompetitorId
     +(selectedProductId?('&product_id='+selectedProductId):'')
     +(angleId?('&angle_id='+angleId):'')
     +(realism?('&realism='+encodeURIComponent(realism)):'')
     +'&text_in_image='+(textInImage?'1':'0')
-    +'&include_product='+(includeProduct?'1':'0'),
+    +'&include_product='+(includeProduct?'1':'0')
+    +(bodyArea?('&body_area='+encodeURIComponent(bodyArea)):'')
+    +(offerText?('&offer_text='+encodeURIComponent(offerText)):''),
     {method:'POST'});
   const poll=setInterval(async()=>{
     const r=await fetch('/api/run/status'); const s=await r.json();
