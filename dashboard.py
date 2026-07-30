@@ -565,7 +565,13 @@ def api_add_competitor(name: str, page_id: str = "", category: str = ""):
 
 @app.put("/api/competitors/{competitor_id}")
 def api_update_competitor(competitor_id: int, name: str, page_id: str = None, category: str = ""):
-    dedupe.update_competitor(competitor_id, name=name, page_id=(page_id if page_id else name), category=category)
+    """page_id absent from the request -> None -> update_competitor leaves the existing
+    page_id untouched. Do NOT default it to name here: unlike POST (a brand-new row with
+    no page_id yet), PUT can be a category-only or name-only edit of a row that already
+    has a real, verified numeric page_id - defaulting to name would overwrite it. This
+    exact mistake (copying add_competitor's "default to name" fallback into the update
+    path) wiped six verified page_ids on 2026-07-30."""
+    dedupe.update_competitor(competitor_id, name=name, page_id=page_id, category=category)
     return JSONResponse({"ok": True, "id": competitor_id, "name": name, "category": category})
 
 

@@ -209,12 +209,23 @@ def get_competitors():
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
-def update_competitor(competitor_id: int, name: str, page_id: str, category: str = "") -> None:
+def update_competitor(competitor_id: int, name: str, page_id: str = None, category: str = "") -> None:
+    """page_id=None (the default) leaves the existing page_id column untouched. Unlike
+    add_competitor, where defaulting page_id to name is a reasonable placeholder for a
+    brand-new row, an UPDATE has a real, possibly already-verified numeric page_id sitting
+    in the row - overwriting it just because a caller omitted the param (e.g. a
+    category-only edit) is the exact bug that wiped six verified page_ids on 2026-07-30."""
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute(
-            "UPDATE competitors SET name = %s, page_id = %s, category = %s WHERE id = %s",
-            (name, page_id, category, competitor_id),
-        )
+        if page_id is not None:
+            cur.execute(
+                "UPDATE competitors SET name = %s, page_id = %s, category = %s WHERE id = %s",
+                (name, page_id, category, competitor_id),
+            )
+        else:
+            cur.execute(
+                "UPDATE competitors SET name = %s, category = %s WHERE id = %s",
+                (name, category, competitor_id),
+            )
         conn.commit()
 
 

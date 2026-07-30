@@ -239,3 +239,28 @@ def test_api_run_stop_sets_flag():
     _reset_run_status()
     dashboard.api_run_stop()
     assert dashboard._run_status["stop_requested"] is True
+
+
+# ---- PUT /api/competitors/{id}: page_id must survive a page_id-less update ----
+# Regression guard for the 2026-07-30 incident: page_id absent from the request wiped
+# six verified numeric page_ids, because the route defaulted it to `name` (correct for
+# add_competitor's brand-new-row case, wrong for an update of an existing, real page_id).
+
+def test_put_competitor_category_only_preserves_page_id(monkeypatch):
+    import uuid
+    from src import dedupe
+    from fastapi.testclient import TestClient
+
+    dedupe.init_competitors()
+    name = f"__test_{uuid.uuid4().hex[:8]}__"
+    cid = dedupe.add_competitor(name, page_id="1936234786698582", category="")
+    try:
+        client = TestClient(dashboard.app)
+        # page_id genuinely absent from the query string - not sent as "".
+        r = client.put(f"/api/competitors/{cid}?name={name}&category=body_oil")
+        assert r.status_code == 200
+        row = next(c for c in dedupe.get_competitors() if c["id"] == cid)
+        assert row["page_id"] == "1936234786698582"
+        assert row["category"] == "body_oil"
+    finally:
+        dedupe.delete_competitor(cid)
