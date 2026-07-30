@@ -35,7 +35,10 @@ def get_asset(filename: str):
 
 templates = Jinja2Templates(directory="templates")
 
-_run_status = {"running": False, "last_summary": None, "stop_requested": False, "execution": None}
+_run_status = {"running": False, "last_summary": None, "stop_requested": False, "execution": None,
+               "mode": None}
+# Set only so tests can join() deterministically instead of sleep-polling for completion.
+_run_thread = None
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -105,12 +108,25 @@ def api_decision(ad_id: str, decision: str, reason: str = "", angle_id: int = No
     return JSONResponse({"ok": True, "ad_id": ad_id, "decision": decision})
 
 
-def _run_pipeline_bg(n, competitor_id=None):
+def _run_pipeline_bg(n, competitor_id=None, category=None, product_id=None, angle_id=None,
+                      realism=None, text_in_image=False, include_product=True,
+                      body_area=None, offer_text=None):
+    """LOCAL_RUN's in-process runner - was dead code (api_run always hit the Cloud Run Job
+    path) until LOCAL_RUN=1 made it reachable. Runs pipeline.run_once with every run-strip
+    param, exactly as job_runner.py does for a real deployed Job."""
     try:
         from src import pipeline
         _run_status["last_summary"] = pipeline.run_once(
             max_per_competitor=n,
             competitor_id=competitor_id,
+            category=category,
+            product_id=product_id,
+            angle_id=angle_id,
+            realism=realism,
+            text_in_image=text_in_image,
+            include_product=include_product,
+            body_area=body_area,
+            offer_text=offer_text,
             should_stop=lambda: _run_status["stop_requested"],
         )
     except Exception as e:
@@ -120,15 +136,15 @@ def _run_pipeline_bg(n, competitor_id=None):
 
 
 @app.post("/api/run")
-def api_run(n: int = 2, competitor_id: int = None, product_id: int = None,
+def api_run(n: int = 2, competitor_id: int = None, category: str = "", product_id: int = None,
             angle_id: int = None, realism: str = "", text_in_image: bool = False,
             include_product: bool = True, body_area: str = "", offer_text: str = ""):
-    """Trigger the pipeline as a Cloud Run Job (runs to completion, isolated).
+    """Trigger the pipeline. Two paths:
 
-    NOTE: this always runs the last DEPLOYED image on Cloud Run, not local changes - the
-    six angle/realism/text-in-image/include-product/body-area/offer-text params below only
-    take effect once a fresh image is deployed. Verify local changes via
-    pipeline.run_once(...) directly, not this button.
+    - LOCAL_RUN=1: runs _run_pipeline_bg (pipeline.run_once) in a background thread, in
+      this process, against local code - for verifying a change before it's deployed.
+    - LOCAL_RUN unset (default): triggers the Cloud Run Job exactly as before this env var
+      existed - the last DEPLOYED image, not local changes. This path is UNCHANGED.
 
     body_area/offer_text are per-run free-text operator inputs, threaded exactly like
     realism (not persisted anywhere, not sourced from the angle). body_area in particular
@@ -136,6 +152,30 @@ def api_run(n: int = 2, competitor_id: int = None, product_id: int = None,
     every run and isn't fixed per angle; that column is only ever a UI pre-fill suggestion
     in dashboard.html's onAngleChange().
     """
+    if os.getenv("LOCAL_RUN") == "1":
+        global _run_thread
+        # Reset stop_requested - a previous run's Stop click must not immediately kill
+        # this new one. The Job path below doesn't need this: it never reads the flag.
+        _run_status["stop_requested"] = False
+        _run_status["running"] = True
+        _run_status["last_summary"] = None
+        _run_status["mode"] = "local"
+        _run_thread = threading.Thread(
+            target=_run_pipeline_bg,
+            kwargs=dict(
+                n=n, competitor_id=competitor_id, category=(category or None), product_id=product_id,
+                angle_id=angle_id, realism=(realism or None), text_in_image=text_in_image,
+                include_product=include_product, body_area=(body_area or None),
+                offer_text=(offer_text or None),
+            ),
+            daemon=True,
+        )
+        _run_thread.start()
+        return JSONResponse({"ok": True, "started": True})
+
+    # ---- Cloud Run Job path below is UNCHANGED from before LOCAL_RUN existed ----
+    _run_status["mode"] = "job"  # bookkeeping only, read by api_run_status - does not
+                                 # affect this path's own behaviour or response.
     from google.cloud import run_v2
     project = os.getenv("GCP_PROJECT", "besque-martech")
     region = os.getenv("GCP_REGION", "europe-west2")
@@ -177,7 +217,14 @@ def api_run_stop():
 
 @app.get("/api/run/status")
 def api_run_status():
-    """Report latest pipeline job execution state (stateless, instance-safe)."""
+    """Report latest pipeline run state.
+
+    A LOCAL_RUN-triggered run has no Cloud Run execution to query - report directly from
+    the in-memory _run_status the background thread is updating. Otherwise (mode is "job",
+    or no run has been triggered yet this process), fall through to the ORIGINAL stateless
+    GCP Executions query, completely unchanged."""
+    if _run_status.get("mode") == "local":
+        return JSONResponse({"running": _run_status["running"], "last_summary": _run_status["last_summary"]})
     try:
         from google.cloud import run_v2
         project = os.getenv("GCP_PROJECT", "besque-martech")
