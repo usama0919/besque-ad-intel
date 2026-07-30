@@ -35,9 +35,19 @@ WRITER_SYSTEM = (
 
 
 def _build_user_prompt(blueprint, product=None, angle=None, realism=None, body_area=None,
-                        offer_text=None, reference_image_count=0):
+                        offer_text=None, reference_image_count=0, text_in_image=False,
+                        include_product=True, headline=None, subtext=None):
     """Assemble the text handed to Claude. Pure and side-effect free so it's directly
-    testable without mocking the API."""
+    testable without mocking the API.
+
+    blueprint["visual"]["subject"] is deliberately NEVER read here, for the same reason
+    build_image_prompt never reads it: it's where the vision step puts rich,
+    identity-carrying descriptions of the COMPETITOR's model AND product (e.g. "two
+    amber glass bottles, blonde model in dark bikini..."). Handing that to a creative
+    writer is exactly how a real incident produced "two Besque Magic amber glass
+    bottles" - the writer described the competitor's own subject/product count back at
+    us. If a future change needs `subject` for better composition, it must come with an
+    explicit compliance override alongside it, not instead of one."""
     lines = []
     angle = angle or {}
     lines.append(f"Messaging angle: {angle.get('name', 'unspecified')}.")
@@ -82,6 +92,46 @@ def _build_user_prompt(blueprint, product=None, angle=None, realism=None, body_a
         )
     if visual.get("palette_mood"):
         lines.append(f"Palette/mood inspiration from the competitor ad: {visual['palette_mood']}")
+
+    # These two constraints are stated LAST, right before the writing instruction, and in
+    # absolute terms - not "inspiration", not overridable by anything above (including the
+    # competitor's own layout/palette). A real failure: with text_in_image=False the writer
+    # described "gold serif headline text reads 'CREPEY SKIN MEETS ITS MATCH'" (rule 6
+    # forbids all text) and "two Besque Magic amber glass bottles" (rule 7 permits exactly
+    # one) - Gemini then discarded the whole composition rather than reconciling the
+    # contradiction with brand_rules(). The writer must never write a scene the guardrails
+    # will then have to override.
+    if include_product:
+        lines.append(
+            "Product count (STRICT, overrides anything above): describe EXACTLY ONE Besque "
+            "product bottle in the scene - never two, never a range, lineup, or duplicate, "
+            "even if the competitor ad's own layout showed multiple products. Collapse any "
+            "multi-product composition to a single bottle."
+        )
+    else:
+        lines.append(
+            "Product presence (STRICT, overrides anything above): this is a deliberately "
+            "PRODUCTLESS, educational/illustrative image. Do NOT describe any Besque "
+            "product, bottle, jar, tube, or packaging anywhere in the scene - not even one."
+        )
+    if text_in_image and headline:
+        permitted = f'the headline "{headline}"'
+        if subtext:
+            permitted += f' and the supporting text "{subtext}"'
+        lines.append(
+            f"Text in image (STRICT, overrides anything above): describe {permitted} "
+            f"rendered as in-scene typography - describe its placement and styling, but do "
+            f"not invent, alter, quote different wording, or add any other text, price, or "
+            f"caption. Never quote a headline other than the one given here."
+        )
+    else:
+        lines.append(
+            "Text in image (STRICT, overrides anything above): this image must contain NO "
+            "typography, headline, or quoted text of any kind, even if the competitor ad had "
+            "text. Describe RESERVED NEGATIVE SPACE where a headline could later be added as "
+            "a separate overlay - never describe words, letters, or typography in the scene."
+        )
+
     lines.append(
         "Write the creative_description now: one paragraph covering scene and setting, "
         "subject, product placement, text content and styling (if any text was specified "
@@ -91,14 +141,23 @@ def _build_user_prompt(blueprint, product=None, angle=None, realism=None, body_a
 
 
 def write_creative_description(blueprint, product=None, angle=None, realism=None,
-                                body_area=None, offer_text=None, reference_image_count=0):
+                                body_area=None, offer_text=None, reference_image_count=0,
+                                text_in_image=False, include_product=True, headline=None,
+                                subtext=None):
     """Ask Claude to write the creative description that build_image_prompt will slot in
     place of its own template assembly. Returns the text, or None on ANY failure - never
     raises, so callers can treat None as "fall back to the template" without their own
-    try/except."""
+    try/except.
+
+    text_in_image/include_product/headline/subtext are the SAME mode flags brand_rules()
+    enforces mechanically - the writer must be told them explicitly (see
+    _build_user_prompt's STRICT block) so it never describes a scene the guardrails then
+    have to override. Defaults (False/True/None/None) match brand_rules()'s own defaults."""
     user_prompt = _build_user_prompt(blueprint, product=product, angle=angle, realism=realism,
                                       body_area=body_area, offer_text=offer_text,
-                                      reference_image_count=reference_image_count)
+                                      reference_image_count=reference_image_count,
+                                      text_in_image=text_in_image, include_product=include_product,
+                                      headline=headline, subtext=subtext)
     try:
         client = anthropic.Anthropic(timeout=60.0, max_retries=1)  # reads ANTHROPIC_API_KEY from env
         write_creative_description.last_prompt = user_prompt

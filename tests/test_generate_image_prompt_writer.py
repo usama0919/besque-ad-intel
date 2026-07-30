@@ -53,6 +53,80 @@ def test_build_user_prompt_includes_realism():
     assert "ugc_native" in prompt
 
 
+# ---- Regression guards for the real incident: writer described "two Besque Magic amber
+# glass bottles" (rule 7 permits one) and an invented headline (rule 6 forbade all text) ----
+
+def test_build_user_prompt_never_reads_visual_subject():
+    """visual.subject is where the vision step puts identity-carrying descriptions of the
+    COMPETITOR's model AND product (e.g. product count) - handing it to the writer is
+    exactly how "two bottles" leaked in. Must never appear in the prompt text, even though
+    the full blueprint dict (which contains it) is passed into this function."""
+    bp = {"visual": {"subject": "two amber glass bottles side by side, blonde model in dark bikini",
+                      "layout": "clean centered composition"}}
+    prompt = writer._build_user_prompt(bp)
+    assert "two amber glass bottles" not in prompt
+    assert "blonde model" not in prompt
+    assert "bikini" not in prompt
+    # layout (a different, legitimately-passed field) still gets through
+    assert "clean centered composition" in prompt
+
+
+def test_build_user_prompt_include_product_true_forces_exactly_one():
+    prompt = writer._build_user_prompt({}, include_product=True)
+    assert "EXACTLY ONE Besque" in prompt
+    assert "never two" in prompt
+
+
+def test_build_user_prompt_include_product_false_forbids_any_product():
+    prompt = writer._build_user_prompt({}, include_product=False)
+    assert "PRODUCTLESS" in prompt
+    assert "EXACTLY ONE Besque" not in prompt
+
+
+def test_build_user_prompt_text_in_image_false_reserves_negative_space_never_typography():
+    prompt = writer._build_user_prompt({}, text_in_image=False)
+    assert "RESERVED NEGATIVE SPACE" in prompt
+    assert "NO typography" in prompt
+
+
+def test_build_user_prompt_text_in_image_true_names_exact_supplied_headline():
+    prompt = writer._build_user_prompt({}, text_in_image=True, headline="Firmer Skin By Friday",
+                                        subtext="7 cold-pressed oils")
+    assert 'the headline "Firmer Skin By Friday"' in prompt
+    assert 'the supporting text "7 cold-pressed oils"' in prompt
+    assert "RESERVED NEGATIVE SPACE" not in prompt
+
+
+def test_build_user_prompt_text_in_image_true_without_headline_falls_back_to_reserved_space():
+    """text_in_image=True but no headline available (e.g. copy generation produced none) -
+    nothing is confirmed to render, so this must NOT invite Claude to invent one."""
+    prompt = writer._build_user_prompt({}, text_in_image=True, headline=None)
+    assert "RESERVED NEGATIVE SPACE" in prompt
+
+
+def test_write_creative_description_forwards_mode_flags_to_user_prompt(monkeypatch):
+    """write_creative_description must actually pass text_in_image/include_product/
+    headline/subtext through to _build_user_prompt, not just accept them as unused params."""
+    captured = {}
+    real_build = writer._build_user_prompt
+
+    def spy(*args, **kwargs):
+        captured.update(kwargs)
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(writer, "_build_user_prompt", spy)
+    payload = json.dumps({"creative_description": "x"})
+    monkeypatch.setattr(writer.anthropic, "Anthropic", _fake_anthropic(response_text=payload))
+
+    writer.write_creative_description({}, angle={"name": "Crepey Skin"}, text_in_image=True,
+                                      include_product=False, headline="H", subtext="S")
+
+    assert captured["text_in_image"] is True
+    assert captured["include_product"] is False
+    assert captured["headline"] == "H"
+    assert captured["subtext"] == "S"
+
+
 def _fake_anthropic(response_text=None, raises=None):
     class FakeMessages:
         def create(self, **kwargs):

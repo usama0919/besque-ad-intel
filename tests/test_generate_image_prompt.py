@@ -275,7 +275,8 @@ def test_generate_image_calls_writer_only_when_angle_given(monkeypatch, tmp_path
     generate_image_prompt.generate_image(
         {}, "AD_WITH_ANGLE", messaging_angle={"name": "Crepey Skin", "notes": "warm light"},
         realism="ugc_native", body_area="knees", offer_text="20% off",
-        reference_images=[b"x", b"y"],
+        reference_images=[b"x", b"y"], text_in_image=True, include_product=False,
+        headline="Firmer Skin By Friday", subtext="7 cold-pressed oils",
     )
     assert len(calls) == 1
     assert calls[0]["angle"] == {"name": "Crepey Skin", "notes": "warm light"}
@@ -283,4 +284,10 @@ def test_generate_image_calls_writer_only_when_angle_given(monkeypatch, tmp_path
     assert calls[0]["body_area"] == "knees"
     assert calls[0]["offer_text"] == "20% off"
     assert calls[0]["reference_image_count"] == 2
+    # Part A regression guard: the same mode flags brand_rules() enforces mechanically
+    # must also reach the writer, not just build_image_prompt.
+    assert calls[0]["text_in_image"] is True
+    assert calls[0]["include_product"] is False
+    assert calls[0]["headline"] == "Firmer Skin By Friday"
+    assert calls[0]["subtext"] == "7 cold-pressed oils"
     assert "Writer-provided scene." in generate_image_prompt.generate_image.last_prompt

@@ -293,6 +293,8 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
             blueprint, product=product, angle=messaging_angle, realism=realism,
             body_area=body_area, offer_text=offer_text,
             reference_image_count=len(reference_images or []),
+            text_in_image=text_in_image, include_product=include_product,
+            headline=headline, subtext=subtext,
         )
     prompt = build_image_prompt(blueprint, product=product, include_product=include_product,
                                  text_in_image=text_in_image, headline=headline, subtext=subtext,
