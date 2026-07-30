@@ -120,8 +120,17 @@
   /* The operator-chosen messaging angle for THIS draft - distinct from bp.angle, which is
      Claude's read of the competitor ad's own angle (shown separately, in .angle below). */
   .angle-badge { display:inline-block; font-size:10px; font-weight:600; letter-spacing:.02em; padding:2px 7px; border-radius:999px; background:#eef0fa; color:#3a4a8a; border:1px solid #d8dcf0; margin-left:6px; }
-  /* sticky sidebar with its own independent scroll */
-  .layout > div:last-child { position: sticky; top: 90px; align-self: start; max-height: calc(100vh - 110px); overflow-y: auto; padding-right: 8px; }
+  /* sticky sidebar with its own independent scroll. z-index:95 - ABOVE .sticky-controls
+     (90) so the sidebar wins the overlap once both are in their stuck state (the sidebar
+     sticks at top:90px, inside .sticky-controls's own sticky range starting at top:66px,
+     and .sticky-controls is full-width). Without this, .sticky-controls (which has an
+     EXPLICIT z-index) paints over the sidebar (z-index:auto) regardless of DOM order,
+     visually covering and click-blocking whichever sidebar panel is scrolled to the top of
+     its own sticky box - this is the actual cause of "Remove/category-save don't fire":
+     Competitors sits far enough down the sidebar that reaching it via the sidebar's own
+     internal scroll reliably lands it in that dead zone. Still below header (100) and
+     modals (200). */
+  .layout > div:last-child { position: sticky; top: 90px; z-index: 95; align-self: start; max-height: calc(100vh - 110px); overflow-y: auto; padding-right: 8px; }
   #competitors { max-height: 320px; overflow-y: auto; }
   .log { position: static; max-height: 380px; overflow-y: auto; padding-top: 8px; }
   /* Discover Pages cards */
