@@ -40,9 +40,13 @@ _run_status = {"running": False, "last_summary": None, "stop_requested": False, 
 
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request):
-    # Categories come from the blueprint schema so the dropdown can't drift from the enum.
+    # Categories/styles come from the blueprint schema so the dropdowns can't drift from
+    # the enums validator.is_valid() actually enforces.
     return templates.TemplateResponse(
-        request, "dashboard.html", {"product_categories": validator.product_categories()}
+        request, "dashboard.html", {
+            "product_categories": validator.product_categories(),
+            "production_styles": validator.production_styles(),
+        }
     )
 
 
@@ -116,8 +120,16 @@ def _run_pipeline_bg(n, competitor_id=None):
 
 
 @app.post("/api/run")
-def api_run(n: int = 2, competitor_id: int = None, product_id: int = None):
-    """Trigger the pipeline as a Cloud Run Job (runs to completion, isolated)."""
+def api_run(n: int = 2, competitor_id: int = None, product_id: int = None,
+            angle_id: int = None, realism: str = "", text_in_image: bool = False,
+            include_product: bool = True):
+    """Trigger the pipeline as a Cloud Run Job (runs to completion, isolated).
+
+    NOTE: this always runs the last DEPLOYED image on Cloud Run, not local changes - the
+    four angle/realism/text-in-image/include-product params below only take effect once
+    a fresh image is deployed. Verify local changes via pipeline.run_once(...) directly,
+    not this button.
+    """
     from google.cloud import run_v2
     project = os.getenv("GCP_PROJECT", "besque-martech")
     region = os.getenv("GCP_REGION", "europe-west2")
@@ -130,6 +142,10 @@ def api_run(n: int = 2, competitor_id: int = None, product_id: int = None):
                     run_v2.EnvVar(name="RUN_COMPETITOR_ID", value=str(competitor_id) if competitor_id is not None else ""),
                     run_v2.EnvVar(name="RUN_MAX_PER_COMPETITOR", value=str(n)),
                     run_v2.EnvVar(name="RUN_PRODUCT_ID", value=str(product_id) if product_id is not None else ""),
+                    run_v2.EnvVar(name="RUN_ANGLE_ID", value=str(angle_id) if angle_id is not None else ""),
+                    run_v2.EnvVar(name="RUN_REALISM", value=realism or ""),
+                    run_v2.EnvVar(name="RUN_TEXT_IN_IMAGE", value="1" if text_in_image else "0"),
+                    run_v2.EnvVar(name="RUN_INCLUDE_PRODUCT", value="1" if include_product else "0"),
                 ]
             )
         ]

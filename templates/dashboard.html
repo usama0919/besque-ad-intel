@@ -148,6 +148,20 @@
     <option value="3">3 ads</option>
     <option value="5">5 ads</option>
   </select>
+  <select id="angleSelect" style="padding:9px;border:1px solid #ccc;border-radius:7px;font-size:13px;" onchange="onAngleChange()">
+    <option value="">No angle</option>
+  </select>
+  <select id="realismSelect" style="padding:9px;border:1px solid #ccc;border-radius:7px;font-size:13px;">
+    <option value="">(auto)</option>
+    {% for s in production_styles %}<option value="{{ s }}">{{ s }}</option>
+    {% endfor %}
+  </select>
+  <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#555;">
+    <input type="checkbox" id="textInImageToggle" style="width:auto;"> Text in image
+  </label>
+  <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#555;">
+    <input type="checkbox" id="includeProductToggle" checked style="width:auto;"> Include product
+  </label>
   <button class="run" id="runBtn" onclick="runPipeline()" disabled>Run Pipeline</button>
   <button class="stop" id="stopBtn" onclick="stopPipeline()" disabled>Stop</button>
   <span id="selectedCompName">No competitor selected</span>
@@ -648,6 +662,13 @@ let selectedProductId = null;
   async function loadAngles(){
     const r = await fetch('/api/angles'); const data = await r.json();
     _anglesCache = data;
+    // Populate the run-strip angle dropdown too, preserving the operator's current
+    // selection across a reload (e.g. after editing an angle) if it still exists.
+    const sel = document.getElementById('angleSelect');
+    const prevSelected = sel.value;
+    sel.innerHTML = '<option value="">No angle</option>'
+      + data.map(a=>`<option value="${a.id}">${esc(a.name)}</option>`).join('');
+    if(data.some(a=>String(a.id)===prevSelected)){ sel.value = prevSelected; }
     const el = document.getElementById('angles');
     if(!data.length){ el.innerHTML='<div class="empty">No angles yet</div>'; return; }
     el.innerHTML = data.map(a=>`
@@ -665,6 +686,16 @@ let selectedProductId = null;
           <span class="cat-badge${a.includes_product?'':' cat-none'}">${a.includes_product?'product':'no product'}</span>
         </div>
       </div>`).join('');
+  }
+
+  // Selecting an angle pre-fills realism/include-product from its stored defaults - the
+  // operator can still change either before clicking Run. Values are read fresh at Run
+  // time from whatever the controls currently show, never re-derived from angle_id.
+  function onAngleChange(){
+    const sel = document.getElementById('angleSelect');
+    const angle = _anglesCache.find(a => String(a.id) === sel.value);
+    document.getElementById('realismSelect').value = angle ? (angle.default_realism || '') : '';
+    document.getElementById('includeProductToggle').checked = angle ? !!angle.includes_product : true;
   }
 
   function addAngleRow(){
@@ -879,7 +910,17 @@ async function runPipeline(){
   btn.disabled=true; btn.dataset.running='1'; stopBtn.disabled=false;
   startProgress(selectedCompetitorName);
   const nAds = document.getElementById('adCount').value;
-  await fetch('/api/run?n='+nAds+'&competitor_id='+selectedCompetitorId+(selectedProductId?('&product_id='+selectedProductId):''),{method:'POST'});
+  const angleId = document.getElementById('angleSelect').value;
+  const realism = document.getElementById('realismSelect').value;
+  const textInImage = document.getElementById('textInImageToggle').checked;
+  const includeProduct = document.getElementById('includeProductToggle').checked;
+  await fetch('/api/run?n='+nAds+'&competitor_id='+selectedCompetitorId
+    +(selectedProductId?('&product_id='+selectedProductId):'')
+    +(angleId?('&angle_id='+angleId):'')
+    +(realism?('&realism='+encodeURIComponent(realism)):'')
+    +'&text_in_image='+(textInImage?'1':'0')
+    +'&include_product='+(includeProduct?'1':'0'),
+    {method:'POST'});
   const poll=setInterval(async()=>{
     const r=await fetch('/api/run/status'); const s=await r.json();
     if(!s.running){ clearInterval(poll);

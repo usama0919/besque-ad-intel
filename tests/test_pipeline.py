@@ -81,6 +81,28 @@ def test_process_ad_passes_product_to_copy_and_image(monkeypatch):
         assert key in seen["copy"], f"{key} missing from product handed to generate_copy_live"
 
 
+def test_process_ad_persists_text_in_image_on_artifact(monkeypatch):
+    """text_in_image must reach save_artifact so the artifact row records which mode
+    generated it (Part 3 threads the real toggle value this far even though
+    generate_image_prompt doesn't consume it yet - that lands with the brand_rules
+    conditionality change)."""
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+          "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    _mock_all_stages(monkeypatch)
+    captured = {}
+
+    def capture_save_artifact(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(pipeline.dedupe, "save_artifact", capture_save_artifact)
+
+    assert pipeline.process_ad(ad, text_in_image=True) == "processed"
+    assert captured["text_in_image"] is True
+
+
 def test_effective_image_keys_prefers_multi_image_set():
     product = {"image_key": "legacy.png", "image_keys": ["a.png", "b.png"]}
     assert pipeline.effective_image_keys(product) == ["a.png", "b.png"]
@@ -258,6 +280,25 @@ def test_run_once_no_filter_hits_all_competitors(monkeypatch):
 
     pipeline.run_once()
     assert selected == ["OSEA", "CeraVe", "Kiehl's"]
+
+
+def test_run_once_threads_realism_and_toggles_to_process_ad(monkeypatch):
+    """Regression guard for the four run-strip controls (Part 3): realism, text_in_image,
+    and include_product must reach process_ad unchanged. This is the "verify locally via
+    pipeline.run_once(...)" check - /api/run only affects the deployed Cloud Run image,
+    never local code, so this is the only way to prove the threading actually works."""
+    _mock_competitor_selection(monkeypatch)
+    monkeypatch.setattr(pipeline.scrape, "scrape_ads",
+                        lambda name, page_id=None: [{"ad_id": "A1", "page_name": name}])
+    captured = []
+    monkeypatch.setattr(pipeline, "process_ad", lambda ad, **kwargs: captured.append(kwargs) or "processed")
+
+    pipeline.run_once(competitor_id=2, realism="ugc_native", text_in_image=True, include_product=False)
+
+    assert len(captured) == 1
+    assert captured[0]["realism"] == "ugc_native"
+    assert captured[0]["text_in_image"] is True
+    assert captured[0]["include_product"] is False
 
 
 def test_process_ad_failure_isolated(monkeypatch):
