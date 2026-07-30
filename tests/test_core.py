@@ -50,6 +50,40 @@ def test_bad_enum_value_fails():
     assert validator.is_valid(bp) is False
 
 
+def test_blueprint_without_new_creative_fields_still_valid():
+    """_valid_blueprint() already has none of creative_objective/target_audience/
+    typography/the expanded layout_detail fields - matches the shape of all 138 existing
+    artifacts. They must keep validating after those fields were added to the schema."""
+    assert validator.is_valid(_valid_blueprint()) is True
+
+
+def test_blueprint_with_new_creative_fields_validates():
+    """creative_objective/target_audience/typography/expanded layout_detail must validate
+    when present - added purely to the schema, no validator.py code change needed since
+    is_valid()/validation_error() are schema-driven (confirmed: no additionalProperties
+    restriction anywhere blocks new optional fields)."""
+    bp = _valid_blueprint()
+    bp["creative_objective"] = "drive urgency around a limited-time offer"
+    bp["target_audience"] = "women 40+ concerned about skin texture and firmness"
+    bp["typography"] = {
+        "headline_face": "serif",
+        "headline_weight": "bold",
+        "hierarchy_levels": ["large bold serif headline", "medium sans subhead", "small CTA label"],
+        "case_treatment": "all caps headline, sentence case body",
+    }
+    bp["layout_detail"] = {
+        "text_zone": "top third",
+        "product_count": 1,
+        "background_type": "gradient",
+        "zone_positions": ["headline top-center", "product mid-frame", "CTA bottom-full-width"],
+        "has_bottom_banner": True,
+        "has_corner_badge": True,
+        "frame_division": "three stacked horizontal bands",
+    }
+    assert validator.is_valid(bp) is True
+    assert validator.validation_error(bp) is None
+
+
 def test_production_styles_returns_canonical_list():
     styles = validator.production_styles()
     assert set(styles) == {"ugc_native", "high_spec_studio", "hybrid", "illustrated"}

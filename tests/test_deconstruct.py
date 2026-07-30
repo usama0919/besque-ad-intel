@@ -57,3 +57,44 @@ def test_build_prompt_production_style_options_match_validator():
     for style in validator.production_styles():
         assert style in prompt
     assert "illustrated" in prompt
+
+
+def test_build_prompt_includes_new_creative_fields_without_format_error():
+    """Part B: creative_objective/target_audience/typography/expanded layout_detail were
+    added to BLUEPRINT_PROMPT, which is itself run through .format() in build_prompt() -
+    an unescaped literal brace in any of the new text would raise KeyError here."""
+    prompt = deconstruct.build_prompt("AD1", "PageX", "2026-01-01")
+    assert "creative_objective" in prompt
+    assert "target_audience" in prompt
+    assert "typography" in prompt
+    assert "headline_face" in prompt
+    assert "hierarchy_levels" in prompt
+    assert "zone_positions" in prompt
+    assert "has_bottom_banner" in prompt
+    assert "frame_division" in prompt
+
+
+def test_deconstruct_image_scraped_ad_copy_with_braces_does_not_raise(monkeypatch):
+    """ad_text/cta are passed to Claude as a SEPARATE content block, never through
+    .format() - confirmed end to end: literal { and } in scraped ad copy must not raise
+    KeyError, the exact risk .format()-interpolating new fields would have introduced."""
+    class FakeMessage:
+        content = [type("obj", (), {"text": _fake_claude_json()})()]
+
+    class FakeMessages:
+        def create(self, **kwargs):
+            return FakeMessage()
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            self.messages = FakeMessages()
+
+    monkeypatch.setattr(deconstruct.anthropic, "Anthropic", FakeClient)
+
+    bp = deconstruct.deconstruct_image(
+        image_bytes=b"\x89PNG\r\n\x1a\nfakepngbytes",
+        ad_id="AD1", source_page="PageX", captured_at="2026-01-01",
+        ad_text="Save 20% {today only} - don't miss it! {limited stock}",
+        cta="Shop {Now}",
+    )
+    assert bp["ad_id"] == "AD123"

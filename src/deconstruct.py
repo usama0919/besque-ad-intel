@@ -28,8 +28,11 @@ The JSON must have exactly these fields:
 - headline_verbatim (string): the exact main headline text in the image, or "" if none
 - offer (object): {{ "type": ..., "value": ..., "mechanic": ... }} or null if no offer
 - social_proof (object): {{ "type": ..., "owner": ... }} — owner is the brand/body the proof belongs to, or null
-- layout_detail (object): {{ "text_zone": ..., "product_count": number, "background_type": ... }}
+- layout_detail (object): {{ "text_zone": ..., "product_count": number, "background_type": ..., "zone_positions": array of short phrases locating each element top to bottom (e.g. ["headline top-center", "product mid-frame", "CTA bottom-full-width"]), "has_bottom_banner": true/false, "has_corner_badge": true/false, "frame_division": short description of how the frame splits (e.g. "three stacked horizontal bands" or "single uninterrupted gradient ground, no hard divisions") }}
 - legibility_notes (string): whether in-image text is readable at feed size
+- creative_objective (string): the ad's primary strategic goal in one short phrase, e.g. "drive urgency around a limited-time offer" or "build trust via a testimonial"
+- target_audience (string): who this ad is speaking to, in one short phrase, e.g. "women 40+ concerned about skin texture and firmness"
+- typography (object): {{ "headline_face": typeface style e.g. serif/sans/script, "headline_weight": e.g. bold/light/regular, "hierarchy_levels": array of short phrases describing each distinct text tier top to bottom (e.g. ["large bold serif headline", "medium sans subhead", "small CTA button label"]), "case_treatment": e.g. "all caps headline, sentence case body" }}
 - production_style (object): {{ "style": one of {production_style_options}, "confidence": high/medium/low, "signals": array of short phrases justifying the choice }}
     ugc_native = phone-camera framing, natural/available light, real hands or skin, imperfect staging
     high_spec_studio = controlled premium lighting, deliberate composition, macro texture, editorial typography
@@ -118,7 +121,15 @@ def deconstruct_image(image_bytes, ad_id, source_page, captured_at, destination_
     client = anthropic.Anthropic(timeout=60.0, max_retries=1)  # reads ANTHROPIC_API_KEY from env
     message = client.messages.create(
         model=CLAUDE_MODEL,
-        max_tokens=3072,
+        # Part B added creative_objective/target_audience/typography (4 sub-fields) and
+        # expanded layout_detail (4 more sub-fields, one an array) on top of the existing
+        # ~15-field blueprint - estimated +200-350 tokens for the fuller JSON response.
+        # 3072 -> 4096 is a reasoned safety margin, NOT an empirically measured fix (no
+        # real ad image / API call was run to confirm truncation in this change). If a
+        # blueprint response is later seen truncated (a JSON parse failure, or
+        # message.stop_reason == "max_tokens"), raise further or add a retry ladder
+        # mirroring generate_copy.py's (3072, None)/(8192, JSON_ONLY_SYSTEM) pattern.
+        max_tokens=4096,
         messages=[{
             "role": "user",
             "content": content,

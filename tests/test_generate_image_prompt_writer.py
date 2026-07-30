@@ -178,3 +178,48 @@ def test_write_creative_description_strips_json_fence(monkeypatch):
     monkeypatch.setattr(writer.anthropic, "Anthropic", _fake_anthropic(response_text=fenced))
     result = writer.write_creative_description({}, angle={"name": "Crepey Skin"})
     assert result == "Fenced scene."
+
+
+# ---- Part B: creative_objective/target_audience/typography/expanded layout_detail ----
+
+def test_build_user_prompt_includes_creative_objective_and_target_audience():
+    bp = {"creative_objective": "drive urgency around a limited-time offer",
+          "target_audience": "women 40+ concerned about skin texture"}
+    prompt = writer._build_user_prompt(bp)
+    assert "drive urgency around a limited-time offer" in prompt
+    assert "women 40+ concerned about skin texture" in prompt
+
+
+def test_build_user_prompt_includes_typography_styling_not_literal_text():
+    bp = {"typography": {
+        "headline_face": "serif", "headline_weight": "bold",
+        "hierarchy_levels": ["large bold headline", "small CTA label"],
+        "case_treatment": "all caps headline",
+    }}
+    prompt = writer._build_user_prompt(bp)
+    assert "face: serif" in prompt
+    assert "weight: bold" in prompt
+    assert "large bold headline" in prompt
+    assert "case: all caps headline" in prompt
+    # framed as styling inspiration, not literal wording to quote
+    assert "never quote literal text from here" in prompt
+
+
+def test_build_user_prompt_includes_expanded_layout_detail():
+    bp = {"layout_detail": {
+        "zone_positions": ["headline top-center", "product mid-frame"],
+        "has_bottom_banner": True, "has_corner_badge": True,
+        "frame_division": "three stacked horizontal bands",
+    }}
+    prompt = writer._build_user_prompt(bp)
+    assert "headline top-center" in prompt
+    assert "has a full-width bottom banner" in prompt
+    assert "has a corner badge" in prompt
+    assert "three stacked horizontal bands" in prompt
+
+
+def test_build_user_prompt_handles_missing_new_fields_gracefully():
+    """138 existing artifacts have none of these fields - must not crash."""
+    prompt = writer._build_user_prompt({})
+    assert isinstance(prompt, str)
+    assert len(prompt) > 20

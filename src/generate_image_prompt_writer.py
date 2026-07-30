@@ -92,6 +92,47 @@ def _build_user_prompt(blueprint, product=None, angle=None, realism=None, body_a
         )
     if visual.get("palette_mood"):
         lines.append(f"Palette/mood inspiration from the competitor ad: {visual['palette_mood']}")
+    if (blueprint or {}).get("creative_objective"):
+        lines.append(
+            f"Creative objective of the competitor ad (strategic inspiration only): "
+            f"{blueprint['creative_objective']}"
+        )
+    if (blueprint or {}).get("target_audience"):
+        lines.append(
+            f"Audience the competitor ad targeted (Besque's own audience may differ - "
+            f"context, not an override): {blueprint['target_audience']}"
+        )
+    typography = (blueprint or {}).get("typography") or {}
+    typo_bits = []
+    if typography.get("headline_face"):
+        typo_bits.append(f"face: {typography['headline_face']}")
+    if typography.get("headline_weight"):
+        typo_bits.append(f"weight: {typography['headline_weight']}")
+    if typography.get("hierarchy_levels"):
+        typo_bits.append("hierarchy: " + "; ".join(typography["hierarchy_levels"]))
+    if typography.get("case_treatment"):
+        typo_bits.append(f"case: {typography['case_treatment']}")
+    if typo_bits:
+        lines.append(
+            "Typography STYLE inspiration from the competitor ad (styling only - the "
+            "wording itself is governed separately by the text-in-image rule below, never "
+            "quote literal text from here): " + "; ".join(typo_bits)
+        )
+    layout_detail = (blueprint or {}).get("layout_detail") or {}
+    ld_bits = []
+    if layout_detail.get("zone_positions"):
+        ld_bits.append("zones: " + "; ".join(layout_detail["zone_positions"]))
+    if layout_detail.get("has_bottom_banner"):
+        ld_bits.append("has a full-width bottom banner")
+    if layout_detail.get("has_corner_badge"):
+        ld_bits.append("has a corner badge")
+    if layout_detail.get("frame_division"):
+        ld_bits.append(f"frame division: {layout_detail['frame_division']}")
+    if ld_bits:
+        lines.append(
+            "Layout structure inspiration from the competitor ad (composition only, adapt "
+            "don't copy - see rule 8): " + "; ".join(ld_bits)
+        )
 
     # These two constraints are stated LAST, right before the writing instruction, and in
     # absolute terms - not "inspiration", not overridable by anything above (including the

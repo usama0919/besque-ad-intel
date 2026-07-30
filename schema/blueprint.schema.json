@@ -58,10 +58,25 @@
       "properties": {
         "text_zone": { "type": "string" },
         "product_count": { "type": "number" },
-        "background_type": { "type": "string" }
+        "background_type": { "type": "string" },
+        "zone_positions": { "type": "array", "items": { "type": "string" } },
+        "has_bottom_banner": { "type": "boolean" },
+        "has_corner_badge": { "type": "boolean" },
+        "frame_division": { "type": "string" }
       }
     },
     "legibility_notes": { "type": "string" },
+    "creative_objective": { "type": "string" },
+    "target_audience": { "type": "string" },
+    "typography": {
+      "type": ["object", "null"],
+      "properties": {
+        "headline_face": { "type": "string" },
+        "headline_weight": { "type": "string" },
+        "hierarchy_levels": { "type": "array", "items": { "type": "string" } },
+        "case_treatment": { "type": "string" }
+      }
+    },
     "production_style": {
       "type": "object",
       "properties": {
