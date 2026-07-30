@@ -223,3 +223,70 @@ def test_build_user_prompt_handles_missing_new_fields_gracefully():
     prompt = writer._build_user_prompt({})
     assert isinstance(prompt, str)
     assert len(prompt) > 20
+
+
+# ---- Medium must match realism: a photographic (high_spec_studio) reference produced
+# fully illustrated output (drawn eyes, painted skin, rendered bottle) in a real run ----
+
+def test_realism_auto_resolves_to_blueprint_production_style():
+    """realism="(auto)" reaches here as realism=None/"" - it must resolve to the
+    reference ad's OWN detected production_style, never to no signal at all."""
+    bp = {"production_style": {"style": "high_spec_studio"}}
+    prompt = writer._build_user_prompt(bp, realism=None)
+    assert "Realism / medium (STRICT" in prompt
+    assert "high_spec_studio" in prompt
+
+
+def test_realism_explicit_overrides_blueprint_production_style():
+    """An operator-chosen realism must win over the reference ad's own detected style -
+    never auto-detected when explicitly given (matches every other angle-driven control
+    in this pipeline)."""
+    bp = {"production_style": {"style": "high_spec_studio"}}
+    prompt = writer._build_user_prompt(bp, realism="illustrated")
+    assert "The medium must match illustrated exactly" in prompt
+
+
+def test_realism_states_photographic_vs_drawn_taxonomy_explicitly():
+    prompt = writer._build_user_prompt({}, realism="high_spec_studio")
+    assert "high_spec_studio, ugc_native, and hybrid all mean a PHOTOGRAPH" in prompt
+    assert "illustrated means NOT a photograph at all" in prompt
+
+
+def test_realism_line_absent_when_neither_realism_nor_blueprint_style_given():
+    prompt = writer._build_user_prompt({})
+    assert "Realism / medium" not in prompt
+
+
+# ---- Competitor offer must never leak into the image ----
+
+def test_offer_text_given_states_exact_wording_only():
+    prompt = writer._build_user_prompt({}, offer_text="20% off this week only")
+    assert 'describe exactly this offer, wording, badge, or price - nothing more, nothing invented: 20% off this week only.' in prompt
+    assert "describe NO offer" not in prompt
+
+
+def test_offer_text_absent_forbids_any_offer_even_with_competitor_creative_objective():
+    """Regression guard: with offer_text empty, a draft rendered a "20% OFF" badge lifted
+    from the competitor's own offer/creative_objective. Must forbid ANY offer/badge/price
+    regardless of what creative_objective (passed as "inspiration") describes."""
+    bp = {"creative_objective": "drive urgency around a 20% off discount this weekend"}
+    prompt = writer._build_user_prompt(bp, offer_text=None)
+    assert "describe NO offer, badge, price, discount, or percentage of any kind" in prompt
+
+
+# ---- Never name a product category Besque doesn't sell ----
+
+def test_product_category_ban_always_present():
+    prompt = writer._build_user_prompt({})
+    assert "Besque sells a body OIL, never any other category" in prompt
+
+
+def test_product_category_ban_overrides_competitor_typography_naming_wrong_category():
+    """Regression guard: a draft headline read "Bye-Bye, Body Lotion" - Besque never
+    sells lotion. The ban must be present even when typography.hierarchy_levels (quoted
+    as "styling inspiration" from the competitor's own ad) literally names a different
+    category."""
+    bp = {"typography": {"hierarchy_levels": ["large bold 'Bye-Bye, Body Lotion' headline", "small CTA"]}}
+    prompt = writer._build_user_prompt(bp)
+    assert "Besque sells a body OIL, never any other category" in prompt
+    assert "'lotion'" in prompt

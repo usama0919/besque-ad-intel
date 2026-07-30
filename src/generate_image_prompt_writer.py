@@ -59,13 +59,6 @@ def _build_user_prompt(blueprint, product=None, angle=None, realism=None, body_a
         # Per-run, NEVER angle.body_area - body area varies every run and is never fixed
         # per angle (confirmed by the team). This is the only body-area value fed in here.
         lines.append(f"Body area to feature in THIS image (operator-specified for this run): {body_area}.")
-    if realism:
-        lines.append(f"Realism / production register for this image: {realism}.")
-    if offer_text:
-        lines.append(
-            f"Offer to reflect in the scene if relevant, exactly as given - do not invent "
-            f"numbers or terms beyond it: {offer_text}."
-        )
     if product:
         visual_desc = product.get("visual_description", "")
         if visual_desc:
@@ -134,14 +127,57 @@ def _build_user_prompt(blueprint, product=None, angle=None, realism=None, body_a
             "don't copy - see rule 8): " + "; ".join(ld_bits)
         )
 
-    # These two constraints are stated LAST, right before the writing instruction, and in
+    # These constraints are stated LAST, right before the writing instruction, and in
     # absolute terms - not "inspiration", not overridable by anything above (including the
-    # competitor's own layout/palette). A real failure: with text_in_image=False the writer
-    # described "gold serif headline text reads 'CREPEY SKIN MEETS ITS MATCH'" (rule 6
-    # forbids all text) and "two Besque Magic amber glass bottles" (rule 7 permits exactly
-    # one) - Gemini then discarded the whole composition rather than reconciling the
-    # contradiction with brand_rules(). The writer must never write a scene the guardrails
-    # will then have to override.
+    # competitor's own layout/palette/creative_objective/typography). Real failures this
+    # closes: with text_in_image=False the writer described "gold serif headline text
+    # reads 'CREPEY SKIN MEETS ITS MATCH'" (rule 6 forbids all text) and "two Besque Magic
+    # amber glass bottles" (rule 7 permits exactly one) - Gemini then discarded the whole
+    # composition rather than reconciling the contradiction with brand_rules(). Separately,
+    # with offer_text empty, a draft rendered a "20% OFF" badge lifted from the
+    # competitor's own offer/creative_objective; and a draft headline read "Bye-Bye, Body
+    # Lotion" - Besque sells body OIL, never lotion or any other category, even if
+    # something quoted above (e.g. typography.hierarchy_levels, extracted verbatim from
+    # the competitor's own ad) named one. The writer must never write a scene the
+    # guardrails then have to override, or content sourced from the competitor ad rather
+    # than the explicit approved inputs below.
+    if realism:
+        # realism="(auto)" on the run strip resolves to empty/None here, which falls back
+        # to the reference ad's OWN detected production_style - never to no signal at all,
+        # which is exactly how a photographic (high_spec_studio) reference produced fully
+        # illustrated output (drawn eyes, painted skin, rendered bottle) in a real run.
+        effective_realism = realism
+    else:
+        effective_realism = ((blueprint or {}).get("production_style") or {}).get("style")
+    if effective_realism:
+        lines.append(
+            f"Realism / medium (STRICT, overrides anything above): {effective_realism}. "
+            f"high_spec_studio, ugc_native, and hybrid all mean a PHOTOGRAPH - real light, "
+            f"real skin, real materials, camera-realistic rendering throughout. illustrated "
+            f"means NOT a photograph at all - a drawn or rendered whiteboard diagram, 3D "
+            f"render, or comic-strip panel, with no photographic lighting and no "
+            f"camera-realistic skin or material texture. The medium must match "
+            f"{effective_realism} exactly - never mix a photographic scene with drawn "
+            f"elements or vice versa."
+        )
+    if offer_text:
+        lines.append(
+            f"Offer (STRICT, overrides anything above): describe exactly this offer, "
+            f"wording, badge, or price - nothing more, nothing invented: {offer_text}."
+        )
+    else:
+        lines.append(
+            "Offer (STRICT, overrides anything above): describe NO offer, badge, price, "
+            "discount, or percentage of any kind anywhere in the scene, even if the "
+            "competitor ad had one - that offer is the competitor's, not Besque's."
+        )
+    lines.append(
+        "Product category (STRICT, overrides anything above): Besque sells a body OIL, "
+        "never any other category. Never name, describe, or imply 'lotion', 'cream', "
+        "'serum', 'balm', 'gel', or any other product category anywhere in the scene or in "
+        "any text described - including inside anything quoted from the competitor ad "
+        "above. If anything above named a different category, ignore that detail entirely."
+    )
     if include_product:
         lines.append(
             "Product count (STRICT, overrides anything above): describe EXACTLY ONE Besque "
