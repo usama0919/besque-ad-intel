@@ -67,11 +67,12 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
     the same ad can produce one draft per angle rather than being skipped as already seen
     the second time around.
 
-    realism/text_in_image/include_product are the operator-set run-strip controls. They
-    are threaded through here so the pipeline knows about them end to end; text_in_image
-    is already persisted onto the saved artifact (for the dashboard's future overlay-
-    suppression logic). realism/include_product do not yet change what gets generated -
-    that lands with the brand_rules conditionality and generate_image wiring."""
+    realism/text_in_image/include_product are the operator-set run-strip controls.
+    text_in_image is persisted onto the saved artifact (for the dashboard's future
+    overlay-suppression logic) AND forwarded to generate_image, which now enforces the
+    conditional brand_rules (rule 6's text allow-list, rule 7's productless mode). realism
+    is still inert - nothing yet reads it to change the register of what's generated; that
+    lands with the Claude prompt-writer pass."""
     ad_id = ad.get("ad_id")
     if not ad_id:
         return "failed"
@@ -125,7 +126,9 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
             return "failed"
         try:
             draft_image = generate_image_prompt.generate_image(
-                blueprint, ad_id, product=product, reference_images=reference_images, angle_slug=angle_slug
+                blueprint, ad_id, product=product, reference_images=reference_images, angle_slug=angle_slug,
+                include_product=include_product, text_in_image=text_in_image,
+                headline=copy.get("headline"), subtext=copy.get("primary_text"),
             )
         except Exception as e:
             log.error("Ad %s failed: image generation raised: %s", ad_id, e)

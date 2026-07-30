@@ -21,7 +21,7 @@ def _mock_all_stages(monkeypatch):
     monkeypatch.setattr(pipeline.deconstruct, "deconstruct_image", lambda **k: {"format": "hero", "angle": "a"})
     monkeypatch.setattr(pipeline.generate_copy, "generate_copy_live", lambda bp, product=None, **k: {"headline": "H", "primary_text": "P", "cta": "C"})
     monkeypatch.setattr(pipeline.compliance, "check_compliance", lambda copy, name, text: (True, []))
-    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image", lambda bp, aid, product=None, reference_images=None, angle_slug=None: "draft.png")
+    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image", lambda bp, aid, product=None, reference_images=None, **k: "draft.png")
     monkeypatch.setattr(pipeline.slack_review, "post_review", lambda *a, **k: {"ts": "123"})
     monkeypatch.setattr(pipeline.dedupe, "save_artifact", lambda **k: None)
 
@@ -58,7 +58,7 @@ def test_process_ad_passes_product_to_copy_and_image(monkeypatch):
         seen["copy"] = product
         return {"headline": "H", "primary_text": "P", "cta": "C"}
 
-    def capture_image(bp, aid, product=None, reference_images=None, angle_slug=None):
+    def capture_image(bp, aid, product=None, reference_images=None, **k):
         seen["image"] = product
         seen["reference_images"] = reference_images
         return "draft.png"
@@ -83,9 +83,7 @@ def test_process_ad_passes_product_to_copy_and_image(monkeypatch):
 
 def test_process_ad_persists_text_in_image_on_artifact(monkeypatch):
     """text_in_image must reach save_artifact so the artifact row records which mode
-    generated it (Part 3 threads the real toggle value this far even though
-    generate_image_prompt doesn't consume it yet - that lands with the brand_rules
-    conditionality change)."""
+    generated it, for the dashboard's future overlay-suppression logic."""
     dedupe.init_db()
     dedupe.init_artifacts()
     ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
@@ -101,6 +99,34 @@ def test_process_ad_persists_text_in_image_on_artifact(monkeypatch):
 
     assert pipeline.process_ad(ad, text_in_image=True) == "processed"
     assert captured["text_in_image"] is True
+
+
+def test_process_ad_forwards_toggles_and_copy_to_generate_image(monkeypatch):
+    """Regression guard (Part 4): include_product/text_in_image must actually reach
+    generate_image, not just sit as unused process_ad parameters - along with the
+    generated copy's headline/primary_text, which rule 6's text-in-image allow-list needs
+    to know what's actually permitted."""
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+          "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    _mock_all_stages(monkeypatch)
+    captured = {}
+
+    def capture_image(bp, aid, product=None, reference_images=None, angle_slug=None,
+                       include_product=True, text_in_image=False, headline=None, subtext=None):
+        captured.update(include_product=include_product, text_in_image=text_in_image,
+                         headline=headline, subtext=subtext)
+        return "draft.png"
+
+    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image", capture_image)
+
+    assert pipeline.process_ad(ad, include_product=False, text_in_image=True) == "processed"
+    assert captured["include_product"] is False
+    assert captured["text_in_image"] is True
+    assert captured["headline"] == "H"
+    assert captured["subtext"] == "P"
 
 
 def test_effective_image_keys_prefers_multi_image_set():

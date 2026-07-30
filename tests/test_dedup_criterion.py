@@ -17,7 +17,7 @@ def test_three_consecutive_runs_zero_duplicates(monkeypatch):
     monkeypatch.setattr(pipeline.assets, "download_image_bytes", lambda url: b"fake-bytes")
     monkeypatch.setattr(pipeline.deconstruct, "deconstruct_image", lambda **k: {"format": "hero", "angle": "a"})
     monkeypatch.setattr(pipeline.generate_copy, "generate_copy_live", lambda bp, product=None, **k: {"headline": "H", "primary_text": "P", "cta": "C"})
-    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image", lambda bp, aid, product=None, reference_images=None, angle_slug=None: "draft.png")
+    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image", lambda bp, aid, product=None, reference_images=None, **k: "draft.png")
     monkeypatch.setattr(pipeline.slack_review, "post_review", lambda *a, **k: {"ts": "1"})
     monkeypatch.setattr(pipeline, "with_retry", lambda fn, **k: fn())
     monkeypatch.setattr(pipeline.scrape, "scrape_ads", lambda name, max_results=None, page_id=None: fixed_ads)

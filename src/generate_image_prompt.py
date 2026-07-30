@@ -6,8 +6,12 @@ from src.compliance_rules import COMPLIANCE_RULES
 IMAGE_MODEL = os.getenv("IMAGE_MODEL", "placeholder-image-model")
 
 
-def build_image_prompt(blueprint: dict, product: dict = None) -> str:
-    """Construct a Besque-adapted image generation prompt from the blueprint's visual notes."""
+def build_image_prompt(blueprint: dict, product: dict = None, include_product: bool = True,
+                        text_in_image: bool = False, headline: str = None, subtext: str = None) -> str:
+    """Construct a Besque-adapted image generation prompt from the blueprint's visual notes.
+    include_product=True, text_in_image=False (today's defaults) reproduce the prior output
+    exactly for a given blueprint/product - both toggles are additive branches, not a
+    rewrite of the default path."""
     visual = blueprint.get("visual", {})
     # visual.subject is deliberately NOT read here. In practice it's where the vision
     # deconstruct step puts rich, identity-carrying descriptions of the competitor ad's
@@ -20,31 +24,55 @@ def build_image_prompt(blueprint: dict, product: dict = None) -> str:
     text_placement = visual.get("text_placement", "minimal")
     prod_style = (blueprint.get("production_style") or {}).get("style", "")
 
-    if product:
-        visual_desc = product.get("visual_description", "")
-        product_desc = (
-            f"The featured product is {product.get('name', 'a Besque product')}: {product.get('description', '')} "
-            + (f"Its fixed visual appearance: {visual_desc}. " if visual_desc else "")
-            + f"If any label or ingredient text appears on the product, it must show ONLY these real ingredients: "
-            f"{product.get('ingredients', '')}. Key claim: {product.get('hero_claim', '')}. "
-            f"Never invent ingredients or label text not listed here. "
+    if include_product:
+        if product:
+            visual_desc = product.get("visual_description", "")
+            product_desc = (
+                f"The featured product is {product.get('name', 'a Besque product')}: {product.get('description', '')} "
+                + (f"Its fixed visual appearance: {visual_desc}. " if visual_desc else "")
+                + f"If any label or ingredient text appears on the product, it must show ONLY these real ingredients: "
+                f"{product.get('ingredients', '')}. Key claim: {product.get('hero_claim', '')}. "
+                f"Never invent ingredients or label text not listed here. "
+            )
+        else:
+            product_desc = "(a natural botanical body oil in an elegant bottle). "
+        product_clause = (
+            f"Place the Besque product described below as the subject "
+            f"within this setting; do not render the competitor's product. "
+            + product_desc
         )
     else:
-        product_desc = "(a natural botanical body oil in an elegant bottle). "
+        product_clause = (
+            "This is a deliberately productless, educational/illustrative image - do not "
+            "place any Besque product, bottle, or branding anywhere in this setting. "
+        )
+
+    if text_in_image:
+        closing = (
+            "Render exactly the headline and supporting text specified in rule 6 above as "
+            "in-scene typography - do not leave space for a separate overlay, and do not add "
+            "any other text; no competitor branding anywhere."
+        )
+    else:
+        label_clause = ("only the Besque product's own label may appear" if include_product
+                         else "no text of any kind may appear")
+        closing = (
+            f"Keep the base image completely free of overlaid marketing text — {label_clause} "
+            f"— and leave clean, uncluttered negative space where headline and offer text will "
+            f"be added later as a separate HTML overlay; no competitor branding anywhere."
+        )
+
     prompt = (
-        BRAND_RULES +
+        brand_rules(include_product=include_product, text_in_image=text_in_image,
+                    headline=headline, subtext=subtext) +
         f"A premium skincare advertisement image for Besque, a natural body-oil brand for women 40+. "
         f"Composition and setting: {layout}. (If this implies a person, render them per compliance "
         f"rule C1 - a generic, non-identifiable model, never the specific individual described.) "
-        f"Place the Besque product described below as the subject "
-        f"within this setting; do not render the competitor's product. "
-        + product_desc +
+        + product_clause +
         f"Palette and mood: {palette}. Text placement: {text_placement}. "
         f"Square 1:1 aspect ratio composition. "
         + PRODUCTION_STYLE_GUIDANCE.get(prod_style, DEFAULT_STYLE_GUIDANCE) +
-        f"Keep the base image completely free of overlaid marketing text — only the Besque product's "
-        f"own label may appear — and leave clean, uncluttered negative space where headline and offer "
-        f"text will be added later as a separate HTML overlay; no competitor branding anywhere."
+        closing
     )
     return prompt
 
@@ -54,16 +82,102 @@ from pathlib import Path
 
 ASSET_DIR = Path(os.getenv("ASSET_DIR", "assets"))
 
-BRAND_RULES = (
+# Rules 1-5 never change. Rules 6/7 have a conditional branch each (text_in_image,
+# include_product); rule 8 is new and unconditional. Kept as module-level pieces, not one
+# flat string, so brand_rules() can compose them per-call while
+# test_brand_rules_default_reproduces_prior_rules_verbatim proves the default call still
+# produces the exact old BRAND_RULES text through rule 7.
+_RULES_1_TO_5 = (
     "STRICT RULES - NEVER VIOLATE: "
     "1) Any Besque bottle label must show ONLY the exact product name provided, nothing else. "
     "2) NEVER copy the competitor's product name, brand name, claims, or any label text onto the Besque product. "
     "3) NEVER invent ingredients, percentages, or product names. "
     "4) If no product name is provided, the bottle shows only the word 'Besque'. "
     "5) The product is always a body OIL in a glass bottle unless stated otherwise - never a cream, jar, or tub. "
-    "6) TEXT POLICY (STRICT): the Besque product's own printed label — exactly as shown on the reference product photo — is the ONLY text permitted anywhere in the image. NEVER render any headline, price, discount, percentage, offer, badge, sticker, sticky note, caption, tagline, watermark, or extra logo, whether copied from the competitor ad or invented. "
-    "7) PRODUCT POLICY (STRICT): the single product in the reference product photo is the ONLY product permitted anywhere in the image — exactly one bottle, and it is that one. If no reference product photo is supplied, exactly one Besque bottle matching the product description is permitted. A multi-product range, collection, bundle, gift set or line-up in the source ad is a layout to borrow, not an inventory to reproduce: keep its composition, lighting and mood, collapse it to a single-product composition, and leave the freed area as clean negative space. NEVER add a second bottle, a variant, a size sibling, a refill, a carton, a box, or any further SKU, whether copied from the competitor ad or invented. "
-) + COMPLIANCE_RULES
+)
+
+
+def _rule6_text_policy(text_in_image=False, headline=None, subtext=None):
+    """Rule 6, TEXT POLICY. Default (text_in_image=False) is the original blanket-ban
+    wording, verbatim. When text_in_image is True AND a headline was actually supplied,
+    the ban is replaced with a named allow-list of exactly that headline/subtext - never a
+    generic "headline is now OK" opening, so nothing beyond the approved copy can slip in.
+    A True flag with no headline supplied falls back to the default (nothing confirmed to
+    render, so nothing is permitted)."""
+    if text_in_image and headline:
+        permitted = f"the headline \"{headline}\""
+        if subtext:
+            permitted += f" and the supporting text \"{subtext}\""
+        return (
+            f"6) TEXT POLICY (STRICT, TEXT-IN-IMAGE MODE): the ONLY text permitted anywhere "
+            f"in the image is {permitted}, rendered as in-scene typography, plus the Besque "
+            f"product's own printed label. NEVER render any price, discount, percentage, "
+            f"offer, badge, sticker, sticky note, extra caption, tagline, watermark, or extra "
+            f"logo, whether copied from the competitor ad or invented. "
+        )
+    return (
+        "6) TEXT POLICY (STRICT): the Besque product's own printed label — exactly as shown on "
+        "the reference product photo — is the ONLY text permitted anywhere in the image. NEVER "
+        "render any headline, price, discount, percentage, offer, badge, sticker, sticky note, "
+        "caption, tagline, watermark, or extra logo, whether copied from the competitor ad or "
+        "invented. "
+    )
+
+
+def _rule7_product_policy(include_product=True):
+    """Rule 7, PRODUCT POLICY. Default (include_product=True) is the original wording,
+    verbatim. include_product=False relaxes it entirely into a productless mode for
+    educational/illustrative ads (e.g. glp1) - no Besque bottle, label, or branding at
+    all, rather than the default's "exactly one bottle" framing."""
+    if include_product:
+        return (
+            "7) PRODUCT POLICY (STRICT): the single product in the reference product photo is "
+            "the ONLY product permitted anywhere in the image — exactly one bottle, and it is "
+            "that one. If no reference product photo is supplied, exactly one Besque bottle "
+            "matching the product description is permitted. A multi-product range, collection, "
+            "bundle, gift set or line-up in the source ad is a layout to borrow, not an "
+            "inventory to reproduce: keep its composition, lighting and mood, collapse it to a "
+            "single-product composition, and leave the freed area as clean negative space. "
+            "NEVER add a second bottle, a variant, a size sibling, a refill, a carton, a box, or "
+            "any further SKU, whether copied from the competitor ad or invented. "
+        )
+    return (
+        "7) PRODUCT POLICY (STRICT, PRODUCTLESS MODE): this is a deliberately productless, "
+        "educational/illustrative image - no product is being sold or shown. NO Besque bottle, "
+        "product, label, or branding of any kind may appear anywhere in the image, whether "
+        "copied from the competitor ad or invented. Do not render any bottle, jar, tube, or "
+        "packaging, Besque or otherwise. "
+    )
+
+
+# New rule, unconditional. Regression guard for a real failure: a blueprint's layout
+# description (composition/framing instructions like "stacked headline over product shot")
+# got read as literal content and the words "Stacked HeadLine" were rendered as visible
+# typography in the image.
+_RULE_8_LAYOUT_IS_COMPOSITION = (
+    "8) LAYOUT DESCRIPTORS ARE COMPOSITION, NOT TEXT (STRICT): any layout, subject, or framing "
+    "description supplied above (words like 'stacked', 'headline', 'split-screen', 'grid', "
+    "'banner') is an instruction about how visual elements are arranged in the frame ONLY. "
+    "NEVER render a layout or composition descriptor's own words as literal visible typography "
+    "in the image - the words 'headline', 'stacked', or similar must never themselves appear "
+    "as text on the image. The only text permitted anywhere is governed by rule 6 above. "
+)
+
+
+def brand_rules(include_product=True, text_in_image=False, headline=None, subtext=None):
+    """The mechanically-enforced brand + compliance rules prepended to every image prompt.
+    Called with all defaults (include_product=True, text_in_image=False), this reproduces
+    the old flat BRAND_RULES constant character for character through rule 7 - see
+    test_brand_rules_default_reproduces_prior_rules_verbatim. Rule 8 and the
+    include_product/text_in_image conditionality are additive, not a rewrite of the
+    existing default path."""
+    return (
+        _RULES_1_TO_5
+        + _rule6_text_policy(text_in_image, headline, subtext)
+        + _rule7_product_policy(include_product)
+        + _RULE_8_LAYOUT_IS_COMPOSITION
+        + COMPLIANCE_RULES
+    )
 
 # Per-production-style guidance, keyed by blueprint.production_style.style. Swapped in as a
 # single Style clause so ugc_native does not fight the studio-look wording it replaces.
@@ -132,15 +246,21 @@ def _draft_stem(ad_id, angle_slug=None):
     return ad_id if not angle_slug else f"{ad_id}__{angle_slug}"
 
 
-def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_slug=None):
+def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_slug=None,
+                    include_product=True, text_in_image=False, headline=None, subtext=None):
     """Single-pass image generation from the blueprint. One image, no iteration.
     Saves to assets/<stem>_draft.png (stem = ad_id, or ad_id+angle if angle_slug is given)
-    and returns the path. Returns None on failure."""
-    prompt = build_image_prompt(blueprint, product=product)
+    and returns the path. Returns None on failure. include_product/text_in_image/headline/
+    subtext are forwarded to build_image_prompt/brand_rules - defaults reproduce today's
+    behaviour exactly."""
+    prompt = build_image_prompt(blueprint, product=product, include_product=include_product,
+                                 text_in_image=text_in_image, headline=headline, subtext=subtext)
     stem = _draft_stem(ad_id, angle_slug)
     try:
         client = genai.Client(vertexai=True, project="besque-martech", location="global")
-        reference_images = reference_images or []
+        # Defense in depth for rule 7's productless mode: the prompt already says no
+        # product may appear, but don't also hand the model reference photos of one.
+        reference_images = (reference_images or []) if include_product else []
         if reference_images:
             from google.genai import types as genai_types
             contents = (
@@ -216,7 +336,7 @@ def edit_image(current_image_bytes, instruction, ad_id, aspect="1:1", angle_slug
     from google.genai import types as genai_types
     stem = _draft_stem(ad_id, angle_slug)
     prompt = (
-        BRAND_RULES +
+        brand_rules() +
         f"Edit this Besque skincare advertisement image. Instruction: {instruction}. "
         f"Keep it a premium, editorial skincare ad. Output aspect ratio: {aspect}. "
         f"Keep the edited image completely free of overlaid marketing text — only the Besque "
