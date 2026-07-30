@@ -140,68 +140,108 @@ blueprint reused). Final failure is recorded via
   (`s[:i] + new + s[j:]`) — especially not a live template.
 - No destructive DB or filesystem commands without asking; dry-run and show counts first.
 
-## Known gaps (as of 2026-07-29)
+## Known gaps (as of 2026-07-30)
 - `brand_voice`, `approved_claims`, `approved_testimonials` are empty at every real call
-  site — compliance mechanical checks are correspondingly strict-by-default until real
-  approved material is wired through.
-- Dashboard sidebar Remove/category-save buttons are broken in the frontend JS; the
-  underlying API endpoints work (verified directly) — a `dashboard.html` wiring bug, not
-  backend.
+  site — still owed by Harry — compliance mechanical checks are correspondingly
+  strict-by-default until real approved material is wired through.
+- `edit_image` can't restore `include_product` on a re-edit — there's no column to read
+  it back from (unlike `text_in_image`/`generated_copy`, which the artifact row does
+  carry). Known, unfixed gap.
+- No category picker in the dashboard UI — `competitors.category`/`products.category`
+  are only settable via direct API calls or DB writes, not through any dashboard control.
+- `get_artifacts_full` is still hardcoded to `LIMIT 50` — older artifacts silently fall
+  off the dashboard feed once a competitor/category run produces more than that.
+- Bottle fidelity is blocked on Pillow compositing: the product cutout is parked at
+  `product_assets/` but nothing composites it into the generated draft yet, so bottle
+  accuracy still depends entirely on Gemini interpreting `visual_description` +
+  reference photos correctly.
 - Slack posting fails with `invalid_auth` (`slack_review.post_review`) — non-fatal to the
   pipeline, but review cards aren't reaching Slack.
 - 2 ads remain unclassified after the backfill: one schema-validation failure, one
   transient Anthropic `529`. Left untouched, no category invented.
 - Only competitors id=42 (Bangn Body) and id=48 (The Ayurveda Experience) are tagged
   `body_oil` — a category-scoped run currently hits just those two.
-- Nothing deployed since 27 Jul 2026 — everything above is committed and pushed to
-  `main`, but Cloud Run is still running the 27 Jul build.
+- Nothing deployed since 27 Jul 2026 — everything below is committed and pushed to
+  `main`, but Cloud Run is still running the 27 Jul build; none of Prompt B is live yet.
 
-## Work in progress — Prompt B (messaging angles + Claude prompt-writer pass)
+## Prompt B — messaging angles + Claude prompt-writer pass (COMPLETE as of 2026-07-30)
 
-**Done:**
-- `angles` table + CRUD (`dedupe.py`: `init_angles`, `get_angles`, `get_angle`, `add_angle`,
-  `update_angle`, `delete_angle`) and a sidebar management panel in `dashboard.html`
-  (mirrors the products modal shape — angle has too many fields for the competitors-style
-  inline-row edit).
-- (ad × angle) dedup: `seen_ads`/`artifacts` keyed on `(ad_id, angle_id)` instead of
-  `ad_id` alone (`is_new`, `mark_seen`, `save_artifact`, `get_artifact` all take
-  `angle_id=None`, defaulting to today's exact pre-angle behaviour). Consequential fixes
-  folded in: `update_artifact_copy`/`update_artifact_image_prompt`/`record_decision` also
-  take `angle_id` (without it, editing or deciding on one angle-variant of an ad would
-  silently affect every other angle-variant sharing that `ad_id`), and
-  `get_artifacts_full`'s decision JOIN matches on angle too.
-- Draft-image collision fix: `generate_image_prompt._draft_stem(ad_id, angle_slug)` keys
-  the output PNG/blob so two angles' drafts for the same ad don't overwrite each other at
-  the same `{ad_id}_draft.png` path. Threaded through `generate_image`,
-  `_next_draft_version`, `edit_image`.
-- `messaging_angle` threaded through `pipeline.run_once(angle_id=...)` →
-  `process_ad(..., messaging_angle=...)`. Angle-blindness of `generate_copy_live` is
-  deliberate for now — flagged in a comment at `pipeline.py`'s `copy_kwargs` line as the
-  likely next mismatch once baked-in headlines are angle-specific.
-- `dashboard.py`/`dashboard.html`: `/api/angles` CRUD routes; `/api/decision`,
-  `/api/edit_image`, `/api/edit_copy` all accept `angle_id`; cards show an angle badge and
-  pass `angle_id` through Approve/Reject/Edit.
+All five original parts, plus every follow-on fix found during real runs, are implemented,
+tested, and committed on `main` (not deployed — see Known gaps). Summary, newest-relevant
+first:
 
-**NOT started:**
-- `illustrated` as a fourth `production_style` value (schema enum, `deconstruct.py`'s
-  classifier prompt, `PRODUCTION_STYLE_GUIDANCE`, `validator.production_styles()`).
-- The four run-strip operator controls (Angle/Realism/Text-in-image/Include-product
-  dropdowns+toggles) — `run_once`/`process_ad` don't yet accept `realism`,
-  `text_in_image`, or `include_product` at all; only `angle_id` exists so far.
-- Conditional BRAND_RULES 6/7 (`brand_rules(text_in_image, include_product, ...)`
-  replacing the flat `BRAND_RULES` constant) and the matching closing-paragraph fix in
+- **Parts 1-5**: `angles` table + CRUD + sidebar panel; (ad × angle) dedup on
+  `seen_ads`/`artifacts`; `illustrated` as a 4th `production_style`; the four run-strip
+  operator controls (Angle/Realism/Text-in-image/Include-product); conditional
+  `brand_rules(include_product, text_in_image, headline, subtext)` replacing the flat
+  `BRAND_RULES` constant; the Claude prompt-writer pass
+  (`generate_image_prompt_writer.write_creative_description`) sitting on top of
   `build_image_prompt`.
-- The Claude prompt-writer pass (`generate_image_prompt_writer.py`) and its wiring into
-  `build_image_prompt` via `creative_description`.
-- `text_in_image` is already a real column on `artifacts` (added defensively alongside
-  `angle_id` in the same migration) but nothing sets it to anything other than `False` yet
-  — the dashboard overlay-suppression logic that reads it hasn't been built either.
+- **4b/4c**: free-text `body_area` and `offer_text` per-run inputs; two CSS
+  stacking-context layout fixes (stats bar vs. run strip; Edit Angle modal vs. stats bar).
+- **LOCAL_RUN**: `LOCAL_RUN=1` env var makes `/api/run` call the in-process runner
+  (`_run_pipeline_bg`) instead of triggering the Cloud Run Job, so the Run Pipeline button
+  can actually exercise local code. **Run the dashboard as `uvicorn dashboard:app` with no
+  `--reload`** when testing this — `--reload` restarts the process on file changes, which
+  kills the background thread `_run_pipeline_bg` runs on mid-run. Unset (the default),
+  behaviour is byte-for-byte the old Cloud-Run-Job-only path.
+- **Two dashboard bugs**: sidebar Remove/category-save buttons weren't a JS wiring bug at
+  all — the sidebar had no explicit `z-index` and lost to `.sticky-controls` (explicit
+  `z-index:90`) regardless of DOM order, visually covering and click-blocking it; fixed by
+  giving the sidebar `z-index:95`. Separately, `PUT /api/competitors/{id}` had the same
+  bug `POST` had on 27 Jul — `page_id=(page_id if page_id else name)` overwrote a real
+  numeric `page_id` with the name whenever `page_id` wasn't supplied; fixed by passing
+  `page_id` straight through and having `dedupe.update_competitor` skip that column in its
+  `UPDATE` entirely when `page_id is None`.
+- **Parts A/B/C** (found from live runs of the writer): the writer wasn't told
+  `text_in_image`/`include_product`/`headline`/`subtext`, so it invented headline text and
+  multi-bottle scenes that `brand_rules()` then had to override, and Gemini discarded the
+  whole composition rather than reconciling the contradiction; the blueprint schema grew
+  `creative_objective`/`target_audience`/`typography`/expanded `layout_detail` (all
+  optional, schema-driven, zero `validator.py` changes needed); `test_writer_rule6_agreement.py`
+  asserts the writer's prompt and `brand_rules()`'s rule 6/7 always agree in both
+  `text_in_image`/`include_product` states.
+- **Final two writer fixes** (2026-07-30): realism now resolves to
+  `blueprint.production_style.style` when not explicitly given, so `"(auto)"` on the run
+  strip means the reference ad's own detected style, not silence — and the writer states
+  explicitly that `high_spec_studio`/`ugc_native`/`hybrid` mean photographic while
+  `illustrated` means drawn, closing a bug where a photographic reference produced fully
+  illustrated output. The writer also now bans any offer/badge/price/percentage when
+  `offer_text` is empty (closing a competitor-discount leak: a draft rendered "20% OFF"
+  lifted from the competitor's own `creative_objective`) and unconditionally bans naming
+  any product category besides body oil, even when something quoted from the competitor
+  ad names one (closing a "Bye-Bye, Body Lotion" bug).
 
-**Migration not yet run** — `migrate_angles.sql` (gitignored, repo root) has the full
-`seen_ads`/`artifacts`/`review_decisions`/`angles` DDL, reviewed but not executed. Until it
-runs, the live DB and this code disagree: `seen_ads`'s new `CREATE UNIQUE INDEX` in
-`init_db()` fails with `UndefinedColumn` against the current schema, which is currently
-failing 14 tests that call `run_once`/`is_new`/`mark_seen` (confirmed via a full pytest
-run — not a logic bug, just the expected consequence of the live table predating this
-column). `test_dedupe_angles.py` passes standalone since `angles` is a brand-new table
-with no drift to hit.
+**Root cause common to Parts A and the final two fixes**: the writer and `brand_rules()`
+are two independent functions with no shared state — whatever mode flag one enforces
+mechanically, the other must be told the *same* value explicitly, or it free-associates
+from the competitor ad's own blueprint fields (`visual.subject`, `creative_objective`,
+`typography.hierarchy_levels`) and describes a scene the guardrails then have to override.
+Gemini's behaviour when that happens is not to comply with the override — it discards the
+whole composition. So every mode flag `brand_rules()` reads (`text_in_image`,
+`include_product`, and now effectively `realism`/`offer_text`/product category) must
+always reach `_build_user_prompt` too, stated last and framed as STRICT/overrides-anything-
+above. Never let the writer read a signal that isn't also gated mechanically downstream.
+
+**Migration ran** (`migrate_angles.sql`) — the live DB and code now agree. Note:
+`seen_ads_ad_angle_uq` is an **expression** unique index
+(`ON seen_ads (ad_id, COALESCE(angle_id, 0))`), not a table constraint — it will show up in
+`pg_indexes`/`\d seen_ads` but **not** in `pg_constraint`, so a check that queries
+`pg_constraint` for it will wrongly report it missing.
+
+**Six angles seeded** (`seed_angles.py`): `crepey_skin`, `glp1`, `bruising`, `sun_damage`,
+`loose_skin` (`body_area` deliberately left blank — not yet confirmed, never guessed),
+`menopause`.
+
+**Team's confirmed answers** (govern how the run-strip controls must behave — don't
+"simplify" these away):
+- `body_area` is **per-run only**, never read from `angles.body_area` — body area varies
+  every run even for the same angle. The angle's own `body_area` (where set) is a UI
+  pre-fill *suggestion*, always overridable, never authoritative.
+- `offer_text` is **per-run free text**, not always a discount — it can be any offer
+  wording (bundle, gift-with-purchase, free shipping), not necessarily a percentage-off.
+  Don't build offer-specific parsing/validation around it assuming a `%` or `£` pattern.
+- The prompt-writer's output is **reviewed after generation, not before** — there's no
+  operator preview/approval step between the writer producing `creative_description` and
+  it being handed to Gemini. Review happens on the resulting draft image on the card, same
+  as every other draft.
