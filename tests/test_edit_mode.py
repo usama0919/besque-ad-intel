@@ -38,6 +38,27 @@ def test_brand_rules_edit_mode_false_omits_rule_9():
     assert "SOURCE IMAGE IS THE COMPETITOR'S OWN AD" not in generate_image_prompt.brand_rules(edit_mode=False)
 
 
+# ---- Step 2, Part 2 (2026-08-02): rule 9 strengthened - a live run reproduced the
+# competitor's circular logo, top-right, exactly as in the source, despite rule 9 ----
+
+def test_rule_9_covers_every_kind_of_brand_mark():
+    rules = generate_image_prompt.brand_rules(edit_mode=True)
+    for mark in ("logo", "emblem", "watermark", "roundel", "badge", "seal"):
+        assert mark in rules
+
+
+def test_rule_9_explicitly_covers_corner_marks_not_just_the_label():
+    rules = generate_image_prompt.brand_rules(edit_mode=True)
+    assert "corner mark or seal" in rules
+    assert "just as much as the product label itself" in rules
+
+
+def test_rule_9_states_logos_are_not_part_of_composition_to_preserve():
+    rules = generate_image_prompt.brand_rules(edit_mode=True)
+    assert "is NOT part of the composition to preserve" in rules
+    assert "it is the ONE thing that must not survive" in rules
+
+
 # ---- _edit_mode_instruction() and rule 6 must agree in both text_in_image states ----
 
 def test_edit_mode_instruction_and_rule6_agree_text_in_image_true():
@@ -168,6 +189,87 @@ def test_generate_image_edit_mode_orders_competitor_before_product_reference_ima
     framing_and_prompt = contents[-1]
     assert "THE AD TO REPRODUCE" in framing_and_prompt
     assert "REFERENCE PRODUCT PHOTOS ABOVE" in framing_and_prompt
+
+
+# ---- Step 2, Part 3 (2026-08-02): urgency/CTA text must not survive with offer_text
+# empty - a live run rendered "Grab Before They're Gone!" as a button ----
+
+def test_edit_mode_instruction_offer_text_absent_bans_urgency_and_cta():
+    instruction = generate_image_prompt._edit_mode_instruction(offer_text=None)
+    assert "no urgency phrasing, discount, price, or CTA button text may appear" in instruction
+    assert "neutral wording only" in instruction
+
+
+def test_edit_mode_instruction_offer_text_given_states_exact_wording_only():
+    instruction = generate_image_prompt._edit_mode_instruction(offer_text="20% off this week")
+    assert "ONLY this exact wording: 20% off this week" in instruction
+    assert "no urgency phrasing, discount, price, or CTA button text may appear" not in instruction
+
+
+def test_build_image_prompt_edit_mode_forwards_offer_text_to_edit_instruction():
+    prompt_no_offer = generate_image_prompt.build_image_prompt(_blueprint(), edit_mode=True)
+    assert "no urgency phrasing, discount, price, or CTA button text may appear" in prompt_no_offer
+
+    prompt_with_offer = generate_image_prompt.build_image_prompt(
+        _blueprint(), edit_mode=True, offer_text="free shipping this week"
+    )
+    assert "ONLY this exact wording: free shipping this week" in prompt_with_offer
+
+
+# ---- Step 2, Part 4 (2026-08-02): don't invent a product the reference doesn't have ----
+
+def test_edit_mode_instruction_reference_has_no_product_does_not_add_one():
+    instruction = generate_image_prompt._edit_mode_instruction(reference_has_product=False)
+    assert "do NOT add a Besque product" in instruction
+    assert "there is nothing to substitute" in instruction
+    assert "Remove the competitor's product entirely and place the Besque product" not in instruction
+
+
+def test_edit_mode_instruction_reference_has_product_default_substitutes():
+    instruction = generate_image_prompt._edit_mode_instruction()
+    assert "Remove the competitor's product entirely and place the Besque product" in instruction
+
+
+def test_build_image_prompt_edit_mode_product_count_zero_forces_no_product():
+    """layout_detail.product_count==0 (deconstruct.py's schema) means the reference ad has
+    no product in frame - the operator's own include_product=True toggle must not add one
+    where the source has nothing to substitute."""
+    bp = _blueprint()
+    bp["layout_detail"] = {"product_count": 0}
+    prompt = generate_image_prompt.build_image_prompt(bp, edit_mode=True, include_product=True)
+    assert "do NOT add a Besque product" in prompt
+    assert "This is a deliberately productless, educational/illustrative image" in prompt
+    assert "Remove the competitor's product entirely and place the Besque product" not in prompt
+
+
+def test_build_image_prompt_edit_mode_not_product_category_forces_no_product():
+    bp = _blueprint()
+    bp["product_category"] = {"category": "not_product"}
+    prompt = generate_image_prompt.build_image_prompt(bp, edit_mode=True, include_product=True)
+    assert "do NOT add a Besque product" in prompt
+    assert "This is a deliberately productless, educational/illustrative image" in prompt
+
+
+def test_build_image_prompt_edit_mode_product_present_still_substitutes():
+    """Regression guard: the new reference_has_product logic must not accidentally
+    suppress the normal substitution case when the reference DOES have a product."""
+    bp = _blueprint()
+    bp["layout_detail"] = {"product_count": 1}
+    product = {"name": "Magic Body Oil", "description": "seven cold-pressed oils",
+               "ingredients": "almond; rosehip", "hero_claim": "Visibly firms"}
+    prompt = generate_image_prompt.build_image_prompt(bp, product=product, edit_mode=True, include_product=True)
+    assert "Remove the competitor's product entirely and place the Besque product" in prompt
+    assert "Place the Besque product described below as the subject" in prompt
+
+
+def test_build_image_prompt_edit_mode_include_product_false_unaffected_by_reference_has_product():
+    """include_product=False (operator's own toggle) must still mean no product, exactly
+    as before - reference_has_product only ever narrows include_product, never widens it."""
+    bp = _blueprint()
+    bp["layout_detail"] = {"product_count": 2}  # reference clearly HAS a product
+    prompt = generate_image_prompt.build_image_prompt(bp, edit_mode=True, include_product=False)
+    assert "This is a deliberately productless, educational/illustrative image" in prompt
+    assert "Remove the competitor's product entirely and place the Besque product" not in prompt
 
 
 def test_generate_image_edit_mode_skips_the_writer_even_with_an_angle(monkeypatch, tmp_path):

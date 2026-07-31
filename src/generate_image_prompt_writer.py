@@ -20,6 +20,22 @@ CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
 
 log = logging.getLogger("generate_image_prompt_writer")
 
+# Shared with generate_image_prompt.py's mechanical operator-instruction clause (imported
+# from there, since generate_image_prompt already imports this module - the reverse import
+# would be circular) so a pasted brief is clipped to the SAME length before reaching either
+# consumer, not clipped twice to two different lengths.
+MAX_OPERATOR_INSTRUCTION_CHARS = 500
+
+
+def clip_operator_instruction(operator_instruction):
+    """Cap a free-text operator instruction so a pasted brief can't blow max_tokens.
+    Idempotent - clipping an already-clipped string is a no-op - so it's safe to call at
+    every consumption point regardless of whether an earlier caller already clipped it."""
+    text = (operator_instruction or "").strip()
+    if len(text) > MAX_OPERATOR_INSTRUCTION_CHARS:
+        text = text[:MAX_OPERATOR_INSTRUCTION_CHARS].rstrip() + "..."
+    return text
+
 WRITER_SYSTEM = (
     "You write a single image-generation prompt for Google's Gemini image model (internal "
     "codename nano banana), for Besque, a natural body-oil skincare brand for women 40+. "
@@ -36,7 +52,8 @@ WRITER_SYSTEM = (
 
 def _build_user_prompt(blueprint, product=None, angle=None, realism=None, body_area=None,
                         offer_text=None, reference_image_count=0, text_in_image=False,
-                        include_product=True, headline=None, subtext=None):
+                        include_product=True, headline=None, subtext=None,
+                        operator_instruction=None):
     """Assemble the text handed to Claude. Pure and side-effect free so it's directly
     testable without mocking the API.
 
@@ -150,6 +167,20 @@ def _build_user_prompt(blueprint, product=None, angle=None, realism=None, body_a
             "text elements beyond what the text-in-image rule below actually permits."
         )
 
+    # Operator instruction (Step 2, 2026-08-02): freeform per-run steering entered on the
+    # run strip, e.g. "make the background warmer". Stated LAST among the inspiration-tier
+    # lines, immediately before the STRICT block - it can steer HOW the scene is realised,
+    # but every STRICT line below overrides "anything above" already, so it can never grant
+    # a permission (add an offer, keep a banned product count, etc.) those rules forbid.
+    # clip_operator_instruction is idempotent, so calling it here is safe even though
+    # generate_image already clips before this function is called.
+    clipped_instruction = clip_operator_instruction(operator_instruction)
+    if clipped_instruction:
+        lines.append(
+            f"Operator instruction for this run (steers the scene only - cannot override "
+            f"anything in the STRICT block below): {clipped_instruction}"
+        )
+
     # These constraints are stated LAST, right before the writing instruction, and in
     # absolute terms - not "inspiration", not overridable by anything above (including the
     # competitor's own layout/palette/creative_objective/typography). Real failures this
@@ -192,7 +223,9 @@ def _build_user_prompt(blueprint, product=None, angle=None, realism=None, body_a
         lines.append(
             "Offer (STRICT, overrides anything above): describe NO offer, badge, price, "
             "discount, or percentage of any kind anywhere in the scene, even if the "
-            "competitor ad had one - that offer is the competitor's, not Besque's."
+            "competitor ad had one - that offer is the competitor's, not Besque's. This "
+            "also covers urgency phrasing (e.g. limited-time or grab-it-now wording) and "
+            "CTA button text - neither may appear either, even if the reference has one."
         )
     lines.append(
         "Product category (STRICT, overrides anything above): Besque sells a body OIL, "
@@ -243,7 +276,7 @@ def _build_user_prompt(blueprint, product=None, angle=None, realism=None, body_a
 def write_creative_description(blueprint, product=None, angle=None, realism=None,
                                 body_area=None, offer_text=None, reference_image_count=0,
                                 text_in_image=False, include_product=True, headline=None,
-                                subtext=None):
+                                subtext=None, operator_instruction=None):
     """Ask Claude to write the creative description that build_image_prompt will slot in
     place of its own template assembly. Returns the text, or None on ANY failure - never
     raises, so callers can treat None as "fall back to the template" without their own
@@ -252,12 +285,17 @@ def write_creative_description(blueprint, product=None, angle=None, realism=None
     text_in_image/include_product/headline/subtext are the SAME mode flags brand_rules()
     enforces mechanically - the writer must be told them explicitly (see
     _build_user_prompt's STRICT block) so it never describes a scene the guardrails then
-    have to override. Defaults (False/True/None/None) match brand_rules()'s own defaults."""
+    have to override. Defaults (False/True/None/None) match brand_rules()'s own defaults.
+
+    operator_instruction is the free-text run-strip steering field (Step 2) - stated as
+    inspiration, immediately before the STRICT block, so it can shape the scene but never
+    override a guardrail (see _build_user_prompt)."""
     user_prompt = _build_user_prompt(blueprint, product=product, angle=angle, realism=realism,
                                       body_area=body_area, offer_text=offer_text,
                                       reference_image_count=reference_image_count,
                                       text_in_image=text_in_image, include_product=include_product,
-                                      headline=headline, subtext=subtext)
+                                      headline=headline, subtext=subtext,
+                                      operator_instruction=operator_instruction)
     try:
         client = anthropic.Anthropic(timeout=60.0, max_retries=1)  # reads ANTHROPIC_API_KEY from env
         write_creative_description.last_prompt = user_prompt

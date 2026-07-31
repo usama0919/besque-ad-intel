@@ -131,18 +131,30 @@ def init_artifacts():
                 model_info    TEXT DEFAULT '',
                 archived      BOOLEAN DEFAULT false,
                 angle_id      INTEGER,
-                text_in_image BOOLEAN DEFAULT false
+                text_in_image BOOLEAN DEFAULT false,
+                operator_instruction TEXT DEFAULT ''
             )
         """)
+        # Self-migrating: unlike angle_id/text_in_image/category before it (which each
+        # needed a separate manually-run migrate_*.sql - see CLAUDE.md), this column adds
+        # itself to an already-existing table on every init_artifacts() call. ADD COLUMN
+        # IF NOT EXISTS is additive and idempotent - safe to run unconditionally, and
+        # closes the exact "migration not yet run" gap that stalled the angles rollout.
+        cur.execute("ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS operator_instruction TEXT DEFAULT ''")
         conn.commit()
 
 
 def save_artifact(ad_id, page_name, image_path, blueprint, generated_copy, draft_image, metadata,
-                   image_prompt="", copy_prompt="", model_info="", angle_id=None, text_in_image=False):
+                   image_prompt="", copy_prompt="", model_info="", angle_id=None, text_in_image=False,
+                   operator_instruction=""):
     """Persist all artifacts for one (ad_id, angle_id) pair with a timestamp. Skips if that
     exact pair is already stored. angle_id=None reproduces the pre-angle behaviour exactly -
     one artifact per ad_id. A different angle_id for an already-processed ad is a distinct
-    pair and gets its own row alongside the existing one(s), never replacing them."""
+    pair and gets its own row alongside the existing one(s), never replacing them.
+
+    operator_instruction (Step 2) is stored verbatim alongside image_prompt - the
+    auditability requirement: a reviewer looking at a wrong draft must be able to see
+    whether the operator asked for it, not just infer it from the assembled prompt."""
     with get_conn() as conn, conn.cursor() as cur:
         if FORCE_REPROCESS:
             cur.execute("DELETE FROM artifacts WHERE ad_id = %s AND angle_id IS NOT DISTINCT FROM %s", (ad_id, angle_id))
@@ -153,12 +165,12 @@ def save_artifact(ad_id, page_name, image_path, blueprint, generated_copy, draft
         cur.execute(
             """INSERT INTO artifacts
                (ad_id, page_name, image_path, blueprint, generated_copy, draft_image, metadata,
-                image_prompt, copy_prompt, model_info, angle_id, text_in_image)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                image_prompt, copy_prompt, model_info, angle_id, text_in_image, operator_instruction)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (ad_id, page_name, image_path,
              _json.dumps(blueprint), _json.dumps(generated_copy),
              draft_image, _json.dumps(metadata), image_prompt, copy_prompt, model_info,
-             angle_id, text_in_image),
+             angle_id, text_in_image, operator_instruction or ""),
         )
         conn.commit()
 
@@ -248,7 +260,7 @@ def get_artifacts_full(limit=50):
             SELECT a.ad_id, a.page_name, a.image_path, a.blueprint,
                    a.generated_copy, a.draft_image, a.metadata, a.created_at,
                    d.decision, a.image_prompt, a.copy_prompt, a.model_info,
-                   a.angle_id, a.text_in_image
+                   a.angle_id, a.text_in_image, a.operator_instruction
             FROM artifacts a
             LEFT JOIN LATERAL (
                 SELECT decision FROM review_decisions r
@@ -261,7 +273,7 @@ def get_artifacts_full(limit=50):
         cols = ["ad_id", "page_name", "image_path", "blueprint", "generated_copy",
                 "draft_image", "metadata", "created_at", "decision",
                 "image_prompt", "copy_prompt", "model_info",
-                "angle_id", "text_in_image"]
+                "angle_id", "text_in_image", "operator_instruction"]
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 

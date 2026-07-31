@@ -141,6 +141,51 @@ def test_save_and_get_artifact():
     assert rows[0][2]["headline"] == "H"
 
 
+def test_save_artifact_persists_operator_instruction_via_get_artifacts_full():
+    """Step 2 auditability: operator_instruction must round-trip through the DB exactly
+    like image_prompt, self-migrated in via init_artifacts()'s ADD COLUMN IF NOT EXISTS."""
+    from src import dedupe
+    import uuid
+    dedupe.init_artifacts()
+    ad_id = f"ART_{uuid.uuid4().hex[:8]}"
+    try:
+        dedupe.save_artifact(
+            ad_id=ad_id, page_name="TestBrand", image_path="assets/x.jpg",
+            blueprint={"format": "hero"}, generated_copy={"headline": "H"},
+            draft_image="assets/x_draft.png",
+            metadata={"cta": "Shop", "destination_url": "http://x"},
+            operator_instruction="make the background warmer",
+        )
+        rows = dedupe.get_artifacts_full(limit=500)
+        match = next(r for r in rows if r["ad_id"] == ad_id)
+        assert match["operator_instruction"] == "make the background warmer"
+    finally:
+        with dedupe.get_conn() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM artifacts WHERE ad_id=%s", (ad_id,))
+            conn.commit()
+
+
+def test_save_artifact_operator_instruction_defaults_to_empty_string():
+    from src import dedupe
+    import uuid
+    dedupe.init_artifacts()
+    ad_id = f"ART_{uuid.uuid4().hex[:8]}"
+    try:
+        dedupe.save_artifact(
+            ad_id=ad_id, page_name="TestBrand", image_path="assets/x.jpg",
+            blueprint={"format": "hero"}, generated_copy={"headline": "H"},
+            draft_image="assets/x_draft.png",
+            metadata={"cta": "Shop", "destination_url": "http://x"},
+        )
+        rows = dedupe.get_artifacts_full(limit=500)
+        match = next(r for r in rows if r["ad_id"] == ad_id)
+        assert match["operator_instruction"] == ""
+    finally:
+        with dedupe.get_conn() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM artifacts WHERE ad_id=%s", (ad_id,))
+            conn.commit()
+
+
 def test_get_artifact_returns_angle_id_and_text_in_image():
     """dashboard.py's api_edit_image reads these back to restore the original generation's
     rule-6 mode on edit - get_artifact must actually return them, not just accept angle_id

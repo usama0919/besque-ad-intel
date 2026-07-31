@@ -325,3 +325,99 @@ def test_text_density_statement_warns_against_adding_a_paragraph():
 def test_text_density_statement_absent_when_no_density_signals_given():
     prompt = writer._build_user_prompt({})
     assert "Text DENSITY to match" not in prompt
+
+
+# ---- Step 2 (2026-08-02): operator instruction field ----
+
+def test_clip_operator_instruction_passes_short_text_through():
+    assert writer.clip_operator_instruction("make the background warmer") == "make the background warmer"
+
+
+def test_clip_operator_instruction_strips_whitespace():
+    assert writer.clip_operator_instruction("  keep it minimal  ") == "keep it minimal"
+
+
+def test_clip_operator_instruction_none_and_blank_are_empty():
+    assert writer.clip_operator_instruction(None) == ""
+    assert writer.clip_operator_instruction("   ") == ""
+
+
+def test_clip_operator_instruction_caps_length():
+    long_text = "x" * 900
+    clipped = writer.clip_operator_instruction(long_text)
+    assert len(clipped) <= writer.MAX_OPERATOR_INSTRUCTION_CHARS + 3  # +3 for "..."
+    assert clipped.endswith("...")
+
+
+def test_clip_operator_instruction_is_idempotent():
+    long_text = "y" * 900
+    once = writer.clip_operator_instruction(long_text)
+    twice = writer.clip_operator_instruction(once)
+    assert once == twice
+
+
+def test_build_user_prompt_includes_operator_instruction():
+    prompt = writer._build_user_prompt({}, operator_instruction="make the background warmer")
+    assert "Operator instruction for this run" in prompt
+    assert "make the background warmer" in prompt
+
+
+def test_build_user_prompt_operator_instruction_states_strict_boundary():
+    prompt = writer._build_user_prompt({}, operator_instruction="keep it minimal")
+    assert "cannot override anything in the STRICT block below" in prompt
+
+
+def test_build_user_prompt_omits_operator_instruction_section_when_blank():
+    for blank in (None, "", "   "):
+        prompt = writer._build_user_prompt({}, operator_instruction=blank)
+        assert "Operator instruction for this run" not in prompt
+
+
+def test_build_user_prompt_operator_instruction_appears_before_strict_block():
+    """Precedence: steers the scene, sits ABOVE the STRICT overrides that follow it in the
+    writer's own prompt (product category ban, offer, text-in-image, etc.) - never below,
+    or it would read as itself being STRICT."""
+    prompt = writer._build_user_prompt({}, operator_instruction="make the background warmer",
+                                        offer_text=None)
+    instr_pos = prompt.index("Operator instruction for this run")
+    strict_pos = prompt.index("Product category (STRICT")
+    assert instr_pos < strict_pos
+
+
+def test_write_creative_description_forwards_operator_instruction(monkeypatch):
+    captured = {}
+
+    def fake_build_user_prompt(*a, **k):
+        captured.update(k)
+        return "prompt text"
+
+    monkeypatch.setattr(writer, "_build_user_prompt", fake_build_user_prompt)
+
+    class FakeMessage:
+        content = [type("obj", (), {"text": json.dumps({"creative_description": "A scene."})})()]
+
+    class FakeMessages:
+        def create(self, **kwargs):
+            return FakeMessage()
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            self.messages = FakeMessages()
+
+    monkeypatch.setattr(writer.anthropic, "Anthropic", FakeClient)
+    writer.write_creative_description({}, operator_instruction="show the oil being poured")
+    assert captured["operator_instruction"] == "show the oil being poured"
+
+
+# ---- Offer-empty branch now also bans urgency phrasing / CTA button text (Step 2, Part 3) ----
+
+def test_offer_text_absent_also_bans_urgency_phrasing_and_cta_button_text():
+    """Regression guard: a live edit-mode run rendered "Grab Before They're Gone!" as a
+    button with offer_text empty - the writer's own offer ban must cover this class too,
+    not just discount/percentage numbers, and the original exact substring (asserted by
+    test_offer_text_absent_forbids_any_offer_even_with_competitor_creative_objective) must
+    survive unchanged."""
+    prompt = writer._build_user_prompt({}, offer_text=None)
+    assert "describe NO offer, badge, price, discount, or percentage of any kind" in prompt
+    assert "urgency phrasing" in prompt
+    assert "CTA button text" in prompt

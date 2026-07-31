@@ -8,11 +8,13 @@ IMAGE_MODEL = os.getenv("IMAGE_MODEL", "placeholder-image-model")
 
 def build_image_prompt(blueprint: dict, product: dict = None, include_product: bool = True,
                         text_in_image: bool = False, headline: str = None, subtext: str = None,
-                        creative_description: str = None, edit_mode: bool = False) -> str:
+                        creative_description: str = None, edit_mode: bool = False,
+                        offer_text: str = None, operator_instruction: str = None) -> str:
     """Construct a Besque-adapted image generation prompt from the blueprint's visual notes.
-    include_product=True, text_in_image=False, creative_description=None, edit_mode=False
-    (today's defaults) reproduce the prior output exactly for a given blueprint/product -
-    none of these are a rewrite of the default path.
+    include_product=True, text_in_image=False, creative_description=None, edit_mode=False,
+    offer_text=None, operator_instruction=None (today's defaults) reproduce the prior
+    output exactly for a given blueprint/product - none of these are a rewrite of the
+    default path.
 
     creative_description, if given, is the Claude prompt-writer's output
     (generate_image_prompt_writer.write_creative_description) - it REPLACES the
@@ -26,7 +28,16 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
     (passed separately to generate_image as an input Part) IS the creative brief, so neither
     the writer nor the template scene/layout/palette text is used - see
     _edit_mode_instruction. product_clause/aspect-ratio/closing still always apply, same as
-    every other branch."""
+    every other branch. offer_text is only consumed here in edit_mode (see
+    _edit_mode_instruction's OFFER branch); the non-edit-mode/writer path already gets
+    offer_text via generate_image's separate call into write_creative_description.
+
+    operator_instruction (Step 2) is inserted in a FIXED position in every branch:
+    immediately after brand_rules() (rules 1-9 + compliance C1-C6), before whatever
+    supplies the scene text (creative_description / _edit_mode_instruction / the template
+    below) - see _operator_instruction_clause. It steers the scene; it can never grant a
+    permission those rules forbid, since it appears strictly below them and states that
+    boundary explicitly."""
     visual = blueprint.get("visual", {})
     # visual.subject is deliberately NOT read here. In practice it's where the vision
     # deconstruct step puts rich, identity-carrying descriptions of the competitor ad's
@@ -39,7 +50,23 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
     text_placement = visual.get("text_placement", "minimal")
     prod_style = (blueprint.get("production_style") or {}).get("style", "")
 
-    if include_product:
+    # Step 2, Part 4: in edit mode the reference ad governs whether there's a product to
+    # substitute at all - "add a Besque product" only makes sense when the reference
+    # actually shows one. layout_detail.product_count==0 or product_category=="not_product"
+    # (both from deconstruct.py's blueprint schema) are the two available signals; either
+    # forces effective_include_product False even if the operator's own toggle was True,
+    # since there is nothing in the reference to substitute. Outside edit_mode this is a
+    # no-op (reference_has_product stays True, effective_include_product == include_product).
+    effective_include_product = include_product
+    reference_has_product = True
+    if edit_mode:
+        layout_detail_bp = (blueprint or {}).get("layout_detail") or {}
+        product_category_bp = ((blueprint or {}).get("product_category") or {}).get("category")
+        reference_has_product = not (product_category_bp == "not_product"
+                                      or layout_detail_bp.get("product_count") == 0)
+        effective_include_product = include_product and reference_has_product
+
+    if effective_include_product:
         if product:
             visual_desc = product.get("visual_description", "")
             product_desc = (
@@ -74,7 +101,7 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
             "any other text; no competitor branding anywhere."
         )
     else:
-        label_clause = ("only the Besque product's own label may appear" if include_product
+        label_clause = ("only the Besque product's own label may appear" if effective_include_product
                          else "no text of any kind may appear")
         closing = (
             f"Keep the base image completely free of overlaid marketing text — {label_clause} "
@@ -88,9 +115,18 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
         # this mode anyway (see generate_image). product_clause/aspect-ratio/closing still
         # always follow, same guardrail-always-appended pattern as every other branch.
         prompt = (
-            brand_rules(include_product=include_product, text_in_image=text_in_image,
+            brand_rules(include_product=effective_include_product, text_in_image=text_in_image,
                         headline=headline, subtext=subtext, edit_mode=True) +
-            _edit_mode_instruction(text_in_image=text_in_image, headline=headline, subtext=subtext) +
+            _operator_instruction_clause(operator_instruction) +
+            # include_product here is the RAW operator toggle, not effective_include_product -
+            # the two booleans (include_product, reference_has_product) independently select
+            # one of three distinct explanations (substitute / nothing-to-substitute /
+            # operator-disabled), but the ADD-vs-DON'T-ADD outcome they produce always
+            # matches effective_include_product exactly (same combining logic), so this can
+            # never contradict product_clause below, which IS built from the effective value.
+            _edit_mode_instruction(text_in_image=text_in_image, headline=headline, subtext=subtext,
+                                   offer_text=offer_text, include_product=include_product,
+                                   reference_has_product=reference_has_product) +
             product_clause +
             f"Square 1:1 aspect ratio composition. " +
             closing
@@ -104,6 +140,7 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
         prompt = (
             brand_rules(include_product=include_product, text_in_image=text_in_image,
                         headline=headline, subtext=subtext) +
+            _operator_instruction_clause(operator_instruction) +
             creative_description.strip() + " "
             + product_clause +
             f"Square 1:1 aspect ratio composition. " +
@@ -113,6 +150,7 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
         prompt = (
             brand_rules(include_product=include_product, text_in_image=text_in_image,
                         headline=headline, subtext=subtext) +
+            _operator_instruction_clause(operator_instruction) +
             f"A premium skincare advertisement image for Besque, a natural body-oil brand for women 40+. "
             f"Composition and setting: {layout}. (If this implies a person, render them per compliance "
             f"rule C1 - a generic, non-identifiable model, never the specific individual described.) "
@@ -220,11 +258,16 @@ _RULE_8_LAYOUT_IS_COMPOSITION = (
 _RULE_9_SOURCE_IMAGE_IS_THE_COMPETITORS_AD = (
     "9) SOURCE IMAGE IS THE COMPETITOR'S OWN AD (STRICT, EDIT MODE): the attached reference "
     "image being reproduced is the competitor's own advertisement - it contains their real "
-    "product, packaging, logo, and brand name. NEVER let any of the competitor's logo, "
-    "product, packaging, brand name, or label text survive into the output image, even "
-    "though you are copying its composition, background, lighting, and layout. Rules 6 and "
-    "7 above still govern exactly which text and product may appear - they now apply to a "
-    "real photograph you are editing, not just a text brief. "
+    "product, packaging, logo, and brand name. Every brand mark belonging to the "
+    "competitor - logo, emblem, watermark, roundel, badge, seal, or any other brand mark, "
+    "wherever it sits in the frame (this covers a corner mark or seal just as much as the "
+    "product label itself) - is NOT part of the composition to preserve; it is the ONE "
+    "thing that must not survive. Remove every such mark entirely and leave that space "
+    "clean. NEVER let any of the competitor's logo, product, packaging, brand name, or "
+    "label text survive into the output image, even though you are copying its "
+    "composition, background, lighting, and layout. Rules 6 and 7 above still govern "
+    "exactly which text and product may appear - they now apply to a real photograph you "
+    "are editing, not just a text brief. "
 )
 
 
@@ -245,7 +288,31 @@ def brand_rules(include_product=True, text_in_image=False, headline=None, subtex
     )
 
 
-def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None):
+def _operator_instruction_clause(operator_instruction=None):
+    """Step 2 (2026-08-02): freeform per-run steering entered on the run strip. Fixed
+    position in build_image_prompt's assembled prompt - inserted right after brand_rules()
+    (rules 1-9 + compliance C1-C6), before whatever supplies the scene text below it
+    (creative_description / _edit_mode_instruction / the template). That position, plus
+    the boundary stated explicitly in the text itself, is what makes it impossible for an
+    instruction like "add a 50% off badge" or "keep the competitor's logo" to override the
+    corresponding guardrail - see test_operator_instruction_does_not_override_guardrails.
+
+    Returns "" for empty/whitespace-only input - no empty section ever appears in the
+    prompt, matching offer_text/body_area's existing convention. clip_operator_instruction
+    is idempotent, so calling it here is safe even when the caller (generate_image)
+    already clipped it."""
+    text = generate_image_prompt_writer.clip_operator_instruction(operator_instruction)
+    if not text:
+        return ""
+    return (
+        f"OPERATOR INSTRUCTION FOR THIS RUN (steers the scene only - it can NEVER grant a "
+        f"permission the rules above forbid; if it conflicts with any rule above, the rule "
+        f"above wins): {text} "
+    )
+
+
+def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, offer_text=None,
+                            include_product=True, reference_has_product=True):
     """EDIT MODE (2026-08-01): Gemini receives the competitor's own ad as an input image
     Part, not just a text description of it - the reference image IS the creative brief,
     so no template scene/layout/palette description is assembled here (see
@@ -254,16 +321,53 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None):
     Must agree with rule 6 (_rule6_text_policy) in BOTH text_in_image states - see
     test_edit_mode_instruction_and_rule6_agreement - the same class of contradiction that
     caused the Part A writer/rule6 disagreement (a description permitting/describing text
-    the mechanical rule then forbade, which made Gemini discard the whole composition)."""
-    base = (
-        "EDIT MODE: the FIRST attached image is the competitor's own advertisement. "
-        "Reproduce its composition, background, camera angle, lighting, colour palette, "
-        "text placement, and overall layout as closely as possible - changing ONLY the "
-        "product. Remove the competitor's product entirely and place the Besque product "
-        "(shown in the reference photo(s) that follow, if any) in its position, at its "
-        "scale, with its lighting, matching the original shot as faithfully as possible. "
-        "Everything else in the scene stays exactly as it appears in the source image. "
-    )
+    the mechanical rule then forbade, which made Gemini discard the whole composition).
+
+    include_product here is the RAW operator toggle, deliberately NOT
+    build_image_prompt's effective_include_product - include_product and
+    reference_has_product independently select one of three explanations (substitute /
+    nothing to substitute / operator disabled it), but combining them the SAME way
+    effective_include_product itself is computed means the actual add-vs-don't-add OUTCOME
+    always matches product_clause exactly, in every one of the three branches - see
+    test_build_image_prompt_edit_mode_include_product_false_unaffected_by_reference_has_product.
+    Passing the already-narrowed effective value instead would collapse "operator wanted a
+    product but the reference had none" into "operator disabled it", losing exactly the
+    distinction Part 4 exists to state.
+
+    reference_has_product=False (Step 2, Part 4) only changes WHICH sentence explains an
+    outcome where no product is added: the reference ad itself has no product in frame
+    (blueprint.layout_detail.product_count==0 or product_category=="not_product"), so the
+    wording says there's nothing to substitute rather than a generic productless-mode
+    sentence - distinguishing "the operator asked for no product" from "the source had
+    none to substitute" without changing the actual (non-contradictory) outcome."""
+    if include_product and reference_has_product:
+        base = (
+            "EDIT MODE: the FIRST attached image is the competitor's own advertisement. "
+            "Reproduce its composition, background, camera angle, lighting, colour palette, "
+            "text placement, and overall layout as closely as possible - changing ONLY the "
+            "product. Remove the competitor's product entirely and place the Besque product "
+            "(shown in the reference photo(s) that follow, if any) in its position, at its "
+            "scale, with its lighting, matching the original shot as faithfully as possible. "
+            "Everything else in the scene stays exactly as it appears in the source image. "
+        )
+    elif include_product and not reference_has_product:
+        base = (
+            "EDIT MODE: the FIRST attached image is the competitor's own advertisement. "
+            "Reproduce its composition, background, camera angle, lighting, colour palette, "
+            "text placement, and overall layout as closely as possible. The reference image "
+            "has NO product in frame - do NOT add a Besque product, bottle, or packaging "
+            "anywhere in the scene; there is nothing to substitute here. Everything else in "
+            "the scene stays exactly as it appears in the source image. "
+        )
+    else:
+        base = (
+            "EDIT MODE: the FIRST attached image is the competitor's own advertisement. "
+            "Reproduce its composition, background, camera angle, lighting, colour palette, "
+            "text placement, and overall layout as closely as possible. This is a "
+            "deliberately productless edit - do NOT add any Besque product, bottle, or "
+            "packaging anywhere in the scene. Everything else in the scene stays exactly as "
+            "it appears in the source image. "
+        )
     if text_in_image and headline:
         permitted = f'the headline "{headline}"'
         if subtext:
@@ -281,6 +385,19 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None):
             "SAME positions they occupy in the source image - do not render any text, "
             "headline, or competitor wording there; that space will be filled later as a "
             "separate HTML overlay. "
+        )
+    if offer_text:
+        base += (
+            f"OFFER: if the reference shows an offer, discount, price, or CTA button, "
+            f"reproduce its shape and position but with ONLY this exact wording: "
+            f"{offer_text}. Do not invent a different number, percentage, or term. "
+        )
+    else:
+        base += (
+            "OFFER: no offer was supplied for this run - no urgency phrasing, discount, "
+            "price, or CTA button text may appear anywhere in the image, even if the "
+            "reference has one. Reproduce any such button's shape and position as clean "
+            "empty space or neutral wording only, never the competitor's urgency wording. "
         )
     return base
 
@@ -367,7 +484,7 @@ def _sniff_mime_type(data):
 def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_slug=None,
                     include_product=True, text_in_image=False, headline=None, subtext=None,
                     messaging_angle=None, realism=None, body_area=None, offer_text=None,
-                    edit_mode=False, competitor_image_bytes=None):
+                    edit_mode=False, competitor_image_bytes=None, operator_instruction=None):
     """Single-pass image generation from the blueprint. One image, no iteration.
     Saves to assets/<stem>_draft.png (stem = ad_id, or ad_id+angle if angle_slug is given)
     and returns the path. Returns None on failure. include_product/text_in_image/headline/
@@ -389,7 +506,17 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
     competitor_image_bytes to Gemini as an input Part ahead of the product reference
     photos, clearly distinguished in the framing text: one is the ad to reproduce, the
     others are the Besque product to substitute in. Defaults (edit_mode=False,
-    competitor_image_bytes=None) reproduce today's generate-only behaviour exactly."""
+    competitor_image_bytes=None) reproduce today's generate-only behaviour exactly.
+    offer_text is ALSO forwarded to build_image_prompt now (not just the writer) so edit
+    mode's _edit_mode_instruction OFFER branch actually receives it - edit mode skips the
+    writer, so build_image_prompt is the only path it has left to reach.
+
+    operator_instruction (Step 2) is clipped ONCE here (clip_operator_instruction is
+    idempotent, so downstream re-clipping is harmless) and forwarded to BOTH the writer
+    (as inspiration-tier guidance) and build_image_prompt (as the mechanical, fixed-position
+    clause - see _operator_instruction_clause) so it reaches the model whether or not the
+    writer actually runs."""
+    operator_instruction = generate_image_prompt_writer.clip_operator_instruction(operator_instruction)
     creative_description = None
     if messaging_angle and not edit_mode:
         creative_description = generate_image_prompt_writer.write_creative_description(
@@ -397,11 +524,12 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
             body_area=body_area, offer_text=offer_text,
             reference_image_count=len(reference_images or []),
             text_in_image=text_in_image, include_product=include_product,
-            headline=headline, subtext=subtext,
+            headline=headline, subtext=subtext, operator_instruction=operator_instruction,
         )
     prompt = build_image_prompt(blueprint, product=product, include_product=include_product,
                                  text_in_image=text_in_image, headline=headline, subtext=subtext,
-                                 creative_description=creative_description, edit_mode=edit_mode)
+                                 creative_description=creative_description, edit_mode=edit_mode,
+                                 offer_text=offer_text, operator_instruction=operator_instruction)
     stem = _draft_stem(ad_id, angle_slug)
     try:
         client = genai.Client(vertexai=True, project="besque-martech", location="global")

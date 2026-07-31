@@ -62,6 +62,11 @@
   .primary { font-size:13px; color:#555; line-height:1.5; margin-bottom:8px; }
   .cta { font-size:12px; font-weight:600; color:#1a1a1a; }
   .angle { font-size:12px; color:#888; margin-top:6px; font-style:italic; }
+  /* Step 2 auditability: an operator-given instruction must be visible on the card, not
+     buried in image_prompt - a reviewer looking at a wrong draft needs to see at a glance
+     whether the operator asked for it. */
+  .operator-instruction { font-size:12px; color:#8a5a12; background:#fdf3e0; border:1px solid #f0dcb4;
+                           border-radius:6px; padding:6px 12px; margin:0 18px 10px; }
   .actions { padding:14px 18px; display:flex; gap:10px; border-top:1px solid #f0ece4; }
   .actions button { flex:1; padding:9px; border:none; border-radius:7px; font-size:13px; font-weight:600; cursor:pointer; }
   .btn-a { background:#1a7f42; color:#fff; }
@@ -193,6 +198,18 @@
   <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#555;" title="Reproduce the competitor's ad, substituting only the product - off by default (generate from a text brief instead).">
     <input type="checkbox" id="editModeToggle" style="width:auto;"> Edit mode (reproduce reference)
   </label>
+  <!-- Step 2: freeform per-run steering. Sits in a fixed position in the assembled prompt
+       (below brand rules/compliance/rules 6/7/9, above the writer's own composition/mood/
+       framing choices - see generate_image_prompt._operator_instruction_clause) so it can
+       steer the scene but never grant a permission those rules forbid. Pre-filled from
+       localStorage - see loadOperatorInstruction()/runPipeline() - so the operator isn't
+       retyping the same steering every run within a ~25-ad-a-day session. -->
+  <div style="display:flex;flex-direction:column;gap:2px;flex:1 1 280px;min-width:220px;">
+    <label for="operatorInstructionInput" style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;">Extra direction for this run (optional)</label>
+    <textarea id="operatorInstructionInput" rows="2" maxlength="500"
+              placeholder="e.g. make the background warmer, show the oil being poured, keep it minimal"
+              style="padding:9px;border:1px solid #ccc;border-radius:7px;font-size:13px;resize:vertical;font-family:inherit;"></textarea>
+  </div>
   <button class="run" id="runBtn" onclick="runPipeline()" disabled>Run Pipeline</button>
   <button class="stop" id="stopBtn" onclick="stopPipeline()" disabled>Stop</button>
   <span id="selectedCompName">No competitor selected</span>
@@ -477,8 +494,12 @@ function renderCards(data){
     const draft = a.draft_image
       ? `<div class="draft-wrap"><img onerror="imgFallback(this)" src="${a.draft_image}">${ovLayer(a)}</div>${ovToggles(a)}`
       : '';
+    const operatorInstructionNote = a.operator_instruction
+      ? `<div class="operator-instruction" title="Extra direction the operator gave for this run">Operator direction: ${esc(a.operator_instruction)}</div>`
+      : '';
     return `<div class="card">
       <div class="card-head"><span class="comp">${esc(a.page_name)||'Competitor'} <span style="font-size:11px;color:#aaa;font-weight:400;">· ${a.created_at||''}</span></span>${badge}</div>
+      ${operatorInstructionNote}
       <div class="split">
         <div class="side orig"><div class="lbl">Competitor Ad</div>${orig}
           <div class="angle">${esc(bp.angle||bp.format||'')}</div></div>
@@ -953,6 +974,11 @@ async function runPipeline(){
   const bodyArea = document.getElementById('bodyAreaInput').value.trim();
   const offerText = document.getElementById('offerTextInput').value.trim();
   const editMode = document.getElementById('editModeToggle').checked;
+  const operatorInstruction = document.getElementById('operatorInstructionInput').value.trim();
+  // Persist the value actually used for this run as "last-used" - see loadOperatorInstruction().
+  // localStorage (not just leaving it in the DOM) survives a page reload/new tab, matching
+  // the ~25-ad-a-day session workflow where the steering is usually constant all day.
+  try { localStorage.setItem('operatorInstruction', operatorInstruction); } catch(e) {}
   await fetch('/api/run?n='+nAds+'&competitor_id='+selectedCompetitorId
     +(selectedProductId?('&product_id='+selectedProductId):'')
     +(angleId?('&angle_id='+angleId):'')
@@ -961,7 +987,8 @@ async function runPipeline(){
     +'&include_product='+(includeProduct?'1':'0')
     +(bodyArea?('&body_area='+encodeURIComponent(bodyArea)):'')
     +(offerText?('&offer_text='+encodeURIComponent(offerText)):'')
-    +'&edit_mode='+(editMode?'1':'0'),
+    +'&edit_mode='+(editMode?'1':'0')
+    +(operatorInstruction?('&operator_instruction='+encodeURIComponent(operatorInstruction)):''),
     {method:'POST'});
   const poll=setInterval(async()=>{
     const r=await fetch('/api/run/status'); const s=await r.json();
@@ -1008,6 +1035,16 @@ function dismissWarning(id){ _dismissedWarningIds.add(id); loadWarnings(); }
 
 function tick(){document.getElementById('clock').textContent=new Date().toLocaleString();}
 setInterval(tick,1000); tick();
+// Pre-fill "Extra direction for this run" with the last value actually used - see
+// runPipeline()'s localStorage.setItem. Retyping identical steering every run across a
+// ~25-ad-a-day session is exactly the toil this field exists to remove.
+function loadOperatorInstruction(){
+  try {
+    const saved = localStorage.getItem('operatorInstruction');
+    if(saved) document.getElementById('operatorInstructionInput').value = saved;
+  } catch(e) {}
+}
+loadOperatorInstruction();
 loadCards(); loadLog(); loadCompetitors(); loadProducts(); loadAngles(); loadWarnings();
 // Never rebuild the feed while a caret sits in an overlay. Defer rather than drop, so a
 // pipeline run that finishes mid-typing still lands once the field loses focus.

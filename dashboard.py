@@ -86,6 +86,9 @@ def api_artifacts():
             "angle_id": angle_id,
             "angle_name": angle["name"] if angle else "",
             "text_in_image": bool(r.get("text_in_image")),
+            # Auditability (Step 2): a reviewer looking at a wrong draft must be able to
+            # see whether the operator asked for it, not just infer it from image_prompt.
+            "operator_instruction": r.get("operator_instruction") or "",
         })
     return JSONResponse(out)
 
@@ -110,7 +113,7 @@ def api_decision(ad_id: str, decision: str, reason: str = "", angle_id: int = No
 
 def _run_pipeline_bg(n, competitor_id=None, category=None, product_id=None, angle_id=None,
                       realism=None, text_in_image=False, include_product=True,
-                      body_area=None, offer_text=None, edit_mode=False):
+                      body_area=None, offer_text=None, edit_mode=False, operator_instruction=None):
     """LOCAL_RUN's in-process runner - was dead code (api_run always hit the Cloud Run Job
     path) until LOCAL_RUN=1 made it reachable. Runs pipeline.run_once with every run-strip
     param, exactly as job_runner.py does for a real deployed Job."""
@@ -128,6 +131,7 @@ def _run_pipeline_bg(n, competitor_id=None, category=None, product_id=None, angl
             body_area=body_area,
             offer_text=offer_text,
             edit_mode=edit_mode,
+            operator_instruction=operator_instruction,
             should_stop=lambda: _run_status["stop_requested"],
         )
     except Exception as e:
@@ -140,7 +144,7 @@ def _run_pipeline_bg(n, competitor_id=None, category=None, product_id=None, angl
 def api_run(n: int = 2, competitor_id: int = None, category: str = "", product_id: int = None,
             angle_id: int = None, realism: str = "", text_in_image: bool = False,
             include_product: bool = True, body_area: str = "", offer_text: str = "",
-            edit_mode: bool = False):
+            edit_mode: bool = False, operator_instruction: str = ""):
     """Trigger the pipeline. Two paths:
 
     - LOCAL_RUN=1: runs _run_pipeline_bg (pipeline.run_once) in a background thread, in
@@ -156,6 +160,12 @@ def api_run(n: int = 2, competitor_id: int = None, category: str = "", product_i
 
     edit_mode defaults to False - the team confirmed edit-vs-generate usage is about
     50/50, so today's generate-only path must keep working unchanged.
+
+    operator_instruction (Step 2) is the "Extra direction for this run" free-text field -
+    threaded exactly like body_area/offer_text, but IS persisted (onto the artifact, by
+    pipeline.py) since it must be auditable on the review card. The env var is named
+    RUN_INSTRUCTION (not RUN_OPERATOR_INSTRUCTION) - shorter, matching the field's actual
+    length risk more than the other RUN_* names' pattern.
     """
     if os.getenv("LOCAL_RUN") == "1":
         global _run_thread
@@ -172,6 +182,7 @@ def api_run(n: int = 2, competitor_id: int = None, category: str = "", product_i
                 angle_id=angle_id, realism=(realism or None), text_in_image=text_in_image,
                 include_product=include_product, body_area=(body_area or None),
                 offer_text=(offer_text or None), edit_mode=edit_mode,
+                operator_instruction=(operator_instruction or None),
             ),
             daemon=True,
         )
@@ -200,6 +211,7 @@ def api_run(n: int = 2, competitor_id: int = None, category: str = "", product_i
                     run_v2.EnvVar(name="RUN_BODY_AREA", value=body_area or ""),
                     run_v2.EnvVar(name="RUN_OFFER_TEXT", value=offer_text or ""),
                     run_v2.EnvVar(name="RUN_EDIT_MODE", value="1" if edit_mode else "0"),
+                    run_v2.EnvVar(name="RUN_INSTRUCTION", value=operator_instruction or ""),
                 ]
             )
         ]

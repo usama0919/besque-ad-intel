@@ -69,7 +69,7 @@ def test_api_run_local_starts_background_thread_and_returns_immediately(monkeypa
     resp = dashboard.api_run(n=3, competitor_id=2, category="body_oil", product_id=1,
                               angle_id=7, realism="ugc_native", text_in_image=True,
                               include_product=False, body_area="knees", offer_text="20% off",
-                              edit_mode=True)
+                              edit_mode=True, operator_instruction="make the background warmer")
     import json
     body = json.loads(resp.body)
     assert body == {"ok": True, "started": True}
@@ -90,6 +90,7 @@ def test_api_run_local_starts_background_thread_and_returns_immediately(monkeypa
     assert captured["body_area"] == "knees"
     assert captured["offer_text"] == "20% off"
     assert captured["edit_mode"] is True
+    assert captured["operator_instruction"] == "make the background warmer"
 
     assert dashboard._run_status["running"] is False
     assert dashboard._run_status["last_summary"] == {"processed": 1, "skipped": 0, "failed": 0}
@@ -182,7 +183,7 @@ def test_api_run_job_path_ignores_category_in_env_vars(monkeypatch):
     assert set(env_names) == {
         "RUN_COMPETITOR_ID", "RUN_MAX_PER_COMPETITOR", "RUN_PRODUCT_ID", "RUN_ANGLE_ID",
         "RUN_REALISM", "RUN_TEXT_IN_IMAGE", "RUN_INCLUDE_PRODUCT", "RUN_BODY_AREA", "RUN_OFFER_TEXT",
-        "RUN_EDIT_MODE",
+        "RUN_EDIT_MODE", "RUN_INSTRUCTION",
     }
 
 
@@ -198,6 +199,20 @@ def test_api_run_job_path_edit_mode_env_var(monkeypatch):
     dashboard.api_run(n=2, competitor_id=5, edit_mode=False)
     env = {e.name: e.value for e in _FakeJobsClient.last_request.overrides.container_overrides[0].env}
     assert env["RUN_EDIT_MODE"] == "0"
+
+
+def test_api_run_job_path_operator_instruction_env_var(monkeypatch):
+    monkeypatch.delenv("LOCAL_RUN", raising=False)
+    _reset_run_status()
+    _install_fake_run_v2(monkeypatch, jobs_client=_FakeJobsClient)
+
+    dashboard.api_run(n=2, competitor_id=5, operator_instruction="keep it minimal")
+    env = {e.name: e.value for e in _FakeJobsClient.last_request.overrides.container_overrides[0].env}
+    assert env["RUN_INSTRUCTION"] == "keep it minimal"
+
+    dashboard.api_run(n=2, competitor_id=5)
+    env = {e.name: e.value for e in _FakeJobsClient.last_request.overrides.container_overrides[0].env}
+    assert env["RUN_INSTRUCTION"] == ""
 
 
 # ---- /api/run/status ----
@@ -283,6 +298,60 @@ def test_api_warnings_200_with_a_real_warning_row(monkeypatch):
     match = next(w for w in body if w["detail"] == "__test__ regression guard warning row")
     assert match["kind"] == "compliance_failed"
     assert isinstance(match["created_at"], str)
+
+
+# ---- /api/artifacts: operator_instruction must surface on the review card (auditability) ----
+
+def test_api_artifacts_surfaces_operator_instruction(monkeypatch):
+    from src import dedupe
+    from fastapi.testclient import TestClient
+    import uuid
+
+    dedupe.init_artifacts()
+    ad_id = f"ART_{uuid.uuid4().hex[:8]}"
+    dedupe.save_artifact(
+        ad_id=ad_id, page_name="TestBrand", image_path="assets/x.jpg",
+        blueprint={"format": "hero"}, generated_copy={"headline": "H"},
+        draft_image="assets/x_draft.png",
+        metadata={"cta": "Shop", "destination_url": "http://x"},
+        operator_instruction="make the background warmer",
+    )
+    try:
+        client = TestClient(dashboard.app)
+        r = client.get("/api/artifacts")
+        assert r.status_code == 200
+        body = r.json()
+        match = next(a for a in body if a["ad_id"] == ad_id)
+        assert match["operator_instruction"] == "make the background warmer"
+    finally:
+        with dedupe.get_conn() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM artifacts WHERE ad_id=%s", (ad_id,))
+            conn.commit()
+
+
+def test_api_artifacts_operator_instruction_empty_string_when_not_given(monkeypatch):
+    from src import dedupe
+    from fastapi.testclient import TestClient
+    import uuid
+
+    dedupe.init_artifacts()
+    ad_id = f"ART_{uuid.uuid4().hex[:8]}"
+    dedupe.save_artifact(
+        ad_id=ad_id, page_name="TestBrand", image_path="assets/x.jpg",
+        blueprint={"format": "hero"}, generated_copy={"headline": "H"},
+        draft_image="assets/x_draft.png",
+        metadata={"cta": "Shop", "destination_url": "http://x"},
+    )
+    try:
+        client = TestClient(dashboard.app)
+        r = client.get("/api/artifacts")
+        body = r.json()
+        match = next(a for a in body if a["ad_id"] == ad_id)
+        assert match["operator_instruction"] == ""
+    finally:
+        with dedupe.get_conn() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM artifacts WHERE ad_id=%s", (ad_id,))
+            conn.commit()
 
 
 def test_put_competitor_category_only_preserves_page_id(monkeypatch):

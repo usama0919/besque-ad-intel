@@ -265,6 +265,68 @@ def test_process_ad_does_not_forward_competitor_bytes_when_edit_mode_off(monkeyp
     assert captured["competitor_image_bytes"] is None
 
 
+# ---- Step 2 (2026-08-02): operator instruction field ----
+
+def test_process_ad_forwards_operator_instruction_to_generate_image(monkeypatch):
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+          "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    _mock_all_stages(monkeypatch)
+    captured = {}
+
+    def capture_image(bp, aid, **k):
+        captured.update(k)
+        return "draft.png"
+
+    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image", capture_image)
+
+    assert pipeline.process_ad(ad, operator_instruction="make the background warmer") == "processed"
+    assert captured["operator_instruction"] == "make the background warmer"
+
+
+def test_process_ad_persists_operator_instruction_on_artifact(monkeypatch):
+    """Auditability requirement: a reviewer looking at a wrong draft must be able to see
+    whether the operator asked for it - stored alongside image_prompt, not just used
+    transiently during generation."""
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+          "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    _mock_all_stages(monkeypatch)
+    captured = {}
+
+    def capture_save_artifact(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(pipeline.dedupe, "save_artifact", capture_save_artifact)
+
+    assert pipeline.process_ad(ad, operator_instruction="show the oil being poured") == "processed"
+    assert captured["operator_instruction"] == "show the oil being poured"
+
+
+def test_process_ad_persists_empty_operator_instruction_as_empty_string(monkeypatch):
+    """operator_instruction=None (no instruction given) must persist as "" - never as the
+    Python literal None reaching a NOT NULL-shaped column read back elsewhere as null."""
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+          "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    _mock_all_stages(monkeypatch)
+    captured = {}
+
+    def capture_save_artifact(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(pipeline.dedupe, "save_artifact", capture_save_artifact)
+
+    assert pipeline.process_ad(ad) == "processed"
+    assert captured["operator_instruction"] == ""
+
+
 def test_process_ad_warns_when_text_in_image_requested_but_headline_missing(monkeypatch):
     """If copy generation produces no usable headline (e.g. an empty string) while
     text_in_image was requested, rule 6 silently falls back to the blanket text ban -
@@ -477,7 +539,8 @@ def test_run_once_threads_realism_and_toggles_to_process_ad(monkeypatch):
     monkeypatch.setattr(pipeline, "process_ad", lambda ad, **kwargs: captured.append(kwargs) or "processed")
 
     pipeline.run_once(competitor_id=2, realism="ugc_native", text_in_image=True, include_product=False,
-                       body_area="knees", offer_text="20% off launch week")
+                       body_area="knees", offer_text="20% off launch week", edit_mode=True,
+                       operator_instruction="make the background warmer")
 
     assert len(captured) == 1
     assert captured[0]["realism"] == "ugc_native"
@@ -485,6 +548,8 @@ def test_run_once_threads_realism_and_toggles_to_process_ad(monkeypatch):
     assert captured[0]["include_product"] is False
     assert captured[0]["body_area"] == "knees"
     assert captured[0]["offer_text"] == "20% off launch week"
+    assert captured[0]["edit_mode"] is True
+    assert captured[0]["operator_instruction"] == "make the background warmer"
 
 
 def test_run_once_body_area_is_independent_of_angle_body_area(monkeypatch):
