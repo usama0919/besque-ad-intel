@@ -245,6 +245,51 @@ def test_update_artifact_findings_replaces_wholesale():
             conn.commit()
 
 
+# ---- Prompt 4, Item 4: format_flag round-trips through save_artifact/get_artifacts_full ----
+
+def test_save_artifact_persists_format_flag():
+    from src import dedupe
+    import uuid
+    dedupe.init_artifacts()
+    ad_id = f"ART_{uuid.uuid4().hex[:8]}"
+    try:
+        dedupe.save_artifact(
+            ad_id=ad_id, page_name="TestBrand", image_path="assets/x.jpg",
+            blueprint={"format": "offer_led"}, generated_copy={"headline": "H"},
+            draft_image="assets/x_draft.png",
+            metadata={"cta": "Shop", "destination_url": "http://x"},
+            format_flag="reference was a 6-product bundle offer",
+        )
+        rows = dedupe.get_artifacts_full(limit=500)
+        match = next(r for r in rows if r["ad_id"] == ad_id)
+        assert match["format_flag"] == "reference was a 6-product bundle offer"
+    finally:
+        with dedupe.get_conn() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM artifacts WHERE ad_id=%s", (ad_id,))
+            conn.commit()
+
+
+def test_save_artifact_format_flag_defaults_to_empty_string():
+    from src import dedupe
+    import uuid
+    dedupe.init_artifacts()
+    ad_id = f"ART_{uuid.uuid4().hex[:8]}"
+    try:
+        dedupe.save_artifact(
+            ad_id=ad_id, page_name="TestBrand", image_path="assets/x.jpg",
+            blueprint={"format": "hero"}, generated_copy={"headline": "H"},
+            draft_image="assets/x_draft.png",
+            metadata={"cta": "Shop", "destination_url": "http://x"},
+        )
+        rows = dedupe.get_artifacts_full(limit=500)
+        match = next(r for r in rows if r["ad_id"] == ad_id)
+        assert match["format_flag"] == ""
+    finally:
+        with dedupe.get_conn() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM artifacts WHERE ad_id=%s", (ad_id,))
+            conn.commit()
+
+
 def test_get_artifact_returns_angle_id_and_text_in_image():
     """dashboard.py's api_edit_image reads these back to restore the original generation's
     rule-6 mode on edit - get_artifact must actually return them, not just accept angle_id

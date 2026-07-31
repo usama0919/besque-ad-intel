@@ -88,6 +88,43 @@ def test_process_ad_does_not_hard_block_ordinary_skincare_reference(monkeypatch)
     assert pipeline.process_ad(ad) == "processed"
 
 
+# ---- Prompt 4, Item 4: format flag - FLAG, never a filter, always processed normally ----
+
+def test_process_ad_persists_format_flag_when_reference_is_a_bundle(monkeypatch):
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+          "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    _mock_all_stages(monkeypatch)
+    monkeypatch.setattr(pipeline.deconstruct, "deconstruct_image", lambda **k: {
+        "format": "offer_led",
+        "layout_detail": {"product_count": 6},
+        "offer": {"mechanic": "5 for $109 bundle"},
+        "product_category": {"category": "body_oil", "signals": []},
+        "visual": {"subject": "six bottles arranged in a range"},
+    })
+    captured = {}
+    monkeypatch.setattr(pipeline.dedupe, "save_artifact", lambda **k: captured.update(k))
+
+    assert pipeline.process_ad(ad) == "processed"  # a flag never blocks or fails the ad
+    assert captured["format_flag"] == "reference was a 6-product bundle offer"
+
+
+def test_process_ad_format_flag_empty_string_when_no_mismatch(monkeypatch):
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+          "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    _mock_all_stages(monkeypatch)
+    captured = {}
+    monkeypatch.setattr(pipeline.dedupe, "save_artifact", lambda **k: captured.update(k))
+
+    assert pipeline.process_ad(ad) == "processed"
+    assert captured["format_flag"] == ""
+
+
 def test_process_ad_passes_product_to_copy_and_image(monkeypatch):
     """Regression guard. run_once resolved the product and process_ad forwarded it to
     generate_image but NOT to generate_copy_live, so every copy prompt rendered

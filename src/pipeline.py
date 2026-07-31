@@ -5,7 +5,7 @@ ad or failed stage is skipped cleanly without stopping the run.
 """
 import os
 import logging
-from src import dedupe, scrape, assets, deconstruct, generate_copy, generate_image_prompt, slack_review, compliance, output_critic, content_safety
+from src import dedupe, scrape, assets, deconstruct, generate_copy, generate_image_prompt, slack_review, compliance, output_critic, content_safety, reference_format
 from src.retry import with_retry
 
 FORCE_REPROCESS = os.getenv("FORCE_REPROCESS") == "1"
@@ -143,6 +143,12 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
             dedupe.mark_seen(ad_id, ad.get("page_name", ""), angle_id)
             return "skipped"
 
+        # Format flag (Prompt 4, Item 4): a FLAG, never a filter - computed purely from
+        # blueprint data already extracted (no vision call), carried through to
+        # save_artifact below regardless of what happens next, so it's on the card
+        # whether the ad is approved, rejected, or still pending.
+        format_flag = reference_format.format_flag_reason(blueprint) or ""
+
         MAX_COPY_ATTEMPTS = 2
         ok, issues = False, []
         for copy_attempt in range(1, MAX_COPY_ATTEMPTS + 1):
@@ -226,6 +232,7 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
             angle_id=angle_id,
             text_in_image=text_in_image,
             operator_instruction=operator_instruction or "",
+            format_flag=format_flag,
         )
 
         if check_output:

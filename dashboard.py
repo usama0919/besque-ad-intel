@@ -92,6 +92,10 @@ def api_artifacts():
             # Output critic (Prompt 4, Item 1): surface, never act - these are shown on
             # the card for a human to weigh, never auto-rejected or auto-regenerated.
             "critic_findings": r.get("critic_findings") or [],
+            # Reference-format flag (Prompt 4, Item 4): a FLAG, never a filter - the
+            # reference's own composition argued for a multi-product/bundle message that
+            # rule 7 collapsed to one Besque bottle.
+            "format_flag": r.get("format_flag") or "",
         })
     return JSONResponse(out)
 

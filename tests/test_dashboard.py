@@ -449,6 +449,59 @@ def test_api_artifacts_critic_findings_empty_list_when_not_checked(monkeypatch):
             conn.commit()
 
 
+def test_api_artifacts_surfaces_format_flag(monkeypatch):
+    """Prompt 4, Item 4: the flag must reach the card - surface, never filter."""
+    from src import dedupe
+    from fastapi.testclient import TestClient
+    import uuid
+
+    dedupe.init_artifacts()
+    ad_id = f"ART_{uuid.uuid4().hex[:8]}"
+    dedupe.save_artifact(
+        ad_id=ad_id, page_name="TestBrand", image_path="assets/x.jpg",
+        blueprint={"format": "offer_led"}, generated_copy={"headline": "H"},
+        draft_image="assets/x_draft.png",
+        metadata={"cta": "Shop", "destination_url": "http://x"},
+        format_flag="reference was a 6-product bundle offer",
+    )
+    try:
+        client = TestClient(dashboard.app)
+        r = client.get("/api/artifacts")
+        assert r.status_code == 200
+        body = r.json()
+        match = next(a for a in body if a["ad_id"] == ad_id)
+        assert match["format_flag"] == "reference was a 6-product bundle offer"
+    finally:
+        with dedupe.get_conn() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM artifacts WHERE ad_id=%s", (ad_id,))
+            conn.commit()
+
+
+def test_api_artifacts_format_flag_empty_string_when_no_mismatch(monkeypatch):
+    from src import dedupe
+    from fastapi.testclient import TestClient
+    import uuid
+
+    dedupe.init_artifacts()
+    ad_id = f"ART_{uuid.uuid4().hex[:8]}"
+    dedupe.save_artifact(
+        ad_id=ad_id, page_name="TestBrand", image_path="assets/x.jpg",
+        blueprint={"format": "hero"}, generated_copy={"headline": "H"},
+        draft_image="assets/x_draft.png",
+        metadata={"cta": "Shop", "destination_url": "http://x"},
+    )
+    try:
+        client = TestClient(dashboard.app)
+        r = client.get("/api/artifacts")
+        body = r.json()
+        match = next(a for a in body if a["ad_id"] == ad_id)
+        assert match["format_flag"] == ""
+    finally:
+        with dedupe.get_conn() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM artifacts WHERE ad_id=%s", (ad_id,))
+            conn.commit()
+
+
 def test_put_competitor_category_only_preserves_page_id(monkeypatch):
     import uuid
     from src import dedupe
