@@ -59,6 +59,18 @@ def test_build_prompt_production_style_options_match_validator():
     assert "illustrated" in prompt
 
 
+def test_build_prompt_instructs_naming_medical_signals_explicitly():
+    """Prompt 4, Item 3: content_safety.hard_block_reason reads product_category.signals
+    for medical/clinical/anatomical keywords - this only works if the classifier prompt
+    actually instructs Claude to name that content explicitly there, rather than folding
+    it silently into a generic "other"/"not_product" classification."""
+    prompt = deconstruct.build_prompt("AD1", "PageX", "2026-01-01")
+    assert "medical" in prompt.lower()
+    assert "anatomical" in prompt.lower()
+    assert "intimate-health" in prompt.lower() or "intimate health" in prompt.lower()
+    assert "hard-block" in prompt.lower() or "hard block" in prompt.lower()
+
+
 def test_build_prompt_includes_new_creative_fields_without_format_error():
     """Part B: creative_objective/target_audience/typography/expanded layout_detail were
     added to BLUEPRINT_PROMPT, which is itself run through .format() in build_prompt() -

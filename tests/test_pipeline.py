@@ -38,6 +38,56 @@ def test_process_ad_full_flow_mocked(monkeypatch):
     assert dedupe.is_new(ad_id) is False
 
 
+# ---- Prompt 4, Item 3: hard-block medical/clinical/anatomical references BEFORE
+# generation - not a judgment call, so this skips outright, never flags for review ----
+
+def test_process_ad_hard_blocks_medical_reference_before_generation(monkeypatch):
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    dedupe.init_pipeline_warnings()
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+          "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    monkeypatch.setattr(pipeline.assets, "download_image", lambda url, aid: "fake.jpg")
+    monkeypatch.setattr(pipeline.assets, "download_image_bytes", lambda url: b"fake-bytes")
+    monkeypatch.setattr(pipeline.deconstruct, "deconstruct_image", lambda **k: {
+        "format": "before_after",
+        "product_category": {"category": "not_product",
+                             "signals": ["hemorrhoid treatment demonstration"]},
+        "visual": {"subject": "anatomical before/after illustration"},
+    })
+    copy_calls = []
+    image_calls = []
+    monkeypatch.setattr(pipeline.generate_copy, "generate_copy_live", lambda *a, **k: copy_calls.append(1))
+    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image", lambda *a, **k: image_calls.append(1))
+    warnings = []
+    monkeypatch.setattr(pipeline.dedupe, "record_warning", lambda kind, detail: warnings.append((kind, detail)))
+
+    assert pipeline.process_ad(ad) == "skipped"
+    assert copy_calls == []  # never reaches copy generation
+    assert image_calls == []  # never reaches image generation
+    assert any(kind == "hard_blocked_medical" for kind, detail in warnings)
+    assert dedupe.is_new(ad_id) is False  # marked seen - never re-analysed on a future run
+
+
+def test_process_ad_does_not_hard_block_ordinary_skincare_reference(monkeypatch):
+    """Regression guard: the hard block must not become a blanket "not_product" filter -
+    an ordinary tester/ambassador-recruitment ad (no medical signal) must proceed normally."""
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+          "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    _mock_all_stages(monkeypatch)
+    monkeypatch.setattr(pipeline.deconstruct, "deconstruct_image", lambda **k: {
+        "format": "founder_story",
+        "product_category": {"category": "not_product", "signals": ["ambassador recruitment"]},
+        "visual": {"subject": "founder telling her brand story"},
+    })
+
+    assert pipeline.process_ad(ad) == "processed"
+
+
 def test_process_ad_passes_product_to_copy_and_image(monkeypatch):
     """Regression guard. run_once resolved the product and process_ad forwarded it to
     generate_image but NOT to generate_copy_live, so every copy prompt rendered

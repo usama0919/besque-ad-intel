@@ -5,7 +5,7 @@ ad or failed stage is skipped cleanly without stopping the run.
 """
 import os
 import logging
-from src import dedupe, scrape, assets, deconstruct, generate_copy, generate_image_prompt, slack_review, compliance, output_critic
+from src import dedupe, scrape, assets, deconstruct, generate_copy, generate_image_prompt, slack_review, compliance, output_critic, content_safety
 from src.retry import with_retry
 
 FORCE_REPROCESS = os.getenv("FORCE_REPROCESS") == "1"
@@ -126,6 +126,23 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
             ad_text=ad.get("text", ""),
             cta=ad.get("cta", ""),
         )
+
+        # Hard block (Prompt 4, Item 3): a medical/clinical/intimate-health/anatomically
+        # explicit reference must never be cloned - not a judgment call for a human to
+        # weigh (unlike output_critic below), so this skips BEFORE any generation starts.
+        # mark_seen here too, or this ad would burn a fresh deconstruct_image vision call
+        # (and get hard-blocked again) every single future run that scrapes it.
+        block_reason = content_safety.hard_block_reason(blueprint)
+        if block_reason:
+            log.warning("Ad %s hard-blocked before generation: %s", ad_id, block_reason)
+            dedupe.init_pipeline_warnings()
+            dedupe.record_warning(
+                "hard_blocked_medical",
+                f"Ad {ad_id} ({ad.get('page_name', '?')}): {block_reason}",
+            )
+            dedupe.mark_seen(ad_id, ad.get("page_name", ""), angle_id)
+            return "skipped"
+
         MAX_COPY_ATTEMPTS = 2
         ok, issues = False, []
         for copy_attempt in range(1, MAX_COPY_ATTEMPTS + 1):
