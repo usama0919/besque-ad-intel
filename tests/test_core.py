@@ -89,6 +89,15 @@ def test_production_styles_returns_canonical_list():
     assert set(styles) == {"ugc_native", "high_spec_studio", "hybrid", "illustrated"}
 
 
+def test_creative_formats_returns_canonical_list():
+    formats = validator.creative_formats()
+    assert set(formats) == {
+        "testimonial_review", "before_after", "problem_solution", "product_hero",
+        "offer_led", "comparison", "listicle_tips", "founder_story",
+        "ingredient_focus", "lifestyle_scene", "text_led_editorial",
+    }
+
+
 def test_illustrated_production_style_validates():
     """glp1's seeded default_realism is "illustrated" - this is the prerequisite check
     that a blueprint carrying it doesn't fail schema validation."""
@@ -313,3 +322,35 @@ def test_get_artifact_returns_angle_id_and_text_in_image():
         with dedupe.get_conn() as conn, conn.cursor() as cur:
             cur.execute("DELETE FROM artifacts WHERE ad_id=%s", (ad_id,))
             conn.commit()
+
+
+# ---- Prompt 4, Item 5: brand_settings - single-row, self-migrating, editable palette ----
+
+def test_brand_settings_defaults_to_besque_palette():
+    from src import dedupe
+    dedupe.init_brand_settings()
+    settings = dedupe.get_brand_settings()
+    assert settings["palette"] == dedupe.DEFAULT_PALETTE
+    assert "terracotta" in settings["palette"]
+
+
+def test_update_brand_settings_persists_new_palette():
+    from src import dedupe
+    dedupe.init_brand_settings()
+    original = dedupe.get_brand_settings()["palette"]
+    try:
+        dedupe.update_brand_settings("sage, cream, gold")
+        assert dedupe.get_brand_settings()["palette"] == "sage, cream, gold"
+    finally:
+        dedupe.update_brand_settings(original)  # restore - single shared row
+
+
+def test_update_brand_settings_falls_back_to_default_when_blank():
+    from src import dedupe
+    dedupe.init_brand_settings()
+    original = dedupe.get_brand_settings()["palette"]
+    try:
+        dedupe.update_brand_settings("")
+        assert dedupe.get_brand_settings()["palette"] == dedupe.DEFAULT_PALETTE
+    finally:
+        dedupe.update_brand_settings(original)

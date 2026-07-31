@@ -332,3 +332,162 @@ def test_edit_mode_instruction_bans_efficacy_claims_unconditionally():
 def test_build_image_prompt_edit_mode_forwards_efficacy_ban():
     prompt = generate_image_prompt.build_image_prompt(_blueprint(), edit_mode=True)
     assert "describe NO quantified efficacy claim of any kind" in prompt
+
+
+# ---- Prompt 4, Item 5: colour palette substitution - ONE integrated instruction, not
+# two competing ones. Contradictory prompt sections have caused every image failure this
+# session, so geometry-preserved and colour-substituted must read as a single instruction. ----
+
+def test_retheme_colours_on_states_one_integrated_instruction():
+    instruction = generate_image_prompt._edit_mode_instruction(retheme_colours=True)
+    assert "geometry is preserved, colour is substituted" in instruction
+    assert "not two competing ones" in instruction
+    # The preserved-geometry list and the colour-substitution clause appear in the SAME
+    # sentence set - "colour palette" must NOT survive as something to reproduce, or it
+    # would directly contradict the substitution instruction just stated.
+    assert "colour palette" not in instruction
+
+
+def test_retheme_colours_on_lists_geometry_elements_preserved():
+    instruction = generate_image_prompt._edit_mode_instruction(retheme_colours=True)
+    for element in ("composition", "camera angle", "spacing", "lighting direction",
+                    "contrast relationships", "tonal hierarchy"):
+        assert element in instruction.lower()
+
+
+def test_retheme_colours_on_names_the_palette():
+    instruction = generate_image_prompt._edit_mode_instruction(
+        retheme_colours=True, palette="terracotta, maroon, gold, cream"
+    )
+    assert "terracotta, maroon, gold, cream" in instruction
+
+
+def test_retheme_colours_on_default_palette_when_none_given():
+    instruction = generate_image_prompt._edit_mode_instruction(retheme_colours=True, palette=None)
+    assert "terracotta, maroon, gold, cream" in instruction
+
+
+def test_retheme_colours_off_reverts_to_original_wording_exactly():
+    """The doc's own stated exception, and the faithful-clone behaviour already
+    validated in production - must revert byte-for-byte to what shipped before Item 5."""
+    instruction = generate_image_prompt._edit_mode_instruction(retheme_colours=False)
+    assert "colour palette" in instruction
+    assert "geometry is preserved, colour is substituted" not in instruction
+    assert "Remove the competitor's product entirely and place the Besque product" in instruction
+
+
+def test_retheme_colours_still_removes_competitor_product_and_substitutes_ours():
+    """The colour rewrite must not accidentally break the product-substitution branch it
+    now precedes."""
+    instruction = generate_image_prompt._edit_mode_instruction(retheme_colours=True)
+    assert "Remove the competitor's product entirely and place the Besque product" in instruction
+
+
+def test_build_image_prompt_edit_mode_forwards_retheme_and_palette():
+    prompt = generate_image_prompt.build_image_prompt(
+        _blueprint(), edit_mode=True, retheme_colours=True, brand_palette="terracotta, maroon, gold, cream"
+    )
+    assert "terracotta, maroon, gold, cream" in prompt
+    assert "geometry is preserved, colour is substituted" in prompt
+
+
+def test_build_image_prompt_edit_mode_retheme_false_reverts():
+    prompt = generate_image_prompt.build_image_prompt(_blueprint(), edit_mode=True, retheme_colours=False)
+    assert "colour palette" in prompt
+    assert "geometry is preserved, colour is substituted" not in prompt
+
+
+def test_build_image_prompt_non_edit_mode_unaffected_by_retheme_colours():
+    """retheme_colours only matters in edit_mode - the template/writer paths must be
+    byte-identical regardless of its value."""
+    bp = _blueprint()
+    assert (generate_image_prompt.build_image_prompt(bp, retheme_colours=True)
+            == generate_image_prompt.build_image_prompt(bp, retheme_colours=False))
+
+
+# ---- Typography: map creative_format to OUR typeface, never copy the reference's ----
+
+def test_typography_guidance_used_in_text_branch():
+    instruction = generate_image_prompt._edit_mode_instruction(
+        text_in_image=True, headline="Firmer Skin By Friday", creative_format="product_hero"
+    )
+    assert "elegant serif" in instruction
+    assert "never the reference's own font" in instruction
+
+
+def test_typography_guidance_varies_by_creative_format():
+    direct_response = generate_image_prompt._edit_mode_instruction(
+        text_in_image=True, headline="H", creative_format="offer_led"
+    )
+    assert "clean, bold sans-serif" in direct_response
+
+    premium = generate_image_prompt._edit_mode_instruction(
+        text_in_image=True, headline="H", creative_format="founder_story"
+    )
+    assert "elegant serif" in premium
+
+    testimonial = generate_image_prompt._edit_mode_instruction(
+        text_in_image=True, headline="H", creative_format="testimonial_review"
+    )
+    assert "handwritten marker" in testimonial
+
+
+def test_typography_guidance_default_when_creative_format_missing():
+    instruction = generate_image_prompt._edit_mode_instruction(
+        text_in_image=True, headline="H", creative_format=None
+    )
+    assert "clean sans-serif - versatile, legible default" in instruction
+
+
+def test_typography_guidance_absent_when_no_text_rendered():
+    instruction = generate_image_prompt._edit_mode_instruction(text_in_image=False, creative_format="product_hero")
+    assert "elegant serif" not in instruction
+
+
+def test_typography_guidance_has_every_creative_format():
+    from src import validator
+    for fmt in validator.creative_formats():
+        assert fmt in generate_image_prompt.TYPOGRAPHY_GUIDANCE
+
+
+def test_build_image_prompt_edit_mode_reads_creative_format_from_blueprint():
+    bp = _blueprint()
+    bp["creative_format"] = "founder_story"
+    prompt = generate_image_prompt.build_image_prompt(bp, edit_mode=True, text_in_image=True, headline="H")
+    assert "elegant serif" in prompt
+
+
+# ---- generate_image(): palette fetched from brand_settings only when it will be used ----
+
+def test_generate_image_fetches_palette_when_edit_mode_and_retheme_on(monkeypatch, tmp_path):
+    from src import dedupe
+    monkeypatch.setattr(generate_image_prompt, "genai", type("obj", (), {"Client": _CapturingGenaiClient}))
+    monkeypatch.setattr(generate_image_prompt, "ASSET_DIR", tmp_path)
+    calls = []
+    monkeypatch.setattr(dedupe, "get_brand_settings", lambda: calls.append(1) or {"palette": "custom test palette"})
+
+    generate_image_prompt.generate_image(_blueprint(), "AD_PALETTE", edit_mode=True, retheme_colours=True)
+    assert calls == [1]
+    assert "custom test palette" in generate_image_prompt.generate_image.last_prompt
+
+
+def test_generate_image_does_not_fetch_palette_when_retheme_off(monkeypatch, tmp_path):
+    from src import dedupe
+    monkeypatch.setattr(generate_image_prompt, "genai", type("obj", (), {"Client": _CapturingGenaiClient}))
+    monkeypatch.setattr(generate_image_prompt, "ASSET_DIR", tmp_path)
+    calls = []
+    monkeypatch.setattr(dedupe, "get_brand_settings", lambda: calls.append(1) or {"palette": "should not be used"})
+
+    generate_image_prompt.generate_image(_blueprint(), "AD_NO_RETHEME", edit_mode=True, retheme_colours=False)
+    assert calls == []
+
+
+def test_generate_image_does_not_fetch_palette_when_not_edit_mode(monkeypatch, tmp_path):
+    from src import dedupe
+    monkeypatch.setattr(generate_image_prompt, "genai", type("obj", (), {"Client": _CapturingGenaiClient}))
+    monkeypatch.setattr(generate_image_prompt, "ASSET_DIR", tmp_path)
+    calls = []
+    monkeypatch.setattr(dedupe, "get_brand_settings", lambda: calls.append(1) or {"palette": "should not be used"})
+
+    generate_image_prompt.generate_image(_blueprint(), "AD_NO_EDIT", edit_mode=False, retheme_colours=True)
+    assert calls == []

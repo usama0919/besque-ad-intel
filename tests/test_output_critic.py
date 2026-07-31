@@ -56,6 +56,35 @@ def test_critic_system_lists_every_required_check():
         assert c in critic.CRITIC_SYSTEM
 
 
+# ---- Rule-ID coverage (drift guard): the checklist is hand-written, not generated from
+# brand_rules()/compliance_rules.py's actual text - these citations are the only thing
+# tying it back to the real rule numbering, so they must survive future edits ----
+
+def test_critic_system_cites_every_rule_id_it_claims_to_cover():
+    for rule_id in critic.CITED_RULE_IDS:
+        assert rule_id in critic.CRITIC_SYSTEM
+
+
+def test_critic_system_cites_rule_9_next_to_competitor_marks():
+    assert "(rule 9)" in critic.CRITIC_SYSTEM
+
+
+def test_critic_system_cites_rule_7_next_to_product_count():
+    assert "(rule 7)" in critic.CRITIC_SYSTEM
+
+
+def test_critic_system_cites_rule_6_next_to_text_state():
+    assert "(rule 6)" in critic.CRITIC_SYSTEM
+
+
+def test_critic_system_cites_c2_next_to_testimonial():
+    assert "(C2)" in critic.CRITIC_SYSTEM
+
+
+def test_critic_system_cites_c3_next_to_efficacy_claim():
+    assert "C3" in critic.CRITIC_SYSTEM
+
+
 # ---- check_draft: never raises, filters confidence, parses JSON ----
 
 class _FakeMessage:

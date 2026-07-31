@@ -42,24 +42,39 @@ CRITIC_SYSTEM = (
     "{\"violations\": [{\"category\": \"...\", \"description\": \"...\", \"confidence\": "
     "\"high\"|\"medium\"|\"low\"}, ...]} - an empty violations array if you find nothing.\n\n"
     "Check specifically for:\n"
-    "- a competitor logo, seal, badge, or brand mark anywhere in the image\n"
-    "- a competitor brand or product name in any rendered text\n"
-    "- an unauthorised offer, price, discount, promo code, scarcity, or stock-count claim\n"
+    "- a competitor logo, seal, badge, or brand mark anywhere in the image (rule 9)\n"
+    "- a competitor brand or product name in any rendered text (rules 1-2)\n"
+    "- an unauthorised offer, price, discount, promo code, scarcity, or stock-count claim "
+    "(the OFFER instruction)\n"
     "- a quantified efficacy claim (a percentage, ratio, or \"X% more\"-style claim) not "
-    "explicitly authorised below\n"
-    "- a testimonial, quote, or star rating\n"
+    "explicitly authorised below (C3, the EFFICACY CLAIMS instruction)\n"
+    "- a testimonial, quote, or star rating (C2)\n"
     "- a Besque product present when none was authorised, or more than one product where "
-    "only one was authorised\n"
+    "only one was authorised (rule 7)\n"
     "- a product-derived substance (a drip, pour, pool, or smear) in the wrong colour for "
-    "the actual Besque product described below\n"
+    "the actual Besque product described below (the product-substance instruction)\n"
     "- an empty graphic container (a badge, oval, bubble, banner, or ribbon) with no "
     "content\n"
     "- garbled or illegible rendered text\n"
-    "- text rendered when none was authorised below, or missing when it was authorised\n\n"
+    "- text rendered when none was authorised below, or missing when it was authorised "
+    "(rule 6)\n\n"
     "Treat a hit in these categories as HIGH confidence by default unless you are quite "
     "sure it's a false read: unauthorised offer, scarcity claim, promo code, efficacy "
     "claim, testimonial. These are the exact categories that have shipped in real drafts "
     "before this check existed."
+)
+
+# CRITIC_SYSTEM is an INDEPENDENTLY hand-written checklist, not generated from
+# brand_rules()/compliance_rules.py's actual text - flagged as a real drift risk: if those
+# rules are renumbered, reworded, or removed later and nobody updates this checklist to
+# match, the critic keeps citing a rule that no longer says what it claims. This is a
+# tripwire, not a fix for that risk - it only catches the citation disappearing from
+# CRITIC_SYSTEM's own text, not the cited rule drifting out of sync with brand_rules()
+# itself. See test_output_critic.py's rule-citation tests.
+CITED_RULE_IDS = ("rule 9", "rules 1-2", "C3", "C2", "rule 7", "rule 6")
+assert all(rule_id in CRITIC_SYSTEM for rule_id in CITED_RULE_IDS), (
+    "CRITIC_SYSTEM no longer cites one of CITED_RULE_IDS - the checklist and the actual "
+    "rule numbering have drifted apart"
 )
 
 

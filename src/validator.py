@@ -27,6 +27,13 @@ def production_styles() -> list[str]:
     )
 
 
+def creative_formats() -> list[str]:
+    """The creative_format enum, read from the schema for the same reason as
+    production_styles() above - generate_image_prompt_writer.py's TYPOGRAPHY_GUIDANCE
+    lookup (Prompt 4, Item 5) asserts it covers every value here, so the two can't drift."""
+    return list(_SCHEMA["properties"]["creative_format"]["enum"])
+
+
 def is_valid(blueprint: dict) -> bool:
     """Return True if the blueprint matches the schema, else False."""
     try:

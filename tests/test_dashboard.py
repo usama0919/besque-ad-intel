@@ -75,7 +75,7 @@ def test_api_run_local_starts_background_thread_and_returns_immediately(monkeypa
                               angle_id=7, realism="ugc_native", text_in_image=True,
                               include_product=False, body_area="knees", offer_text="20% off",
                               edit_mode=True, operator_instruction="make the background warmer",
-                              check_output=True)
+                              check_output=True, retheme_colours=False)
     import json
     body = json.loads(resp.body)
     assert body == {"ok": True, "started": True}
@@ -98,6 +98,7 @@ def test_api_run_local_starts_background_thread_and_returns_immediately(monkeypa
     assert captured["edit_mode"] is True
     assert captured["operator_instruction"] == "make the background warmer"
     assert captured["check_output"] is True
+    assert captured["retheme_colours"] is False
 
     assert dashboard._run_status["running"] is False
     assert dashboard._run_status["last_summary"] == {"processed": 1, "skipped": 0, "failed": 0}
@@ -190,7 +191,7 @@ def test_api_run_job_path_ignores_category_in_env_vars(monkeypatch):
     assert set(env_names) == {
         "RUN_COMPETITOR_ID", "RUN_MAX_PER_COMPETITOR", "RUN_PRODUCT_ID", "RUN_ANGLE_ID",
         "RUN_REALISM", "RUN_TEXT_IN_IMAGE", "RUN_INCLUDE_PRODUCT", "RUN_BODY_AREA", "RUN_OFFER_TEXT",
-        "RUN_EDIT_MODE", "RUN_INSTRUCTION", "RUN_CHECK_OUTPUT",
+        "RUN_EDIT_MODE", "RUN_INSTRUCTION", "RUN_CHECK_OUTPUT", "RUN_RETHEME_COLOURS",
     }
 
 
@@ -234,6 +235,20 @@ def test_api_run_job_path_check_output_env_var(monkeypatch):
     dashboard.api_run(n=2, competitor_id=5, check_output=False)
     env = {e.name: e.value for e in _FakeJobsClient.last_request.overrides.container_overrides[0].env}
     assert env["RUN_CHECK_OUTPUT"] == "0"
+
+
+def test_api_run_job_path_retheme_colours_env_var(monkeypatch):
+    monkeypatch.delenv("LOCAL_RUN", raising=False)
+    _reset_run_status()
+    _install_fake_run_v2(monkeypatch, jobs_client=_FakeJobsClient)
+
+    dashboard.api_run(n=2, competitor_id=5, retheme_colours=True)
+    env = {e.name: e.value for e in _FakeJobsClient.last_request.overrides.container_overrides[0].env}
+    assert env["RUN_RETHEME_COLOURS"] == "1"
+
+    dashboard.api_run(n=2, competitor_id=5, retheme_colours=False)
+    env = {e.name: e.value for e in _FakeJobsClient.last_request.overrides.container_overrides[0].env}
+    assert env["RUN_RETHEME_COLOURS"] == "0"
 
 
 # ---- /api/run/status ----
@@ -520,3 +535,36 @@ def test_put_competitor_category_only_preserves_page_id(monkeypatch):
         assert row["category"] == "body_oil"
     finally:
         dedupe.delete_competitor(cid)
+
+
+# ---- Prompt 4, Item 5: /api/brand_settings - palette is DATA, editable from the UI ----
+
+def test_api_brand_settings_get_returns_current_palette(monkeypatch):
+    from src import dedupe
+    from fastapi.testclient import TestClient
+
+    dedupe.init_brand_settings()
+    original = dedupe.get_brand_settings()["palette"]
+    try:
+        client = TestClient(dashboard.app)
+        r = client.get("/api/brand_settings")
+        assert r.status_code == 200
+        assert r.json()["palette"] == original
+    finally:
+        dedupe.update_brand_settings(original)
+
+
+def test_api_brand_settings_post_updates_palette(monkeypatch):
+    from src import dedupe
+    from fastapi.testclient import TestClient
+
+    dedupe.init_brand_settings()
+    original = dedupe.get_brand_settings()["palette"]
+    try:
+        client = TestClient(dashboard.app)
+        r = client.post("/api/brand_settings", json={"palette": "sage, cream, gold"})
+        assert r.status_code == 200
+        assert r.json()["palette"] == "sage, cream, gold"
+        assert dedupe.get_brand_settings()["palette"] == "sage, cream, gold"
+    finally:
+        dedupe.update_brand_settings(original)

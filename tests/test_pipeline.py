@@ -125,6 +125,46 @@ def test_process_ad_format_flag_empty_string_when_no_mismatch(monkeypatch):
     assert captured["format_flag"] == ""
 
 
+# ---- Prompt 4, Item 5: retheme_colours threads through to generate_image ----
+
+def test_process_ad_forwards_retheme_colours_to_generate_image(monkeypatch):
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+          "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    _mock_all_stages(monkeypatch)
+    captured = {}
+
+    def capture_image(bp, aid, **k):
+        captured.update(k)
+        return "draft.png"
+
+    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image", capture_image)
+
+    assert pipeline.process_ad(ad, retheme_colours=False) == "processed"
+    assert captured["retheme_colours"] is False
+
+
+def test_process_ad_retheme_colours_defaults_true(monkeypatch):
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+          "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    _mock_all_stages(monkeypatch)
+    captured = {}
+
+    def capture_image(bp, aid, **k):
+        captured.update(k)
+        return "draft.png"
+
+    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image", capture_image)
+
+    assert pipeline.process_ad(ad) == "processed"
+    assert captured["retheme_colours"] is True
+
+
 def test_process_ad_passes_product_to_copy_and_image(monkeypatch):
     """Regression guard. run_once resolved the product and process_ad forwarded it to
     generate_image but NOT to generate_copy_live, so every copy prompt rendered

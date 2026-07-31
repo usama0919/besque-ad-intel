@@ -555,6 +555,46 @@ def get_run_progress():
                 "competitor_total": r[2] or 0, "updated_at": r[3]}
 
 
+# ---- Brand settings (Prompt 4, Item 5) - single-row, self-migrating, editable from the
+# UI. Palette substitution ("re-themed to Besque's terracotta/maroon/gold/cream palette")
+# must be DATA, not a hardcoded string in generate_image_prompt.py, so a future correction
+# in the UI takes effect immediately, the same reasoning as products.visual_description
+# (Step 3, Part 3's verification). ----
+
+DEFAULT_PALETTE = "terracotta, maroon, gold, cream"
+
+
+def init_brand_settings():
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS brand_settings (
+                id          INTEGER PRIMARY KEY DEFAULT 1,
+                palette     TEXT DEFAULT '{DEFAULT_PALETTE}',
+                updated_at  TIMESTAMPTZ DEFAULT now()
+            )
+        """)
+        cur.execute("INSERT INTO brand_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING")
+        conn.commit()
+
+
+def get_brand_settings():
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT palette FROM brand_settings WHERE id=1")
+        r = cur.fetchone()
+        if r is None:
+            return {"palette": DEFAULT_PALETTE}
+        return {"palette": r[0] or DEFAULT_PALETTE}
+
+
+def update_brand_settings(palette):
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "UPDATE brand_settings SET palette=%s, updated_at=now() WHERE id=1",
+            (palette or DEFAULT_PALETTE,),
+        )
+        conn.commit()
+
+
 def update_artifact_copy(ad_id, generated_copy, angle_id=None):
     """Replace the generated copy for one (ad_id, angle_id) artifact. Without angle_id,
     a plain WHERE ad_id=%s UPDATE would rewrite every angle-variant row sharing that

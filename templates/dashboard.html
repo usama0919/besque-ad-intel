@@ -228,6 +228,13 @@
   <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#555;" title="After generation, ask Claude what the draft actually violates (competitor logos, unauthorised offers, fabricated claims/testimonials, etc.) and flag it on the card - never auto-rejects or auto-regenerates.">
     <input type="checkbox" id="checkOutputToggle" onchange="updateProjectedTotal()" style="width:auto;"> Check output
   </label>
+  <!-- Prompt 4, Item 5: on by default per the team's own doc ("re-themed to Besque's
+       palette... unless the angle specifically calls for something else") - the operator
+       disables it per run for that stated exception, which also protects the
+       faithful-clone (edit mode's original) behaviour already validated in production. -->
+  <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#555;" title="Re-map the reference's colours to Besque's palette (edit mode only) - geometry is preserved, only colour is substituted. Turn off to clone the reference's own colours faithfully.">
+    <input type="checkbox" id="rethemeColoursToggle" checked style="width:auto;"> Re-theme colours
+  </label>
   <!-- Step 2: freeform per-run steering. Sits in a fixed position in the assembled prompt
        (below brand rules/compliance/rules 6/7/9, above the writer's own composition/mood/
        framing choices - see generate_image_prompt._operator_instruction_clause) so it can
@@ -283,6 +290,17 @@
           <button class="run" onclick="addAngleRow()">Add</button>
         </div>
         <div id="angles"><div class="empty">Loading...</div></div>
+      </div>
+      <h2>Brand Settings</h2>
+      <!-- Prompt 4, Item 5: palette must be DATA, not a hardcoded string in
+           generate_image_prompt.py, so a correction made here takes effect on the very
+           next run - see dedupe.get_brand_settings(). -->
+      <div class="comp-panel">
+        <div class="comp-add-row">
+          <input id="brandPaletteInput" placeholder="terracotta, maroon, gold, cream">
+          <button class="run" onclick="saveBrandSettings()">Save</button>
+        </div>
+        <div style="font-size:12px;color:#888;margin-top:6px;">Palette used to re-theme edit-mode clones when "Re-theme colours" is on.</div>
       </div>
       <h2>Competitors</h2>
     <div class="comp-panel">
@@ -1133,6 +1151,7 @@ async function runPipeline(){
   const offerText = document.getElementById('offerTextInput').value.trim();
   const editMode = document.getElementById('editModeToggle').checked;
   const checkOutput = document.getElementById('checkOutputToggle').checked;
+  const rethemeColours = document.getElementById('rethemeColoursToggle').checked;
   const operatorInstruction = document.getElementById('operatorInstructionInput').value.trim();
   // Persist the value actually used for this run as "last-used" - see loadOperatorInstruction().
   // localStorage (not just leaving it in the DOM) survives a page reload/new tab, matching
@@ -1150,6 +1169,7 @@ async function runPipeline(){
     +(offerText?('&offer_text='+encodeURIComponent(offerText)):'')
     +'&edit_mode='+(editMode?'1':'0')
     +'&check_output='+(checkOutput?'1':'0')
+    +'&retheme_colours='+(rethemeColours?'1':'0')
     +(operatorInstruction?('&operator_instruction='+encodeURIComponent(operatorInstruction)):''),
     {method:'POST'});
   const poll=setInterval(async()=>{
@@ -1220,6 +1240,23 @@ function loadOperatorInstruction(){
   } catch(e) {}
 }
 loadOperatorInstruction();
+
+// Prompt 4, Item 5: palette is DATA (dedupe.get_brand_settings()), not a hardcoded
+// string - loaded here so the field always reflects the value a run would actually use.
+async function loadBrandSettings(){
+  const r = await fetch('/api/brand_settings'); const s = await r.json();
+  document.getElementById('brandPaletteInput').value = s.palette || '';
+}
+async function saveBrandSettings(){
+  const palette = document.getElementById('brandPaletteInput').value.trim();
+  await fetch('/api/brand_settings', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({palette}),
+  });
+  await loadBrandSettings();
+}
+loadBrandSettings();
+
 loadCards(); loadLog(); loadCompetitors(); loadProducts(); loadAngles(); loadWarnings();
 // Never rebuild the feed while a caret sits in an overlay. Defer rather than drop, so a
 // pipeline run that finishes mid-typing still lands once the field loses focus.

@@ -62,7 +62,7 @@ def fetch_reference_images(product):
 def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
                 realism=None, text_in_image=False, include_product=True,
                 body_area=None, offer_text=None, edit_mode=False, operator_instruction=None,
-                check_output=False):
+                check_output=False, retheme_colours=True):
     """Run one ad through the full pipeline. Returns processed/skipped/failed.
     messaging_angle, if given, is a resolved angle dict (dedupe.get_angle's shape) - it
     changes the dedup identity of this ad to (ad_id, angle_id) instead of ad_id alone, so
@@ -99,7 +99,13 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
     (never blocks or risks losing a draft) and never fails the run: any critic failure is
     caught, recorded as a pipeline_warning, and the card is left unflagged - never treated
     as a finding of its own. Defaults to False - this is an extra vision call per ad, real
-    cost that multiplies across a sweep, so it's opt-in per run."""
+    cost that multiplies across a sweep, so it's opt-in per run.
+
+    retheme_colours (Prompt 4, Item 5) only affects edit_mode - defaults to True, since
+    the team's own doc calls for re-theming the reference's palette to Besque's on every
+    clone unless the angle specifically calls for something else; the operator disables
+    it per run for that stated exception, which also protects today's validated
+    faithful-clone behaviour."""
     ad_id = ad.get("ad_id")
     if not ad_id:
         return "failed"
@@ -202,7 +208,7 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
                 messaging_angle=messaging_angle, realism=realism,
                 body_area=body_area, offer_text=offer_text,
                 edit_mode=edit_mode, competitor_image_bytes=(image_bytes if edit_mode else None),
-                operator_instruction=operator_instruction,
+                operator_instruction=operator_instruction, retheme_colours=retheme_colours,
             )
         except Exception as e:
             log.error("Ad %s failed: image generation raised: %s", ad_id, e)
@@ -285,7 +291,7 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
 def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product_id=None, category=None,
              angle_id=None, realism=None, text_in_image=False, include_product=True,
              body_area=None, offer_text=None, edit_mode=False, operator_instruction=None,
-             check_output=False):
+             check_output=False, retheme_colours=True):
     """One scheduled run across the watchlist, or a single competitor if
     competitor_id is given, or every competitor tagged with `category` if that's
     given instead. competitor_id takes precedence if both are somehow passed.
@@ -399,7 +405,8 @@ def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product
             result = process_ad(ad, product=product, reference_images=reference_images, messaging_angle=messaging_angle,
                                 realism=realism, text_in_image=text_in_image, include_product=include_product,
                                 body_area=body_area, offer_text=offer_text, edit_mode=edit_mode,
-                                operator_instruction=operator_instruction, check_output=check_output)
+                                operator_instruction=operator_instruction, check_output=check_output,
+                                retheme_colours=retheme_colours)
             summary[result] += 1
             comp_summary[result] += 1
             if result == "processed":

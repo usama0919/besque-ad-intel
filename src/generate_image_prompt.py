@@ -9,7 +9,8 @@ IMAGE_MODEL = os.getenv("IMAGE_MODEL", "placeholder-image-model")
 def build_image_prompt(blueprint: dict, product: dict = None, include_product: bool = True,
                         text_in_image: bool = False, headline: str = None, subtext: str = None,
                         creative_description: str = None, edit_mode: bool = False,
-                        offer_text: str = None, operator_instruction: str = None) -> str:
+                        offer_text: str = None, operator_instruction: str = None,
+                        retheme_colours: bool = True, brand_palette: str = None) -> str:
     """Construct a Besque-adapted image generation prompt from the blueprint's visual notes.
     include_product=True, text_in_image=False, creative_description=None, edit_mode=False,
     offer_text=None, operator_instruction=None (today's defaults) reproduce the prior
@@ -37,7 +38,18 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
     supplies the scene text (creative_description / _edit_mode_instruction / the template
     below) - see _operator_instruction_clause. It steers the scene; it can never grant a
     permission those rules forbid, since it appears strictly below them and states that
-    boundary explicitly."""
+    boundary explicitly.
+
+    retheme_colours/brand_palette (Prompt 4, Item 5) are only consumed in edit_mode (see
+    _edit_mode_instruction) - palette substitution only makes sense when reproducing an
+    actual reference photograph. Named brand_palette, not palette, because `palette`
+    below is ALREADY a local variable (visual.get("palette_mood", ...)) used by the
+    non-edit-mode template branch - a real bug this parameter's first draft had, caught
+    by test_build_image_prompt_edit_mode_forwards_retheme_and_palette: the template's
+    local assignment silently shadowed the caller's value before _edit_mode_instruction
+    ever saw it. blueprint.get("creative_format") is read directly here for the TEXT
+    branch's typeface guidance (TYPOGRAPHY_GUIDANCE), not threaded as a separate
+    parameter since it's already part of the blueprint passed in."""
     visual = blueprint.get("visual", {})
     # visual.subject is deliberately NOT read here. In practice it's where the vision
     # deconstruct step puts rich, identity-carrying descriptions of the competitor ad's
@@ -126,7 +138,9 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
             # never contradict product_clause below, which IS built from the effective value.
             _edit_mode_instruction(text_in_image=text_in_image, headline=headline, subtext=subtext,
                                    offer_text=offer_text, include_product=include_product,
-                                   reference_has_product=reference_has_product) +
+                                   reference_has_product=reference_has_product,
+                                   retheme_colours=retheme_colours, palette=brand_palette,
+                                   creative_format=blueprint.get("creative_format")) +
             product_clause +
             f"Square 1:1 aspect ratio composition. " +
             closing
@@ -312,7 +326,8 @@ def _operator_instruction_clause(operator_instruction=None):
 
 
 def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, offer_text=None,
-                            include_product=True, reference_has_product=True):
+                            include_product=True, reference_has_product=True,
+                            retheme_colours=True, palette=None, creative_format=None):
     """EDIT MODE (2026-08-01): Gemini receives the competitor's own ad as an input image
     Part, not just a text description of it - the reference image IS the creative brief,
     so no template scene/layout/palette description is assembled here (see
@@ -339,15 +354,41 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
     (blueprint.layout_detail.product_count==0 or product_category=="not_product"), so the
     wording says there's nothing to substitute rather than a generic productless-mode
     sentence - distinguishing "the operator asked for no product" from "the source had
-    none to substitute" without changing the actual (non-contradictory) outcome."""
-    if include_product and reference_has_product:
-        base = (
+    none to substitute" without changing the actual (non-contradictory) outcome.
+
+    retheme_colours=True (Prompt 4, Item 5, default) states palette substitution as ONE
+    instruction integrated with the reproduce-faithfully instruction, not two that could
+    read as competing - "geometry is preserved, colour is substituted" is a single
+    sentence naming both halves, never a separate clause that could be read as
+    contradicting "reproduce faithfully". retheme_colours=False reverts to the exact
+    original wording (colour palette folded into the reproduce list) - the doc's own
+    stated exception, and the faithful-clone behaviour already validated in production."""
+    if retheme_colours:
+        effective_palette = palette or "terracotta, maroon, gold, cream"
+        opening = (
             "EDIT MODE: the FIRST attached image is the competitor's own advertisement. "
-            "Reproduce its composition, background, camera angle, lighting, colour palette, "
-            "text placement, and overall layout as closely as possible - changing ONLY the "
-            "product. Remove the competitor's product entirely and place the Besque product "
-            "(shown in the reference photo(s) that follow, if any) in its position, at its "
-            "scale, with its lighting, matching the original shot as faithfully as possible. "
+            "This is a single instruction with two parts, not two competing ones: "
+            "geometry is preserved, colour is substituted. Composition, layout, camera "
+            "angle, spacing, lighting direction, contrast relationships, tonal "
+            "hierarchy, and text placement all carry over EXACTLY as shot in the "
+            "reference - do not change the framing, angle, spacing, or structure in any "
+            f"way. At the same time, every hue in the scene (background, props, "
+            f"wardrobe, surfaces) re-maps to Besque's palette: {effective_palette} - "
+            f"overriding the reference's own colours entirely. "
+        )
+    else:
+        opening = (
+            "EDIT MODE: the FIRST attached image is the competitor's own advertisement. "
+            "Reproduce its composition, background, camera angle, lighting, colour "
+            "palette, text placement, and overall layout as closely as possible. "
+        )
+
+    if include_product and reference_has_product:
+        base = opening + (
+            "Changing ONLY the product. Remove the competitor's product entirely and "
+            "place the Besque product (shown in the reference photo(s) that follow, if "
+            "any) in its position, at its scale, with its lighting, matching the "
+            "original shot as faithfully as possible. "
             "Any substance in frame that ORIGINATES FROM THE PRODUCT - a drip, pour, pool, "
             "droplet, smear, texture swatch, or a smear on skin - is part of the product, "
             "not the scene: preserve its position, volume, and motion exactly, but "
@@ -359,33 +400,30 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             "appears in the source image. "
         )
     elif include_product and not reference_has_product:
-        base = (
-            "EDIT MODE: the FIRST attached image is the competitor's own advertisement. "
-            "Reproduce its composition, background, camera angle, lighting, colour palette, "
-            "text placement, and overall layout as closely as possible. The reference image "
-            "has NO product in frame - do NOT add a Besque product, bottle, or packaging "
-            "anywhere in the scene; there is nothing to substitute here. Everything else in "
-            "the scene stays exactly as it appears in the source image. "
+        base = opening + (
+            "The reference image has NO product in frame - do NOT add a Besque product, "
+            "bottle, or packaging anywhere in the scene; there is nothing to substitute "
+            "here. Everything else in the scene stays exactly as it appears in the "
+            "source image. "
         )
     else:
-        base = (
-            "EDIT MODE: the FIRST attached image is the competitor's own advertisement. "
-            "Reproduce its composition, background, camera angle, lighting, colour palette, "
-            "text placement, and overall layout as closely as possible. This is a "
-            "deliberately productless edit - do NOT add any Besque product, bottle, or "
-            "packaging anywhere in the scene. Everything else in the scene stays exactly as "
-            "it appears in the source image. "
+        base = opening + (
+            "This is a deliberately productless edit - do NOT add any Besque product, "
+            "bottle, or packaging anywhere in the scene. Everything else in the scene "
+            "stays exactly as it appears in the source image. "
         )
     if text_in_image and headline:
         permitted = f'the headline "{headline}"'
         if subtext:
             permitted += f' and the supporting text "{subtext}"'
+        typo_guidance = TYPOGRAPHY_GUIDANCE.get(creative_format, DEFAULT_TYPOGRAPHY_GUIDANCE)
         base += (
-            f"TEXT: preserve the reference image's text zones, typography, size, and "
-            f"position EXACTLY as they appear - but replace the wording with {permitted} "
-            f"only, same layout, our words. The competitor's brand name, product name, "
-            f"and claims must NEVER survive into the output, even inside the preserved "
-            f"typography. "
+            f"TEXT: preserve the reference image's text zones, size, and position "
+            f"EXACTLY as they appear - but replace the wording with {permitted} only, "
+            f"same layout, our words. Use Besque's OWN typeface style here, never the "
+            f"reference's own font: {typo_guidance}. The competitor's brand name, "
+            f"product name, and claims must NEVER survive into the output, even inside "
+            f"this replacement typeface. "
         )
     else:
         base += (
@@ -453,6 +491,36 @@ del _validator
 # Used when production_style is absent/null/unknown — preserves the previous hardcoded look.
 DEFAULT_STYLE_GUIDANCE = "Style: clean, editorial, aspirational, natural light. "
 
+# Per-creative-format typeface guidance (Prompt 4, Item 5): map the FORMAT to a Besque
+# typeface style rather than copying the reference's own font - "map creative_format to a
+# typeface style rather than copying the reference's". Direct-response formats get clean
+# sans-serif for scannability/urgency; premium/editorial formats get elegant serif;
+# testimonial_review gets a handwritten-marker feel (a real customer's own note), the
+# whiteboard/diagram-style annotation register the spec names.
+TYPOGRAPHY_GUIDANCE = {
+    "before_after": "clean, bold sans-serif - direct-response clarity and urgency",
+    "problem_solution": "clean, bold sans-serif - direct-response clarity and urgency",
+    "offer_led": "clean, bold sans-serif - direct-response clarity and urgency",
+    "comparison": "clean, bold sans-serif - direct-response clarity",
+    "listicle_tips": "clean sans-serif - easy to scan, direct-response clarity",
+    "product_hero": "elegant serif - premium, editorial, aspirational",
+    "founder_story": "elegant serif - premium, editorial, aspirational",
+    "ingredient_focus": "elegant serif - premium, editorial, aspirational",
+    "lifestyle_scene": "elegant serif - premium, editorial, aspirational",
+    "text_led_editorial": "elegant serif - premium, editorial, aspirational",
+    "testimonial_review": "handwritten marker - informal and personal, like a real customer's own note",
+}
+# Same coverage guarantee as PRODUCTION_STYLE_GUIDANCE above - a schema addition to
+# creative_format can't silently fall through to DEFAULT_TYPOGRAPHY_GUIDANCE unnoticed.
+from src import validator as _validator
+assert set(_validator.creative_formats()) <= set(TYPOGRAPHY_GUIDANCE), (
+    "TYPOGRAPHY_GUIDANCE is missing an entry for one of validator.creative_formats()"
+)
+del _validator
+
+# Used when creative_format is absent/null/unrecognised.
+DEFAULT_TYPOGRAPHY_GUIDANCE = "clean sans-serif - versatile, legible default"
+
 
 def _reference_framing(count):
     """Framing text placed after the reference image block(s). Explicit about multiple
@@ -498,7 +566,8 @@ def _sniff_mime_type(data):
 def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_slug=None,
                     include_product=True, text_in_image=False, headline=None, subtext=None,
                     messaging_angle=None, realism=None, body_area=None, offer_text=None,
-                    edit_mode=False, competitor_image_bytes=None, operator_instruction=None):
+                    edit_mode=False, competitor_image_bytes=None, operator_instruction=None,
+                    retheme_colours=True):
     """Single-pass image generation from the blueprint. One image, no iteration.
     Saves to assets/<stem>_draft.png (stem = ad_id, or ad_id+angle if angle_slug is given)
     and returns the path. Returns None on failure. include_product/text_in_image/headline/
@@ -529,7 +598,12 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
     idempotent, so downstream re-clipping is harmless) and forwarded to BOTH the writer
     (as inspiration-tier guidance) and build_image_prompt (as the mechanical, fixed-position
     clause - see _operator_instruction_clause) so it reaches the model whether or not the
-    writer actually runs."""
+    writer actually runs.
+
+    retheme_colours (Prompt 4, Item 5) defaults to True - the palette itself is DATA, read
+    from dedupe.get_brand_settings() here (not a hardcoded string), so a future correction
+    made in the UI takes effect immediately. Only fetched when it will actually be used
+    (edit_mode) - no DB read on the far more common non-edit-mode path."""
     operator_instruction = generate_image_prompt_writer.clip_operator_instruction(operator_instruction)
     creative_description = None
     if messaging_angle and not edit_mode:
@@ -540,10 +614,15 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
             text_in_image=text_in_image, include_product=include_product,
             headline=headline, subtext=subtext, operator_instruction=operator_instruction,
         )
+    brand_palette = None
+    if edit_mode and retheme_colours:
+        from src import dedupe as _dedupe
+        brand_palette = _dedupe.get_brand_settings().get("palette")
     prompt = build_image_prompt(blueprint, product=product, include_product=include_product,
                                  text_in_image=text_in_image, headline=headline, subtext=subtext,
                                  creative_description=creative_description, edit_mode=edit_mode,
-                                 offer_text=offer_text, operator_instruction=operator_instruction)
+                                 offer_text=offer_text, operator_instruction=operator_instruction,
+                                 retheme_colours=retheme_colours, brand_palette=brand_palette)
     stem = _draft_stem(ad_id, angle_slug)
     try:
         client = genai.Client(vertexai=True, project="besque-martech", location="global")

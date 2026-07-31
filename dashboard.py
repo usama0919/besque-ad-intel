@@ -121,7 +121,7 @@ def api_decision(ad_id: str, decision: str, reason: str = "", angle_id: int = No
 def _run_pipeline_bg(n, competitor_id=None, category=None, product_id=None, angle_id=None,
                       realism=None, text_in_image=False, include_product=True,
                       body_area=None, offer_text=None, edit_mode=False, operator_instruction=None,
-                      check_output=False):
+                      check_output=False, retheme_colours=True):
     """LOCAL_RUN's in-process runner - was dead code (api_run always hit the Cloud Run Job
     path) until LOCAL_RUN=1 made it reachable. Runs pipeline.run_once with every run-strip
     param, exactly as job_runner.py does for a real deployed Job."""
@@ -141,6 +141,7 @@ def _run_pipeline_bg(n, competitor_id=None, category=None, product_id=None, angl
             edit_mode=edit_mode,
             operator_instruction=operator_instruction,
             check_output=check_output,
+            retheme_colours=retheme_colours,
             should_stop=lambda: _run_status["stop_requested"],
         )
     except Exception as e:
@@ -153,7 +154,8 @@ def _run_pipeline_bg(n, competitor_id=None, category=None, product_id=None, angl
 def api_run(n: int = 2, competitor_id: int = None, category: str = "", product_id: int = None,
             angle_id: int = None, realism: str = "", text_in_image: bool = False,
             include_product: bool = True, body_area: str = "", offer_text: str = "",
-            edit_mode: bool = False, operator_instruction: str = "", check_output: bool = False):
+            edit_mode: bool = False, operator_instruction: str = "", check_output: bool = False,
+            retheme_colours: bool = True):
     """Trigger the pipeline. Two paths:
 
     - LOCAL_RUN=1: runs _run_pipeline_bg (pipeline.run_once) in a background thread, in
@@ -178,6 +180,11 @@ def api_run(n: int = 2, competitor_id: int = None, category: str = "", product_i
 
     check_output (Prompt 4, Item 1) gates the output critic - defaults to False since it's
     an extra vision call per ad, real cost that multiplies across a sweep.
+
+    retheme_colours (Prompt 4, Item 5) defaults to True - the operator disables it only
+    for the doc's own stated exception (an angle that specifically calls for the
+    reference's own colours), which is also today's already-validated faithful-clone
+    behaviour.
     """
     if os.getenv("LOCAL_RUN") == "1":
         global _run_thread
@@ -195,7 +202,7 @@ def api_run(n: int = 2, competitor_id: int = None, category: str = "", product_i
                 include_product=include_product, body_area=(body_area or None),
                 offer_text=(offer_text or None), edit_mode=edit_mode,
                 operator_instruction=(operator_instruction or None),
-                check_output=check_output,
+                check_output=check_output, retheme_colours=retheme_colours,
             ),
             daemon=True,
         )
@@ -226,6 +233,7 @@ def api_run(n: int = 2, competitor_id: int = None, category: str = "", product_i
                     run_v2.EnvVar(name="RUN_EDIT_MODE", value="1" if edit_mode else "0"),
                     run_v2.EnvVar(name="RUN_INSTRUCTION", value=operator_instruction or ""),
                     run_v2.EnvVar(name="RUN_CHECK_OUTPUT", value="1" if check_output else "0"),
+                    run_v2.EnvVar(name="RUN_RETHEME_COLOURS", value="1" if retheme_colours else "0"),
                 ]
             )
         ]
@@ -556,6 +564,21 @@ def api_delete_product(product_id: int):
     if blob_errors:
         resp["warning"] = f"{len(blob_errors)} blob(s) failed to delete (now orphaned): " + "; ".join(blob_errors)
     return JSONResponse(resp)
+
+
+@app.get("/api/brand_settings")
+def api_brand_settings():
+    dedupe.init_brand_settings()
+    return JSONResponse(dedupe.get_brand_settings())
+
+
+@app.post("/api/brand_settings")
+async def api_update_brand_settings(request: Request):
+    body = await request.json()
+    palette = (body.get("palette") or "").strip()
+    dedupe.init_brand_settings()
+    dedupe.update_brand_settings(palette)
+    return JSONResponse(dedupe.get_brand_settings())
 
 
 @app.get("/api/angles")
