@@ -570,6 +570,63 @@ def test_run_once_body_area_is_independent_of_angle_body_area(monkeypatch):
     assert captured[0]["body_area"] == "knees"
 
 
+# ---- Step 3: by_competitor summary + DB-backed run progress ----
+
+def test_run_once_summary_includes_by_competitor_breakdown(monkeypatch):
+    """A category sweep's total is illegible without this: image yield varies hugely per
+    brand (CLAUDE.md: ~1/10 to 8/10 across pages), so a low total is the pool, not a bug -
+    an operator needs to see per-competitor ads_seen/processed to tell the difference."""
+    monkeypatch.setattr(pipeline.dedupe, "get_competitors", lambda: _FAKE_COMPETITORS)
+
+    def fake_scrape(name, page_id=None):
+        return [{"ad_id": f"{name}_1", "page_name": name}, {"ad_id": f"{name}_2", "page_name": name}] \
+            if name == "OSEA" else []
+
+    monkeypatch.setattr(pipeline.scrape, "scrape_ads", fake_scrape)
+    monkeypatch.setattr(pipeline, "process_ad", lambda ad, **k: "processed")
+
+    summary = pipeline.run_once(category="body_oil")  # matches OSEA + Kiehl's
+    assert set(summary["by_competitor"].keys()) == {"OSEA", "Kiehl's"}
+    assert summary["by_competitor"]["OSEA"] == {"ads_seen": 2, "processed": 2, "skipped": 0,
+                                                  "failed": 0, "error": None}
+    assert summary["by_competitor"]["Kiehl's"] == {"ads_seen": 0, "processed": 0, "skipped": 0,
+                                                     "failed": 0, "error": None}
+
+
+def test_run_once_by_competitor_records_scrape_error(monkeypatch):
+    monkeypatch.setattr(pipeline.dedupe, "get_competitors", lambda: _FAKE_COMPETITORS[:1])  # just OSEA
+    # Skip with_retry's real sleep-and-retry - not what this test is checking.
+    monkeypatch.setattr(pipeline, "with_retry", lambda fn, **k: fn())
+
+    def boom(*a, **k):
+        raise RuntimeError("scrape service down")
+
+    monkeypatch.setattr(pipeline.scrape, "scrape_ads", boom)
+
+    summary = pipeline.run_once(competitor_id=1)
+    assert summary["by_competitor"]["OSEA"]["error"] == "scrape service down"
+    assert summary["by_competitor"]["OSEA"]["ads_seen"] == 0
+
+
+def test_run_once_updates_and_clears_run_progress(monkeypatch):
+    """dedupe.set_run_progress must be called once per competitor (so the dashboard can
+    show which one is running) and cleared to empty at the end - DB-backed, not an
+    in-memory variable, since the Cloud Run Job path is a separate process."""
+    dedupe.init_run_progress()
+    _mock_competitor_selection(monkeypatch)
+    monkeypatch.setattr(pipeline.scrape, "scrape_ads", lambda name, page_id=None: [])
+
+    calls = []
+    orig_set = dedupe.set_run_progress
+    monkeypatch.setattr(pipeline.dedupe, "set_run_progress",
+                        lambda name, idx, total: calls.append((name, idx, total)))
+
+    pipeline.run_once()
+
+    assert calls[:-1] == [("OSEA", 1, 3), ("CeraVe", 2, 3), ("Kiehl's", 3, 3)]
+    assert calls[-1] == ("", 0, 0)  # cleared at the end
+
+
 def test_process_ad_failure_isolated(monkeypatch):
     dedupe.init_db()
     ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"

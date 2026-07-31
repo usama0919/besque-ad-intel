@@ -492,6 +492,52 @@ def get_recent_warnings(limit=20):
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
+# ---- Run progress (single-row, path-agnostic - same reasoning as pipeline_warnings above:
+# the Cloud Run Job path is a separate process with no shared memory with the dashboard, so
+# "which competitor is being processed right now" has to be a DB read, not an in-memory
+# variable, or it would only ever work for the LOCAL_RUN path) ----
+
+def init_run_progress():
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS run_progress (
+                id                INTEGER PRIMARY KEY DEFAULT 1,
+                competitor_name   TEXT DEFAULT '',
+                competitor_index  INTEGER DEFAULT 0,
+                competitor_total  INTEGER DEFAULT 0,
+                updated_at        TIMESTAMPTZ DEFAULT now()
+            )
+        """)
+        cur.execute("INSERT INTO run_progress (id) VALUES (1) ON CONFLICT (id) DO NOTHING")
+        conn.commit()
+
+
+def set_run_progress(competitor_name, competitor_index, competitor_total):
+    """Record which competitor run_once is currently on. competitor_name="" (with index/
+    total 0) is how run_once clears this at the end of a run, so a finished run doesn't
+    leave a stale "processing X" behind for the next poll."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "UPDATE run_progress SET competitor_name=%s, competitor_index=%s, "
+            "competitor_total=%s, updated_at=now() WHERE id=1",
+            (competitor_name, competitor_index, competitor_total),
+        )
+        conn.commit()
+
+
+def get_run_progress():
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT competitor_name, competitor_index, competitor_total, updated_at "
+            "FROM run_progress WHERE id=1"
+        )
+        r = cur.fetchone()
+        if r is None:
+            return None
+        return {"competitor_name": r[0] or "", "competitor_index": r[1] or 0,
+                "competitor_total": r[2] or 0, "updated_at": r[3]}
+
+
 def update_artifact_copy(ad_id, generated_copy, angle_id=None):
     """Replace the generated copy for one (ad_id, angle_id) artifact. Without angle_id,
     a plain WHERE ad_id=%s UPDATE would rewrite every angle-variant row sharing that

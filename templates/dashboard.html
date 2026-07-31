@@ -164,11 +164,21 @@
 <div id="warningsBanner" style="display:none;background:#fdf3e0;color:#8a5a12;border:1px solid #f0dcb4;border-radius:8px;padding:10px 14px;margin:0 24px 12px;font-size:13px;"></div>
 <div class="sticky-controls">
 <div class="bar">
-  <select id="adCount" style="padding:9px;border:1px solid #ccc;border-radius:7px;font-size:13px;">
+  <select id="adCount" onchange="updateProjectedTotal()" style="padding:9px;border:1px solid #ccc;border-radius:7px;font-size:13px;">
     <option value="1">1 ad</option>
     <option value="2" selected>2 ads</option>
     <option value="3">3 ads</option>
     <option value="5">5 ads</option>
+  </select>
+  <!-- Category sweep: run_once(category=...) already exists server-side (loops every
+       competitor tagged with it) - this is the only way to reach it from the UI. Options
+       are built dynamically in buildCategorySelectOptions() from the categories actually
+       present on competitors, never a fixed schema enum, so a category with zero tagged
+       competitors never shows up as a confusing selectable choice. "ad count" is
+       PER-COMPETITOR (see updateProjectedTotal()) - a sweep multiplies by competitor count. -->
+  <select id="categorySelect" onchange="onCategoryChange()" style="padding:9px;border:1px solid #ccc;border-radius:7px;font-size:13px;">
+    <option value="">— Category —</option>
+    <option value="__all__">All competitors</option>
   </select>
   <select id="angleSelect" style="padding:9px;border:1px solid #ccc;border-radius:7px;font-size:13px;" onchange="onAngleChange()">
     <option value="">No angle</option>
@@ -211,6 +221,10 @@
               style="padding:9px;border:1px solid #ccc;border-radius:7px;font-size:13px;resize:vertical;font-family:inherit;"></textarea>
   </div>
   <button class="run" id="runBtn" onclick="runPipeline()" disabled>Run Pipeline</button>
+  <!-- Ad count is per-competitor - a category sweep multiplies by the number of matching
+       competitors, so "2 ads" across 6 brands is 12 generations, not 2. Must be visible
+       BEFORE the run starts, not discovered afterward. -->
+  <span id="projectedTotal" style="font-size:12px;color:#888;"></span>
   <button class="stop" id="stopBtn" onclick="stopPipeline()" disabled>Stop</button>
   <span id="selectedCompName">No competitor selected</span>
   <span class="status" id="status">Ready</span>
@@ -548,6 +562,12 @@ async function decide(ad, dec, angleId){
 
 let selectedCompetitorId = null;
 let selectedCompetitorName = null;
+// null = no category filter (blank or explicit "All competitors" via the "__all__"
+// sentinel - both send category="" server-side, same as today's no-filter default).
+// A real category value here is mutually exclusive with selectedCompetitorId in the UI -
+// selecting one visibly clears the other, even though competitor_id alone decides
+// precedence server-side.
+let selectedCategory = null;
 
 let selectedProductId = null;
   let selectedProductName = null;
@@ -811,14 +831,32 @@ let selectedProductId = null;
   }
 
 
-  function updateSelectionLabel(){
-    const el = document.getElementById('selectedCompName');
-    let txt = selectedCompetitorName ? ('Selected: ' + selectedCompetitorName) : 'No competitor selected';
-    if(selectedProductName){
-      const pc = selectedProductCategory();
-      txt += '  -  Product: ' + selectedProductName + (pc ? (' [' + pc + ']') : ' [no category]');
+  // Distinct competitors tagged with `cat` (or every competitor, for the "__all__" sentinel) -
+  // shared by the status line and the projected-total display so they never disagree.
+  function categoryCompetitorCount(cat){
+    const comps = window._compsCache || [];
+    if(cat === '__all__') return comps.length;
+    return comps.filter(c => (c.category||'') === cat).length;
+  }
+
+  function computeSelectionLabelText(){
+    if(selectedCompetitorId !== null){
+      let txt = 'Selected: ' + selectedCompetitorName;
+      if(selectedProductName){
+        const pc = selectedProductCategory();
+        txt += '  -  Product: ' + selectedProductName + (pc ? (' [' + pc + ']') : ' [no category]');
+      }
+      return txt;
     }
-    el.textContent = txt;
+    if(selectedCategory){
+      const label = selectedCategory === '__all__' ? 'All competitors' : selectedCategory;
+      return 'Category: ' + label + ' — ' + categoryCompetitorCount(selectedCategory) + ' competitors';
+    }
+    return 'No competitor selected';
+  }
+
+  function updateSelectionLabel(){
+    document.getElementById('selectedCompName').textContent = computeSelectionLabelText();
   }
   let _discTimer = null;
 function discoverDebounced(){
@@ -861,6 +899,7 @@ async function loadCompetitors(){
   if(selectedCompetitorId !== null && !data.some(c=>c.id===selectedCompetitorId)){
     selectedCompetitorId = null; selectedCompetitorName = null;
   }
+  buildCategorySelectOptions();
   if(!data.length){ el.innerHTML='<div class="empty">No competitors yet</div>'; updateRunButtonState(); return; }
   el.innerHTML = data.map(c=>`
     <div class="comp-row${c.id===selectedCompetitorId?' selected':''}" data-id="${c.id}">
@@ -878,18 +917,65 @@ async function loadCompetitors(){
   updateRunButtonState();
 }
 
+// Distinct categories actually present on competitors, never the fixed product-category
+// schema enum - a category nobody has tagged must never appear as a selectable option.
+function buildCategorySelectOptions(){
+  const sel = document.getElementById('categorySelect');
+  const prevValue = sel.value;
+  const counts = {};
+  (window._compsCache||[]).forEach(c => {
+    const cat = (c.category||'').trim();
+    if(cat) counts[cat] = (counts[cat]||0) + 1;
+  });
+  const cats = Object.keys(counts).sort();
+  sel.innerHTML = '<option value="">— Category —</option><option value="__all__">All competitors</option>'
+    + cats.map(c => `<option value="${esc(c)}">${esc(c)} (${counts[c]})</option>`).join('');
+  if(prevValue === '__all__' || cats.includes(prevValue)){ sel.value = prevValue; }
+}
+
+function onCategoryChange(){
+  const val = document.getElementById('categorySelect').value;
+  selectedCategory = val || null;
+  if(selectedCategory){
+    // Selecting a category visibly clears any selected competitor - competitor_id still
+    // wins server-side if somehow both were set, but the UI must never show both as
+    // active at once, so the operator can always see which mode they're in.
+    selectedCompetitorId = null; selectedCompetitorName = null;
+    loadCompetitors();
+  }
+  updateRunButtonState();
+}
+
 function selectCompetitor(id, name){
   if(selectedCompetitorId === id){ selectedCompetitorId = null; selectedCompetitorName = null; }
-  else { selectedCompetitorId = id; selectedCompetitorName = name; }
+  else {
+    selectedCompetitorId = id; selectedCompetitorName = name;
+    // competitor_id wins over category server-side - clear the category selection here
+    // too, so the UI never shows both as active simultaneously.
+    selectedCategory = null;
+    document.getElementById('categorySelect').value = '';
+  }
   loadCompetitors();
-    updateSelectionLabel();
+  updateSelectionLabel();
+  updateProjectedTotal();
 }
 
 function updateRunButtonState(){
   const btn = document.getElementById('runBtn');
-  const nameEl = document.getElementById('selectedCompName');
-  nameEl.textContent = selectedCompetitorId===null ? 'No competitor selected' : 'Selected: '+selectedCompetitorName;
-  if(!btn.dataset.running){ btn.disabled = (selectedCompetitorId === null); }
+  document.getElementById('selectedCompName').textContent = computeSelectionLabelText();
+  if(!btn.dataset.running){ btn.disabled = (selectedCompetitorId === null && !selectedCategory); }
+  updateProjectedTotal();
+}
+
+// Ad count is PER-COMPETITOR - a category sweep multiplies by the number of matching
+// competitors ("2 ads" across 6 brands is 12 generations, not 2). Must be visible before
+// the run starts, not discovered afterward.
+function updateProjectedTotal(){
+  const el = document.getElementById('projectedTotal');
+  if(selectedCompetitorId !== null || !selectedCategory){ el.textContent = ''; return; }
+  const nAds = parseInt(document.getElementById('adCount').value, 10) || 0;
+  const count = categoryCompetitorCount(selectedCategory);
+  el.textContent = '= up to ' + (nAds*count) + ' generations across ' + count + ' competitor' + (count===1?'':'s');
 }
 
 async function addCompetitorRow(){
@@ -943,17 +1029,31 @@ const PROGRESS_STAGES = [
   [140, 'Finishing up - saving results...']
 ];
 let progressTimer = null;
+// Live per-competitor progress from the last /api/run/status poll (DB-backed, see
+// dedupe.set_run_progress - works the same way for a category sweep AND a single
+// competitor run). null until the first poll returns it; startProgress's elapsed-time
+// guess (PROGRESS_STAGES) is only the fallback shown before that first real value lands.
+let _liveProgress = null;
 
-function startProgress(compName){
+function startProgress(runLabel){
   const st = document.getElementById('status');
   const t0 = Date.now();
   stopProgress();
+  _liveProgress = null;
   progressTimer = setInterval(()=>{
     const secs = Math.floor((Date.now()-t0)/1000);
     const mm = Math.floor(secs/60), ss = String(secs%60).padStart(2,'0');
-    let stage = PROGRESS_STAGES[0][1];
-    for(const pair of PROGRESS_STAGES){ if(secs >= pair[0]) stage = pair[1]; }
-    st.textContent = 'Running ' + compName + ' - ' + stage + ' (' + mm + ':' + ss + ')';
+    let stage;
+    if(_liveProgress && _liveProgress.competitor_name){
+      stage = 'Processing ' + _liveProgress.competitor_name
+        + (_liveProgress.competitor_total > 1
+           ? (' (' + _liveProgress.competitor_index + ' of ' + _liveProgress.competitor_total + ')')
+           : '');
+    } else {
+      stage = PROGRESS_STAGES[0][1];
+      for(const pair of PROGRESS_STAGES){ if(secs >= pair[0]) stage = pair[1]; }
+    }
+    st.textContent = 'Running ' + runLabel + ' - ' + stage + ' (' + mm + ':' + ss + ')';
   }, 1000);
 }
 
@@ -962,10 +1062,18 @@ function stopProgress(){
 }
 
 async function runPipeline(){
-  if(selectedCompetitorId === null){ return; }
+  if(selectedCompetitorId === null && !selectedCategory){ return; }
   const btn=document.getElementById('runBtn'), stopBtn=document.getElementById('stopBtn'), st=document.getElementById('status');
   btn.disabled=true; btn.dataset.running='1'; stopBtn.disabled=false;
-  startProgress(selectedCompetitorName);
+  // category is sent only when no competitor is selected - competitor_id always wins
+  // server-side (pipeline.run_once), and "__all__" (or blank) means no filter, same as
+  // category="" today.
+  const categoryParam = (selectedCompetitorId === null && selectedCategory && selectedCategory !== '__all__')
+    ? selectedCategory : '';
+  const runLabel = selectedCompetitorId !== null ? selectedCompetitorName
+    : (selectedCategory ? ('Category: ' + (selectedCategory === '__all__' ? 'All competitors' : selectedCategory))
+                         : '');
+  startProgress(runLabel);
   const nAds = document.getElementById('adCount').value;
   const angleId = document.getElementById('angleSelect').value;
   const realism = document.getElementById('realismSelect').value;
@@ -979,7 +1087,9 @@ async function runPipeline(){
   // localStorage (not just leaving it in the DOM) survives a page reload/new tab, matching
   // the ~25-ad-a-day session workflow where the steering is usually constant all day.
   try { localStorage.setItem('operatorInstruction', operatorInstruction); } catch(e) {}
-  await fetch('/api/run?n='+nAds+'&competitor_id='+selectedCompetitorId
+  await fetch('/api/run?n='+nAds
+    +(selectedCompetitorId!==null ? ('&competitor_id='+selectedCompetitorId) : '')
+    +(categoryParam ? ('&category='+encodeURIComponent(categoryParam)) : '')
     +(selectedProductId?('&product_id='+selectedProductId):'')
     +(angleId?('&angle_id='+angleId):'')
     +(realism?('&realism='+encodeURIComponent(realism)):'')
@@ -992,6 +1102,7 @@ async function runPipeline(){
     {method:'POST'});
   const poll=setInterval(async()=>{
     const r=await fetch('/api/run/status'); const s=await r.json();
+    _liveProgress = s.progress || null;
     if(!s.running){ clearInterval(poll);
       const elapsed = document.getElementById('status').textContent.match(/\((\d+:\d+)\)/);
       stopProgress(); delete btn.dataset.running; stopBtn.disabled=true;
@@ -1004,6 +1115,18 @@ async function runPipeline(){
       else if((sm.processed||0) > 0){ msg = 'Done' + (elapsed?(' in '+elapsed[1]):'') + ' - ' + sm.processed + ' new ad' + (sm.processed>1?'s':'') + ' added' + ((sm.skipped||0)>0?(', ' + sm.skipped + ' already processed'):''); }
       else if((sm.skipped||0) > 0){ msg = 'No new ads - all ' + sm.skipped + ' current ads from this competitor are already processed.'; }
       else { msg = 'No new image ads found for this competitor right now.'; }
+      // Per-competitor breakdown (Step 3): image yield varies hugely per brand, so a
+      // thin category-sweep total must be legible, not mysterious - only shown when more
+      // than one competitor actually ran.
+      const byComp = sm.by_competitor || {};
+      const compNames = Object.keys(byComp);
+      if(compNames.length > 1){
+        const parts = compNames.map(name => {
+          const c = byComp[name];
+          return name + ': ' + c.processed + '/' + c.ads_seen + ' seen' + (c.error ? ' (scrape failed)' : '');
+        });
+        msg += '  |  ' + parts.join(', ');
+      }
       st.textContent = msg; }
   },3000);
 }

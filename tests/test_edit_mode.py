@@ -262,6 +262,33 @@ def test_build_image_prompt_edit_mode_product_present_still_substitutes():
     assert "Place the Besque product described below as the subject" in prompt
 
 
+# ---- Step 3, Part 2 (2026-08-03): product-derived substances must take OUR colour -
+# a clear serum drip from the reference survived unchanged against our golden-amber oil ----
+
+def test_edit_mode_instruction_product_substances_must_match_our_colour():
+    instruction = generate_image_prompt._edit_mode_instruction()
+    assert "drip, pour, pool, droplet, smear, texture swatch" in instruction
+    assert "a smear on skin" in instruction
+    assert "recolour and re-texture it to match OUR product's actual colour" in instruction
+    assert "a clear serum drip must become our golden-amber oil, not stay clear" in instruction
+
+
+def test_edit_mode_instruction_substance_recolour_states_product_derived_is_the_product():
+    instruction = generate_image_prompt._edit_mode_instruction()
+    assert "a product-derived substance is the product, even when it has left the bottle" in instruction
+
+
+def test_edit_mode_instruction_substance_recolour_absent_when_nothing_to_substitute():
+    """The recolour instruction only makes sense when a product IS being substituted in -
+    absent when the reference has no product, and absent when the operator disabled the
+    product entirely."""
+    no_reference_product = generate_image_prompt._edit_mode_instruction(reference_has_product=False)
+    assert "recolour and re-texture" not in no_reference_product
+
+    operator_disabled = generate_image_prompt._edit_mode_instruction(include_product=False)
+    assert "recolour and re-texture" not in operator_disabled
+
+
 def test_build_image_prompt_edit_mode_include_product_false_unaffected_by_reference_has_product():
     """include_product=False (operator's own toggle) must still mean no product, exactly
     as before - reference_has_product only ever narrows include_product, never widens it."""

@@ -238,7 +238,14 @@ def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product
     run, never auto-detected from the angle or the competitor ad. Defaults (None/False/
     True/None/None/False/None) reproduce today's behaviour exactly. body_area is a
     per-run free-text value, deliberately never read from the resolved angle's own
-    body_area column (see process_ad's docstring)."""
+    body_area column (see process_ad's docstring).
+
+    The returned summary gains "by_competitor": {name: {ads_seen, processed, skipped,
+    failed, error}} - a category sweep's total is otherwise illegible, since image yield
+    varies hugely per brand (roughly 1/10 to 8/10 across pages per CLAUDE.md), so a low
+    total can be the pool, not a bug. dedupe.set_run_progress records which competitor is
+    currently running, DB-backed (not an in-memory variable) so it's readable the same way
+    whether this runs in-process (LOCAL_RUN) or as a separate Cloud Run Job."""
     from src.config_check import validate_config
     validate_config()
     dedupe.init_db()
@@ -267,16 +274,29 @@ def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product
         # Falsy check, not `is not None`: category="" must mean "no filter", the
         # same as category=None, NOT "match untagged competitors."
         competitors = [c for c in competitors if (c.get("category") or "") == category]
-    summary = {"processed": 0, "skipped": 0, "failed": 0, "reference_photo_warning": reference_warning}
+    # by_competitor makes a category sweep's yield legible rather than mysterious: image
+    # yield varies hugely per brand (CLAUDE.md: measured 1/10 to 8/10 across pages), so a
+    # sweep returning far fewer ads than brands is the pool, not a bug - this is what lets
+    # an operator see THAT, instead of just a suspiciously low total.
+    summary = {"processed": 0, "skipped": 0, "failed": 0, "reference_photo_warning": reference_warning,
+               "by_competitor": {}}
 
-    for competitor in competitors:
+    # DB-backed, not an in-memory variable - the Cloud Run Job path is a separate process
+    # with no shared memory with the dashboard, so "which competitor is running now" has to
+    # be readable the same way for both run paths (see dedupe.set_run_progress's docstring).
+    dedupe.init_run_progress()
+    total_competitors = len(competitors)
+    for idx, competitor in enumerate(competitors, 1):
         if should_stop():
             log.info("Stop requested, halting run.")
             break
         name = competitor.get("name", "?")
+        dedupe.set_run_progress(name, idx, total_competitors)
+        comp_summary = {"ads_seen": 0, "processed": 0, "skipped": 0, "failed": 0, "error": None}
         try:
             ads = with_retry(lambda: scrape.scrape_ads(name, page_id=competitor.get("page_id")),
                              attempts=2, delay=2)
+            comp_summary["ads_seen"] = len(ads)
             # suggest the real page name if it differs from our list
             try:
                 if ads:
@@ -298,6 +318,8 @@ def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product
                 log.warning("page_id auto-capture failed (non-fatal): %s", _e)
         except Exception as e:
             log.error("Scrape failed for %s: %s (clean skip)", name, e)
+            comp_summary["error"] = str(e)
+            summary["by_competitor"][name] = comp_summary
             continue
         processed_this_comp = 0
         for ad in ads:
@@ -312,9 +334,12 @@ def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product
                                 body_area=body_area, offer_text=offer_text, edit_mode=edit_mode,
                                 operator_instruction=operator_instruction)
             summary[result] += 1
+            comp_summary[result] += 1
             if result == "processed":
                 processed_this_comp += 1
+        summary["by_competitor"][name] = comp_summary
 
+    dedupe.set_run_progress("", 0, 0)  # clear - a finished run must not leave a stale entry
     log.info("Run complete: %s", summary)
     return summary
 

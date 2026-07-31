@@ -348,7 +348,15 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             "product. Remove the competitor's product entirely and place the Besque product "
             "(shown in the reference photo(s) that follow, if any) in its position, at its "
             "scale, with its lighting, matching the original shot as faithfully as possible. "
-            "Everything else in the scene stays exactly as it appears in the source image. "
+            "Any substance in frame that ORIGINATES FROM THE PRODUCT - a drip, pour, pool, "
+            "droplet, smear, texture swatch, or a smear on skin - is part of the product, "
+            "not the scene: preserve its position, volume, and motion exactly, but "
+            "recolour and re-texture it to match OUR product's actual colour and texture, "
+            "never the reference's own product substance (e.g. a clear serum drip must "
+            "become our golden-amber oil, not stay clear). \"Preserve everything except the "
+            "product\" means this too - a product-derived substance is the product, even "
+            "when it has left the bottle. Everything else in the scene stays exactly as it "
+            "appears in the source image. "
         )
     elif include_product and not reference_has_product:
         base = (

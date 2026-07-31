@@ -51,6 +51,11 @@ def _reset_run_status():
     dashboard._run_status["execution"] = None
     dashboard._run_status["mode"] = None
     dashboard._run_thread = None
+    # run_progress is DB-backed (path-agnostic) - a prior test's competitor progress must
+    # not leak into the next test's api_run_status assertions.
+    from src import dedupe
+    dedupe.init_run_progress()
+    dedupe.set_run_progress("", 0, 0)
 
 
 # ---- /api/run: LOCAL_RUN=1 path ----
@@ -225,7 +230,22 @@ def test_api_run_status_local_mode_reports_from_memory(monkeypatch):
 
     resp = dashboard.api_run_status()
     import json
-    assert json.loads(resp.body) == {"running": True, "last_summary": None}
+    assert json.loads(resp.body) == {"running": True, "last_summary": None, "progress": None}
+
+
+def test_api_run_status_reports_progress_when_a_competitor_is_running(monkeypatch):
+    """Step 3: progress is DB-backed (dedupe.run_progress) so it's readable the same way
+    regardless of run mode - set it directly here (as pipeline.run_once would) and confirm
+    api_run_status surfaces it without needing mode='local'."""
+    from src import dedupe
+    _reset_run_status()
+    dashboard._run_status["mode"] = "local"
+    dedupe.set_run_progress("OSEA", 2, 6)
+
+    resp = dashboard.api_run_status()
+    import json
+    body = json.loads(resp.body)
+    assert body["progress"] == {"competitor_name": "OSEA", "competitor_index": 2, "competitor_total": 6}
 
 
 def test_api_run_status_local_mode_reports_completion(monkeypatch):
@@ -236,7 +256,8 @@ def test_api_run_status_local_mode_reports_completion(monkeypatch):
 
     resp = dashboard.api_run_status()
     import json
-    assert json.loads(resp.body) == {"running": False, "last_summary": {"processed": 3, "skipped": 1, "failed": 0}}
+    assert json.loads(resp.body) == {"running": False, "last_summary": {"processed": 3, "skipped": 1, "failed": 0},
+                                      "progress": None}
 
 
 class _FakeExecution:
@@ -262,7 +283,8 @@ def test_api_run_status_job_mode_unchanged_gcp_query(monkeypatch):
 
     resp = dashboard.api_run_status()
     import json
-    assert json.loads(resp.body) == {"running": False, "last_summary": {"succeeded": 2, "failed": 0}}
+    assert json.loads(resp.body) == {"running": False, "last_summary": {"succeeded": 2, "failed": 0},
+                                      "progress": None}
 
 
 # ---- /api/run/stop ----

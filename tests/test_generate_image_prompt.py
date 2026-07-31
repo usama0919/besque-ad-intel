@@ -193,6 +193,27 @@ def test_creative_description_replaces_template_scene_text():
     assert "Palette and mood:" not in prompt
 
 
+# ---- Step 3, Part 3: verification only - visual_description must come straight from
+# products.visual_description at generation time, with NO hardcoded fallback string that
+# could silently override a future UI correction ----
+
+def test_visual_description_read_from_product_dict_no_hardcoded_override():
+    product = {"name": "Magic Body Oil", "description": "seven cold-pressed oils",
+               "ingredients": "almond; rosehip", "hero_claim": "Visibly firms",
+               "visual_description": "UNUSUAL_MARKER_9f3a: hex bottle, matte black cap"}
+    prompt = generate_image_prompt.build_image_prompt(_blueprint(), product=product)
+    assert "UNUSUAL_MARKER_9f3a: hex bottle, matte black cap" in prompt
+
+
+def test_visual_description_absent_produces_no_fixed_appearance_clause():
+    """No visual_description supplied -> no fabricated appearance text takes its place -
+    confirms there's no hardcoded description hiding behind the missing value."""
+    product = {"name": "Magic Body Oil", "description": "seven cold-pressed oils",
+               "ingredients": "almond; rosehip", "hero_claim": "Visibly firms"}
+    prompt = generate_image_prompt.build_image_prompt(_blueprint(), product=product)
+    assert "Its fixed visual appearance:" not in prompt
+
+
 def test_creative_description_does_not_remove_guardrails():
     """brand_rules()/compliance and the product's factual visual_description must always
     be present regardless of what the writer returns - the writer only supplies the

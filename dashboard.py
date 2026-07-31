@@ -233,6 +233,24 @@ def api_run_stop():
     return JSONResponse({"ok": True})
 
 
+def _current_progress():
+    """Which competitor run_once is on right now, DB-backed (dedupe.run_progress) rather
+    than an in-memory variable - the Cloud Run Job path is a separate process with no
+    shared memory with the dashboard, so this is the only channel that works the same way
+    for both run paths (same reasoning as pipeline_warnings). Returns None on any error or
+    when nothing is running, never raises - this is supplementary status, never
+    load-bearing for running/last_summary."""
+    try:
+        dedupe.init_run_progress()
+        p = dedupe.get_run_progress()
+        if not p or not p.get("competitor_name"):
+            return None
+        return {"competitor_name": p["competitor_name"], "competitor_index": p["competitor_index"],
+                "competitor_total": p["competitor_total"]}
+    except Exception:
+        return None
+
+
 @app.get("/api/run/status")
 def api_run_status():
     """Report latest pipeline run state.
@@ -240,9 +258,12 @@ def api_run_status():
     A LOCAL_RUN-triggered run has no Cloud Run execution to query - report directly from
     the in-memory _run_status the background thread is updating. Otherwise (mode is "job",
     or no run has been triggered yet this process), fall through to the ORIGINAL stateless
-    GCP Executions query, completely unchanged."""
+    GCP Executions query, completely unchanged. "progress" (which competitor is currently
+    running) is added to BOTH branches identically, since it's DB-backed and path-agnostic."""
+    progress = _current_progress()
     if _run_status.get("mode") == "local":
-        return JSONResponse({"running": _run_status["running"], "last_summary": _run_status["last_summary"]})
+        return JSONResponse({"running": _run_status["running"], "last_summary": _run_status["last_summary"],
+                              "progress": progress})
     try:
         from google.cloud import run_v2
         project = os.getenv("GCP_PROJECT", "besque-martech")
@@ -255,14 +276,14 @@ def api_run_status():
             latest = ex
             break
         if latest is None:
-            return JSONResponse({"running": False, "last_summary": None})
+            return JSONResponse({"running": False, "last_summary": None, "progress": progress})
         running = (latest.running_count or 0) > 0
         summary = None
         if not running:
             summary = {"succeeded": latest.succeeded_count or 0, "failed": latest.failed_count or 0}
-        return JSONResponse({"running": running, "last_summary": summary})
+        return JSONResponse({"running": running, "last_summary": summary, "progress": progress})
     except Exception as e:
-        return JSONResponse({"running": False, "last_summary": {"error": str(e)}})
+        return JSONResponse({"running": False, "last_summary": {"error": str(e)}, "progress": progress})
 
 @app.post("/api/edit_image/{ad_id}")
 async def api_edit_image(ad_id: str, request: Request):
