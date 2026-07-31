@@ -1,7 +1,7 @@
 """Cloud Run Job entrypoint: runs the pipeline once, to completion.
 Reads RUN_COMPETITOR_ID, RUN_MAX_PER_COMPETITOR, RUN_PRODUCT_ID, RUN_ANGLE_ID, RUN_REALISM,
 RUN_TEXT_IN_IMAGE, RUN_INCLUDE_PRODUCT, RUN_BODY_AREA, RUN_OFFER_TEXT, RUN_EDIT_MODE,
-RUN_INSTRUCTION from the environment.
+RUN_INSTRUCTION, RUN_CHECK_OUTPUT from the environment.
 """
 import os
 from dotenv import load_dotenv
@@ -27,15 +27,17 @@ def main():
     offer_text = os.getenv("RUN_OFFER_TEXT") or None
     edit_mode = os.getenv("RUN_EDIT_MODE") == "1"
     operator_instruction = os.getenv("RUN_INSTRUCTION") or None
+    check_output = os.getenv("RUN_CHECK_OUTPUT") == "1"
     print(f">> Job starting: competitor_id={competitor_id}, max_per_competitor={n}, "
           f"product_id={product_id}, angle_id={angle_id}, realism={realism!r}, "
           f"text_in_image={text_in_image}, include_product={include_product}, "
           f"body_area={body_area!r}, offer_text={offer_text!r}, edit_mode={edit_mode}, "
-          f"operator_instruction={operator_instruction!r}")
+          f"operator_instruction={operator_instruction!r}, check_output={check_output}")
     summary = pipeline.run_once(max_per_competitor=n, competitor_id=competitor_id, product_id=product_id,
                                  angle_id=angle_id, realism=realism, text_in_image=text_in_image,
                                  include_product=include_product, body_area=body_area, offer_text=offer_text,
-                                 edit_mode=edit_mode, operator_instruction=operator_instruction)
+                                 edit_mode=edit_mode, operator_instruction=operator_instruction,
+                                 check_output=check_output)
     print(f">> Job done: {summary}")
 
 if __name__ == "__main__":

@@ -186,6 +186,65 @@ def test_save_artifact_operator_instruction_defaults_to_empty_string():
             conn.commit()
 
 
+# ---- Prompt 4, Item 1: critic_findings - self-migrating, defaults empty, replaced whole ----
+
+def test_save_artifact_critic_findings_defaults_to_empty_list():
+    from src import dedupe
+    import uuid
+    dedupe.init_artifacts()
+    ad_id = f"ART_{uuid.uuid4().hex[:8]}"
+    try:
+        dedupe.save_artifact(
+            ad_id=ad_id, page_name="TestBrand", image_path="assets/x.jpg",
+            blueprint={"format": "hero"}, generated_copy={"headline": "H"},
+            draft_image="assets/x_draft.png",
+            metadata={"cta": "Shop", "destination_url": "http://x"},
+        )
+        rows = dedupe.get_artifacts_full(limit=500)
+        match = next(r for r in rows if r["ad_id"] == ad_id)
+        assert match["critic_findings"] == []
+    finally:
+        with dedupe.get_conn() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM artifacts WHERE ad_id=%s", (ad_id,))
+            conn.commit()
+
+
+def test_update_artifact_findings_replaces_wholesale():
+    from src import dedupe
+    import uuid
+    dedupe.init_artifacts()
+    ad_id = f"ART_{uuid.uuid4().hex[:8]}"
+    try:
+        dedupe.save_artifact(
+            ad_id=ad_id, page_name="TestBrand", image_path="assets/x.jpg",
+            blueprint={"format": "hero"}, generated_copy={"headline": "H"},
+            draft_image="assets/x_draft.png",
+            metadata={"cta": "Shop", "destination_url": "http://x"},
+        )
+        dedupe.update_artifact_findings(
+            ad_id, [{"category": "testimonial", "description": "fabricated quote", "confidence": "high"}]
+        )
+        rows = dedupe.get_artifacts_full(limit=500)
+        match = next(r for r in rows if r["ad_id"] == ad_id)
+        assert match["critic_findings"] == [
+            {"category": "testimonial", "description": "fabricated quote", "confidence": "high"}
+        ]
+
+        # A regenerate's findings REPLACE the old set entirely - never accumulate.
+        dedupe.update_artifact_findings(
+            ad_id, [{"category": "offer", "description": "promo code visible", "confidence": "medium"}]
+        )
+        rows = dedupe.get_artifacts_full(limit=500)
+        match = next(r for r in rows if r["ad_id"] == ad_id)
+        assert match["critic_findings"] == [
+            {"category": "offer", "description": "promo code visible", "confidence": "medium"}
+        ]
+    finally:
+        with dedupe.get_conn() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM artifacts WHERE ad_id=%s", (ad_id,))
+            conn.commit()
+
+
 def test_get_artifact_returns_angle_id_and_text_in_image():
     """dashboard.py's api_edit_image reads these back to restore the original generation's
     rule-6 mode on edit - get_artifact must actually return them, not just accept angle_id

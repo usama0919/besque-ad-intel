@@ -327,6 +327,119 @@ def test_process_ad_persists_empty_operator_instruction_as_empty_string(monkeypa
     assert captured["operator_instruction"] == ""
 
 
+# ---- Prompt 4, Item 1: output critic - a SAFETY control, non-blocking, runs AFTER
+# save_artifact, never fails the run, never surfaces low confidence, defaults off ----
+
+def test_process_ad_does_not_call_critic_when_check_output_off(monkeypatch):
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+          "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    _mock_all_stages(monkeypatch)
+    calls = []
+    monkeypatch.setattr(pipeline.output_critic, "check_draft", lambda *a, **k: calls.append(1) or [])
+
+    assert pipeline.process_ad(ad) == "processed"  # check_output defaults to False
+    assert calls == []
+
+
+def test_process_ad_calls_critic_after_save_artifact_when_check_output_on(monkeypatch, tmp_path):
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+          "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    _mock_all_stages(monkeypatch)
+    draft_path = tmp_path / "draft.png"
+    draft_path.write_bytes(b"\x89PNG\r\n\x1a\nfakepngbytes")
+    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image",
+                        lambda bp, aid, product=None, reference_images=None, **k: str(draft_path))
+
+    call_order = []
+    monkeypatch.setattr(pipeline.dedupe, "save_artifact", lambda **k: call_order.append("save_artifact"))
+    captured = {}
+
+    def fake_check_draft(image_bytes, brand_rules_text, **k):
+        call_order.append("check_draft")
+        captured["image_bytes"] = image_bytes
+        captured["brand_rules_text"] = brand_rules_text
+        captured.update(k)
+        return [{"category": "testimonial", "description": "fabricated quote", "confidence": "high"}]
+
+    monkeypatch.setattr(pipeline.output_critic, "check_draft", fake_check_draft)
+    findings_calls = []
+    monkeypatch.setattr(pipeline.dedupe, "update_artifact_findings",
+                        lambda ad_id, findings, angle_id=None: findings_calls.append((ad_id, findings, angle_id)))
+
+    assert pipeline.process_ad(ad, check_output=True) == "processed"
+    # save_artifact must happen BEFORE check_draft - never before, per the safety
+    # requirement that a slow/failed check can never lose an already-persisted draft.
+    assert call_order == ["save_artifact", "check_draft"]
+    assert captured["image_bytes"] == b"\x89PNG\r\n\x1a\nfakepngbytes"
+    assert "STRICT RULES" in captured["brand_rules_text"]  # a real brand_rules() call, not a stub
+    assert findings_calls == [(ad_id, [{"category": "testimonial", "description": "fabricated quote",
+                                         "confidence": "high"}], None)]
+
+
+def test_process_ad_critic_uses_the_same_flags_as_generation(monkeypatch, tmp_path):
+    """"the same rules" - brand_rules_text handed to the critic must reflect the ACTUAL
+    generation flags (edit_mode here), not brand_rules()'s bare defaults."""
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+          "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    _mock_all_stages(monkeypatch)
+    draft_path = tmp_path / "draft.png"
+    draft_path.write_bytes(b"\x89PNG\r\n\x1a\nfakepngbytes")
+    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image",
+                        lambda bp, aid, product=None, reference_images=None, **k: str(draft_path))
+    captured = {}
+    monkeypatch.setattr(pipeline.output_critic, "check_draft",
+                        lambda image_bytes, brand_rules_text, **k: captured.update(brand_rules_text=brand_rules_text) or [])
+    monkeypatch.setattr(pipeline.dedupe, "update_artifact_findings", lambda *a, **k: None)
+
+    assert pipeline.process_ad(ad, check_output=True, edit_mode=True) == "processed"
+    assert "SOURCE IMAGE IS THE COMPETITOR'S OWN AD" in captured["brand_rules_text"]
+
+
+def test_process_ad_records_warning_and_leaves_card_unflagged_when_critic_fails(monkeypatch, tmp_path):
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    dedupe.init_pipeline_warnings()
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+          "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    _mock_all_stages(monkeypatch)
+    draft_path = tmp_path / "draft.png"
+    draft_path.write_bytes(b"\x89PNG\r\n\x1a\nfakepngbytes")
+    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image",
+                        lambda bp, aid, product=None, reference_images=None, **k: str(draft_path))
+    monkeypatch.setattr(pipeline.output_critic, "check_draft", lambda *a, **k: None)
+    warnings = []
+    monkeypatch.setattr(pipeline.dedupe, "record_warning", lambda kind, detail: warnings.append((kind, detail)))
+    findings_calls = []
+    monkeypatch.setattr(pipeline.dedupe, "update_artifact_findings", lambda *a, **k: findings_calls.append(1))
+
+    assert pipeline.process_ad(ad, check_output=True) == "processed"
+    assert any(kind == "critic_failed" for kind, detail in warnings)
+    assert findings_calls == []  # card left unflagged - a failed check is not a finding
+
+
+def test_process_ad_critic_exception_never_fails_an_otherwise_successful_run(monkeypatch):
+    """_mock_all_stages' generate_image returns "draft.png" - a path that doesn't exist,
+    so reading it raises. That must be swallowed, never surfaced as a run failure."""
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+          "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    _mock_all_stages(monkeypatch)
+
+    assert pipeline.process_ad(ad, check_output=True) == "processed"
+
+
 def test_process_ad_warns_when_text_in_image_requested_but_headline_missing(monkeypatch):
     """If copy generation produces no usable headline (e.g. an empty string) while
     text_in_image was requested, rule 6 silently falls back to the blanket text ban -

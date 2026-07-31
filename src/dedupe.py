@@ -132,15 +132,20 @@ def init_artifacts():
                 archived      BOOLEAN DEFAULT false,
                 angle_id      INTEGER,
                 text_in_image BOOLEAN DEFAULT false,
-                operator_instruction TEXT DEFAULT ''
+                operator_instruction TEXT DEFAULT '',
+                critic_findings JSONB DEFAULT '[]'
             )
         """)
         # Self-migrating: unlike angle_id/text_in_image/category before it (which each
-        # needed a separate manually-run migrate_*.sql - see CLAUDE.md), this column adds
-        # itself to an already-existing table on every init_artifacts() call. ADD COLUMN
-        # IF NOT EXISTS is additive and idempotent - safe to run unconditionally, and
-        # closes the exact "migration not yet run" gap that stalled the angles rollout.
+        # needed a separate manually-run migrate_*.sql - see CLAUDE.md), these columns add
+        # themselves to an already-existing table on every init_artifacts() call. ADD
+        # COLUMN IF NOT EXISTS is additive and idempotent - safe to run unconditionally,
+        # and closes the exact "migration not yet run" gap that stalled the angles rollout.
         cur.execute("ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS operator_instruction TEXT DEFAULT ''")
+        # critic_findings (Prompt 4, Item 1): the output critic's violations for the
+        # CURRENT draft only - update_artifact_findings replaces this wholesale on every
+        # regenerate, it never accumulates.
+        cur.execute("ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS critic_findings JSONB DEFAULT '[]'")
         conn.commit()
 
 
@@ -260,7 +265,7 @@ def get_artifacts_full(limit=50):
             SELECT a.ad_id, a.page_name, a.image_path, a.blueprint,
                    a.generated_copy, a.draft_image, a.metadata, a.created_at,
                    d.decision, a.image_prompt, a.copy_prompt, a.model_info,
-                   a.angle_id, a.text_in_image, a.operator_instruction
+                   a.angle_id, a.text_in_image, a.operator_instruction, a.critic_findings
             FROM artifacts a
             LEFT JOIN LATERAL (
                 SELECT decision FROM review_decisions r
@@ -273,7 +278,7 @@ def get_artifacts_full(limit=50):
         cols = ["ad_id", "page_name", "image_path", "blueprint", "generated_copy",
                 "draft_image", "metadata", "created_at", "decision",
                 "image_prompt", "copy_prompt", "model_info",
-                "angle_id", "text_in_image", "operator_instruction"]
+                "angle_id", "text_in_image", "operator_instruction", "critic_findings"]
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
@@ -557,6 +562,18 @@ def update_artifact_image_prompt(ad_id, image_prompt, angle_id=None):
         cur.execute(
             "UPDATE artifacts SET image_prompt=%s WHERE ad_id=%s AND angle_id IS NOT DISTINCT FROM %s",
             (image_prompt, ad_id, angle_id),
+        )
+        conn.commit()
+
+
+def update_artifact_findings(ad_id, findings, angle_id=None):
+    """Replace the output critic's findings for one (ad_id, angle_id) artifact - REPLACES
+    wholesale, never accumulates, so a regenerate's findings reflect only the CURRENT
+    draft, not a stale one still describing a violation that's no longer there."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "UPDATE artifacts SET critic_findings=%s WHERE ad_id=%s AND angle_id IS NOT DISTINCT FROM %s",
+            (_json.dumps(findings or []), ad_id, angle_id),
         )
         conn.commit()
 

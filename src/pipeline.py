@@ -5,7 +5,7 @@ ad or failed stage is skipped cleanly without stopping the run.
 """
 import os
 import logging
-from src import dedupe, scrape, assets, deconstruct, generate_copy, generate_image_prompt, slack_review, compliance
+from src import dedupe, scrape, assets, deconstruct, generate_copy, generate_image_prompt, slack_review, compliance, output_critic
 from src.retry import with_retry
 
 FORCE_REPROCESS = os.getenv("FORCE_REPROCESS") == "1"
@@ -61,7 +61,8 @@ def fetch_reference_images(product):
 
 def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
                 realism=None, text_in_image=False, include_product=True,
-                body_area=None, offer_text=None, edit_mode=False, operator_instruction=None):
+                body_area=None, offer_text=None, edit_mode=False, operator_instruction=None,
+                check_output=False):
     """Run one ad through the full pipeline. Returns processed/skipped/failed.
     messaging_angle, if given, is a resolved angle dict (dedupe.get_angle's shape) - it
     changes the dedup identity of this ad to (ad_id, angle_id) instead of ad_id alone, so
@@ -90,7 +91,15 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
     operator_instruction (Step 2) is the run-strip's free-text steering field - forwarded
     to generate_image (which clips it and hands it to both the writer and
     build_image_prompt) AND persisted onto the saved artifact below, so a reviewer can see
-    whether a wrong draft is what the operator actually asked for."""
+    whether a wrong draft is what the operator actually asked for.
+
+    check_output (Prompt 4, Item 1) gates the output critic - a SAFETY control, not a
+    quality feature, since every guardrail up to this point is prompt-only and nothing
+    has ever inspected what Gemini actually produced. Runs strictly AFTER save_artifact
+    (never blocks or risks losing a draft) and never fails the run: any critic failure is
+    caught, recorded as a pipeline_warning, and the card is left unflagged - never treated
+    as a finding of its own. Defaults to False - this is an extra vision call per ad, real
+    cost that multiplies across a sweep, so it's opt-in per run."""
     ad_id = ad.get("ad_id")
     if not ad_id:
         return "failed"
@@ -202,6 +211,39 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
             operator_instruction=operator_instruction or "",
         )
 
+        if check_output:
+            # Strictly AFTER save_artifact - the draft is already safely persisted before
+            # this ever runs, so nothing here can lose it. Wrapped in its own try/except
+            # (on top of check_draft's own internal never-raises contract) as defense in
+            # depth: even a bug in THIS block (e.g. the draft file missing on disk) must
+            # never fail an otherwise-successful run.
+            try:
+                from pathlib import Path as _Path
+                draft_bytes = _Path(draft_image).read_bytes()
+                brand_rules_text = generate_image_prompt.brand_rules(
+                    include_product=include_product, text_in_image=text_in_image,
+                    headline=copy.get("headline"), subtext=copy.get("image_subtext") or None,
+                    edit_mode=edit_mode,
+                )
+                findings = output_critic.check_draft(
+                    draft_bytes, brand_rules_text, headline=copy.get("headline"),
+                    subtext=copy.get("image_subtext") or None, offer_text=offer_text,
+                    include_product=include_product,
+                )
+                if findings is None:
+                    dedupe.init_pipeline_warnings()
+                    dedupe.record_warning(
+                        "critic_failed",
+                        f"Ad {ad_id} ({ad.get('page_name', '?')}): output critic check "
+                        f"failed or was unparseable - draft saved and shown unflagged, "
+                        f"not automatically re-checked.",
+                    )
+                else:
+                    dedupe.update_artifact_findings(ad_id, findings, angle_id=angle_id)
+            except Exception as e:
+                log.warning("Ad %s: output critic block raised (%s: %s), draft left unflagged",
+                            ad_id, type(e).__name__, e)
+
         dedupe.mark_seen(ad_id, ad.get("page_name", ""), angle_id)
 
         try:
@@ -218,7 +260,8 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
 
 def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product_id=None, category=None,
              angle_id=None, realism=None, text_in_image=False, include_product=True,
-             body_area=None, offer_text=None, edit_mode=False, operator_instruction=None):
+             body_area=None, offer_text=None, edit_mode=False, operator_instruction=None,
+             check_output=False):
     """One scheduled run across the watchlist, or a single competitor if
     competitor_id is given, or every competitor tagged with `category` if that's
     given instead. competitor_id takes precedence if both are somehow passed.
@@ -332,7 +375,7 @@ def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product
             result = process_ad(ad, product=product, reference_images=reference_images, messaging_angle=messaging_angle,
                                 realism=realism, text_in_image=text_in_image, include_product=include_product,
                                 body_area=body_area, offer_text=offer_text, edit_mode=edit_mode,
-                                operator_instruction=operator_instruction)
+                                operator_instruction=operator_instruction, check_output=check_output)
             summary[result] += 1
             comp_summary[result] += 1
             if result == "processed":

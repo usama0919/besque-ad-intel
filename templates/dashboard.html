@@ -67,6 +67,14 @@
      whether the operator asked for it. */
   .operator-instruction { font-size:12px; color:#8a5a12; background:#fdf3e0; border:1px solid #f0dcb4;
                            border-radius:6px; padding:6px 12px; margin:0 18px 10px; }
+  /* Prompt 4, Item 1: the output critic surfaces, it never acts - these are shown for a
+     human to weigh before deciding, never auto-rejected or auto-regenerated. Red/high vs
+     amber/medium so the reviewer can triage at a glance. */
+  .critic-findings { font-size:12px; background:#fdeaea; color:#8a2020; border:1px solid #f3c6c6;
+                      border-radius:6px; padding:6px 12px; margin:0 18px 10px; }
+  .critic-findings .cf-item { margin:2px 0; }
+  .critic-findings .cf-conf-high { font-weight:700; text-transform:uppercase; font-size:10px; }
+  .critic-findings .cf-conf-medium { font-weight:600; text-transform:uppercase; font-size:10px; color:#a86a20; }
   .actions { padding:14px 18px; display:flex; gap:10px; border-top:1px solid #f0ece4; }
   .actions button { flex:1; padding:9px; border:none; border-radius:7px; font-size:13px; font-weight:600; cursor:pointer; }
   .btn-a { background:#1a7f42; color:#fff; }
@@ -207,6 +215,13 @@
   </label>
   <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#555;" title="Reproduce the competitor's ad, substituting only the product - off by default (generate from a text brief instead).">
     <input type="checkbox" id="editModeToggle" style="width:auto;"> Edit mode (reproduce reference)
+  </label>
+  <!-- Prompt 4, Item 1: a SAFETY control, not a quality feature - every guardrail on the
+       image path is prompt-only, nothing has ever inspected what Gemini actually
+       produced. Off by default: it's an extra vision call per ad, real cost that
+       multiplies across a sweep (see updateProjectedTotal()'s time estimate). -->
+  <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#555;" title="After generation, ask Claude what the draft actually violates (competitor logos, unauthorised offers, fabricated claims/testimonials, etc.) and flag it on the card - never auto-rejects or auto-regenerates.">
+    <input type="checkbox" id="checkOutputToggle" onchange="updateProjectedTotal()" style="width:auto;"> Check output
   </label>
   <!-- Step 2: freeform per-run steering. Sits in a fixed position in the assembled prompt
        (below brand rules/compliance/rules 6/7/9, above the writer's own composition/mood/
@@ -511,9 +526,17 @@ function renderCards(data){
     const operatorInstructionNote = a.operator_instruction
       ? `<div class="operator-instruction" title="Extra direction the operator gave for this run">Operator direction: ${esc(a.operator_instruction)}</div>`
       : '';
+    // Prompt 4, Item 1: surface, never act - findings are shown for a human to weigh
+    // before deciding, never used to auto-reject or auto-regenerate.
+    const criticFindings = (a.critic_findings||[]).length
+      ? `<div class="critic-findings" title="Output critic: what this draft actually shows, checked after generation">` +
+        (a.critic_findings||[]).map(f => `<div class="cf-item"><span class="cf-conf-${esc((f.confidence||'').toLowerCase())}">${esc(f.confidence||'')}</span> ${esc(f.category||'')}: ${esc(f.description||'')}</div>`).join('') +
+        `</div>`
+      : '';
     return `<div class="card">
       <div class="card-head"><span class="comp">${esc(a.page_name)||'Competitor'} <span style="font-size:11px;color:#aaa;font-weight:400;">· ${a.created_at||''}</span></span>${badge}</div>
       ${operatorInstructionNote}
+      ${criticFindings}
       <div class="split">
         <div class="side orig"><div class="lbl">Competitor Ad</div>${orig}
           <div class="angle">${esc(bp.angle||bp.format||'')}</div></div>
@@ -969,13 +992,29 @@ function updateRunButtonState(){
 
 // Ad count is PER-COMPETITOR - a category sweep multiplies by the number of matching
 // competitors ("2 ads" across 6 brands is 12 generations, not 2). Must be visible before
-// the run starts, not discovered afterward.
+// the run starts, not discovered afterward. Rough estimate, not measured - an extra
+// vision call per ad for the output critic (Prompt 4, Item 1), real cost that multiplies
+// across a sweep just like the generation count itself.
+const CHECK_OUTPUT_SECONDS_PER_AD = 15;
+
 function updateProjectedTotal(){
   const el = document.getElementById('projectedTotal');
-  if(selectedCompetitorId !== null || !selectedCategory){ el.textContent = ''; return; }
   const nAds = parseInt(document.getElementById('adCount').value, 10) || 0;
-  const count = categoryCompetitorCount(selectedCategory);
-  el.textContent = '= up to ' + (nAds*count) + ' generations across ' + count + ' competitor' + (count===1?'':'s');
+  const checkOutput = document.getElementById('checkOutputToggle').checked;
+  const parts = [];
+  let totalAds = null;
+  if(selectedCompetitorId === null && selectedCategory){
+    const count = categoryCompetitorCount(selectedCategory);
+    totalAds = nAds * count;
+    parts.push('= up to ' + totalAds + ' generations across ' + count + ' competitor' + (count===1?'':'s'));
+  } else if(selectedCompetitorId !== null){
+    totalAds = nAds;
+  }
+  if(checkOutput && totalAds){
+    const extraMin = Math.round((totalAds * CHECK_OUTPUT_SECONDS_PER_AD / 60) * 10) / 10;
+    parts.push('+~' + extraMin + ' min for output checks');
+  }
+  el.textContent = parts.join('  ');
 }
 
 async function addCompetitorRow(){
@@ -1082,6 +1121,7 @@ async function runPipeline(){
   const bodyArea = document.getElementById('bodyAreaInput').value.trim();
   const offerText = document.getElementById('offerTextInput').value.trim();
   const editMode = document.getElementById('editModeToggle').checked;
+  const checkOutput = document.getElementById('checkOutputToggle').checked;
   const operatorInstruction = document.getElementById('operatorInstructionInput').value.trim();
   // Persist the value actually used for this run as "last-used" - see loadOperatorInstruction().
   // localStorage (not just leaving it in the DOM) survives a page reload/new tab, matching
@@ -1098,6 +1138,7 @@ async function runPipeline(){
     +(bodyArea?('&body_area='+encodeURIComponent(bodyArea)):'')
     +(offerText?('&offer_text='+encodeURIComponent(offerText)):'')
     +'&edit_mode='+(editMode?'1':'0')
+    +'&check_output='+(checkOutput?'1':'0')
     +(operatorInstruction?('&operator_instruction='+encodeURIComponent(operatorInstruction)):''),
     {method:'POST'});
   const poll=setInterval(async()=>{
