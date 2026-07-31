@@ -1,5 +1,32 @@
 # besque-ad-intel — working notes for Claude
 
+## Prompt-only guardrails do not bind on the image path — read this before adding
+## an eighth instruction
+Four rounds of increasingly explicit `brand_rules()`/writer instructions failed to stop
+leaks from reference ads into generated drafts. A single live sweep on 2026-08-04 shipped
+all six of these, each one directly forbidden in text at the time:
+1. A competitor's "GLOW APPROVED" seal reproduced intact, despite rule 9 explicitly
+   banning every competitor brand mark.
+2. "SELLING FAST — ONLY 100 SETS LEFT!" (an unauthorised scarcity/stock-count claim).
+3. "SUMMER SALE" tiled as the entire background (the offer ban was read as applying to
+   badges only, not a full-background pattern).
+4. "RM15 OFF FIRST ORDER — USE CODE NEW15" — an invented promo code that doesn't exist.
+5. "+25% VISIBLY MORE MOISTURISED SKIN*" — an efficacy claim we cannot substantiate.
+6. An invented customer testimonial.
+
+The pattern is conclusive, not a string of unlucky prompts: **the model does not reliably
+obey a text instruction about what NOT to render, especially in edit mode, where a real
+photograph is the input and the forbidden content is already sitting in the pixels.**
+`src/output_critic.py` (Prompt 4, Item 1) exists because of this — it inspects the
+GENERATED image after the fact and flags what actually rendered, which is the only check
+in this codebase that has ever been proven to catch these categories.
+
+**When a new leak of this shape turns up, the fix is to extend `output_critic.CRITIC_SYSTEM`'s
+checklist (and `CITED_RULE_IDS` if it ties to a numbered rule), not to add another
+prompt clause to `brand_rules()`/the writer/`_edit_mode_instruction`.** A ninth rule or a
+longer STRICT block has the same failure mode as the first eight rules already there —
+more prompt text is not the lever that has ever worked for this class of bug.
+
 ## Environment
 - Windows 11 + **PowerShell**. No bash syntax: no heredocs, no inline `VAR=x cmd`, no
   `&&`/`||` (use `;` or `if ($?) { }`), `2>$null` not `2>/dev/null`.
@@ -140,17 +167,17 @@ blueprint reused). Final failure is recorded via
   (`s[:i] + new + s[j:]`) — especially not a live template.
 - No destructive DB or filesystem commands without asking; dry-run and show counts first.
 
-## Known gaps (as of 2026-07-30)
+## Known gaps (as of 2026-08-04)
 - `brand_voice`, `approved_claims`, `approved_testimonials` are empty at every real call
   site — still owed by Harry — compliance mechanical checks are correspondingly
   strict-by-default until real approved material is wired through.
 - `edit_image` can't restore `include_product` on a re-edit — there's no column to read
   it back from (unlike `text_in_image`/`generated_copy`, which the artifact row does
   carry). Known, unfixed gap.
-- No category picker in the dashboard UI — `competitors.category`/`products.category`
-  are only settable via direct API calls or DB writes, not through any dashboard control.
-- `get_artifacts_full` is still hardcoded to `LIMIT 50` — older artifacts silently fall
-  off the dashboard feed once a competitor/category run produces more than that.
+- `get_artifacts_full`'s own default is still `LIMIT 50`, but both real call sites
+  (`dashboard.py`'s `/api/artifacts` and `/api/page_lookup`) explicitly pass `limit=500`,
+  so this is no longer the practical gap it was — only matters again if a new caller
+  forgets to override the default, or artifact count ever exceeds 500.
 - Bottle fidelity is blocked on Pillow compositing: the product cutout is parked at
   `product_assets/` but nothing composites it into the generated draft yet, so bottle
   accuracy still depends entirely on Gemini interpreting `visual_description` +
@@ -161,8 +188,19 @@ blueprint reused). Final failure is recorded via
   transient Anthropic `529`. Left untouched, no category invented.
 - Only competitors id=42 (Bangn Body) and id=48 (The Ayurveda Experience) are tagged
   `body_oil` — a category-scoped run currently hits just those two.
-- Nothing deployed since 27 Jul 2026 — everything below is committed and pushed to
-  `main`, but Cloud Run is still running the 27 Jul build; none of Prompt B is live yet.
+- **Product-matched reference selection is deliberately deferred.** Nothing in the
+  pipeline picks a reference ad based on how well it matches the selected product (e.g. by
+  category, format, or prior performance) — every scraped ad in the candidate pool is
+  treated the same. Left alone pending evidence it's actually needed; don't build it
+  speculatively.
+- **`operator_instruction` pre-fill is per-browser, not per-user** — it's read/written via
+  `localStorage` (`dashboard.html`'s `loadOperatorInstruction()`/`runPipeline()`), so the
+  same operator switching machines or browsers won't see their last-used steering carry
+  over. Fine for the single-operator-per-session workflow today; would need a server-side
+  per-user setting (like `brand_settings`) to fix properly.
+- Nothing deployed since 27 Jul 2026 — everything below (all of Prompt B, edit mode, and
+  Prompt 4 items 1-5) is committed and pushed to `main`, but Cloud Run is still running
+  the 27 Jul build; none of it is live.
 
 ## Prompt B — messaging angles + Claude prompt-writer pass (COMPLETE as of 2026-07-30)
 
@@ -245,3 +283,136 @@ above. Never let the writer read a signal that isn't also gated mechanically dow
   operator preview/approval step between the writer producing `creative_description` and
   it being handed to Gemini. Review happens on the resulting draft image on the card, same
   as every other draft.
+
+## Edit mode — reproduce the reference, substitute the product (2026-08-01 onward)
+This is what finally produced recognisable clones, after generate mode's from-scratch
+approach (a text description handed to Gemini, no image reference) reliably drifted from
+the source composition. Off by default (`edit_mode` toggle on the run strip, team confirmed
+usage is roughly 50/50 generate-vs-edit) — generate mode is unchanged when it's off.
+
+- The competitor's own ad image is passed to Gemini as an input `Part` (`google.genai`
+  `Part.from_bytes`), attached FIRST, ahead of the product's own reference photos, with
+  framing text distinguishing the two roles explicitly: one is the ad to reproduce, the
+  others are the Besque product to substitute in. `pipeline.process_ad` reuses the SAME
+  bytes already downloaded for `deconstruct_image` — never a second download.
+- The Claude prompt-writer pass is **skipped entirely** in edit mode, even when an angle
+  is selected — the reference image IS the creative brief; a text `creative_description`
+  from the writer would just fight it. `build_image_prompt`'s `edit_mode` branch replaces
+  the writer/template scene text with `_edit_mode_instruction`'s own assembly.
+- Rule 9 (`_RULE_9_SOURCE_IMAGE_IS_THE_COMPETITORS_AD`, edit-mode-only, additive to
+  `brand_rules()`) states explicitly that every competitor brand mark — logo, emblem,
+  watermark, roundel, badge, seal — must be removed, not just the product itself; a corner
+  mark or seal counts exactly as much as the product label. Still prompt-only (see the
+  guardrails note above) — the critic is the actual backstop.
+- Colour palette substitution (Prompt 4, Item 5) is stated as ONE integrated instruction
+  with the reproduce-faithfully instruction, not two competing ones: "geometry is
+  preserved, colour is substituted." A separate `retheme_colours` toggle (default ON, per
+  the team's own doc) governs this; OFF reverts byte-for-byte to the original
+  faithful-colour-clone wording. The palette itself is DATA (`brand_settings` table,
+  editable from the dashboard sidebar), never a hardcoded string.
+
+## Operator instruction — free-text steering, fixed precedence position (Step 2, 2026-08-02)
+The "Extra direction for this run" field on the run strip. Threaded like every other
+run-strip control: `api_run` → `RUN_INSTRUCTION` env var → `job_runner` → `run_once` →
+`process_ad` → `generate_image`.
+
+**Precedence is fixed and tested, not incidental**: `build_image_prompt` inserts it
+(`_operator_instruction_clause`) immediately after `brand_rules()` (rules 1-9 + compliance
+C1-C6), and *before* whatever supplies the scene text (`creative_description` /
+`_edit_mode_instruction` / the template). The clause states its own boundary in the prompt
+text itself — "can NEVER grant a permission the rules above forbid" — so it can steer HOW
+a scene looks without ever being able to authorise something a rule bans. Tests assert
+this both by string position and by confirming instructions like "add a 50% off badge" or
+"keep the competitor's logo" don't touch the corresponding guardrail text.
+
+Persisted on the artifact (`operator_instruction` column, self-migrating) and shown on the
+card, so a reviewer can see whether the operator asked for a wrong-looking draft. Pre-filled
+from `localStorage` — see the per-browser-not-per-user gap noted above.
+
+## Category picker, projected totals, run progress (Step 3, 2026-08-03)
+`run_once(category=...)` already existed server-side; this made it reachable from the UI.
+- Run-strip category `<select>`, options built dynamically from the DISTINCT categories
+  actually present on competitors (never the fixed product-category schema enum), plus
+  "All competitors" and a blank default. Selecting a category visibly clears any selected
+  competitor in the sidebar (and vice versa) so the operator can always see which mode is
+  active; the status line shows `"Category: body_oil — 6 competitors"`.
+- Ad count is **per-competitor** — a category sweep multiplies by the number of matching
+  competitors, so "2 ads" across 6 brands is 12 generations, not 2. A projected-total span
+  next to Run states this before the run starts: `"= up to 12 generations across 6
+  competitors"`.
+- New `run_progress` table (single-row, self-migrating, same reasoning as
+  `pipeline_warnings`): DB-backed, not an in-memory variable, because the Cloud Run Job
+  path is a separate process with no shared memory with the dashboard — this is the only
+  channel that can report "which competitor is running now" for BOTH run paths.
+  `/api/run/status` surfaces it identically regardless of mode; the dashboard's progress
+  line shows the live competitor name/index once available, falling back to the old
+  elapsed-time guess only before the first real value lands.
+- `run_once`'s summary gained `by_competitor: {name: {ads_seen, processed, skipped,
+  failed, error}}` — image yield varies hugely per brand (CLAUDE.md's own earlier note:
+  roughly 1/10 to 8/10 across pages), so a thin sweep total needs this breakdown to read
+  as the pool, not a mystery.
+
+**Measured sweep timing (2026-08-04, real run)**: 12 drafts across 6 competitors completed
+in 24:26 — roughly 2 minutes per ad. Processing is **sequential**, not parallelised across
+competitors or ads, so this scales linearly: a 50-ad sweep is on the order of 100 minutes,
+not a fixed cost. Size category-sweep ad counts with this in mind.
+
+## Prompt 4 — compliance hardening after the six-violation sweep (2026-08-04)
+Seven items, ordered by risk, each its own commit so they can be bisected independently.
+
+**Landed (committed on `main`, not deployed):**
+1. **Output critic** (`src/output_critic.py`) — see the guardrails note at the top of this
+   file. Post-hoc vision inspection of the GENERATED draft; the only check proven to catch
+   the six-violation class. Non-blocking (runs after `save_artifact`, never fails a run),
+   surface-only (never auto-rejects/regenerates), high/medium confidence only. Gated by a
+   `check_output` run-strip toggle (off by default — real cost, an extra vision call per
+   ad). `CITED_RULE_IDS` ties its checklist to actual rule numbers so it can't silently
+   drift from `brand_rules()` without a test noticing.
+2. **Two compliance holes**: `FIRST_PERSON_PATTERN` only matched literal "I" — extended to
+   catch first-person possessive testimonial phrasing ("my new staple") with no "I" at
+   all. New `check_unauthorized_efficacy_claim` (always-on, unlike the offer check) catches
+   ratio/timescale efficacy claims ("3x more effective", "in just 7 days") that the
+   existing percentage-only `NUMERIC_CLAIM_PATTERN` didn't reach — extended to both the
+   copy path (mechanical) and the image path (prompt-only, since `approved_claims` isn't
+   threaded to images at all).
+3. **Hard-block medical/clinical/intimate-health/anatomically-explicit references**
+   (`src/content_safety.py`) — NOT a judgment call, blocks before generation ever starts.
+   Reuses signals already extracted by the classifier (`product_category.signals`,
+   `visual.subject`, etc.) rather than a new blueprint field; only blocks on the
+   combination of a medical keyword AND a non-product-like category, so a loose word
+   choice ("hair treatment") against an ordinary `body_oil` classification never triggers
+   it.
+4. **Flag (never filter) references whose format can't carry a single-product message**
+   (`src/reference_format.py`) — `layout_detail.product_count > 1`, `creative_format` of
+   `offer_led`/`comparison`, or a bundle mechanic in `offer.mechanic`. Surfaced on the card
+   ("reference was a 6-product bundle offer"), never gates generation — filtering shrinks
+   an already-thin pool, flagging never does.
+5. **Colour palette + typography substitution** — see the Edit mode section above.
+   `TYPOGRAPHY_GUIDANCE` maps `creative_format` to a Besque typeface style (clean
+   sans-serif for direct-response, elegant serif for premium/editorial, handwritten marker
+   for testimonial-style) rather than copying the reference's own font, with the same
+   import-time coverage assertion pattern as `PRODUCTION_STYLE_GUIDANCE`.
+   **Caught during implementation, not by a live run**: the new `palette` parameter
+   collided with an existing local variable of the same name (`visual.get("palette_mood",
+   ...)`) inside `build_image_prompt`, silently shadowing the caller's value before
+   `_edit_mode_instruction` ever saw it — renamed to `brand_palette` throughout. A reminder
+   that a parameter name alone doesn't guarantee no collision in a large function.
+
+**Not started:**
+6. **Three edit-mode corrections.** *Why these matter*: aspect ratio is currently forced to
+   a hardcoded "Square 1:1" even in edit mode, so a portrait reference comes out square —
+   a clone that changes shape isn't a clone; needs to inherit from the reference and stay
+   1:1-forced only in generate mode. The product-substance instruction currently says
+   "match the product" rather than naming the actual colour from
+   `products.visual_description` ("bright golden-amber oil") — pointing at a colour is
+   weaker than naming it. Suppressing text currently leaves the CONTAINER behind empty
+   (a real draft rendered a green "Don't Miss Out!" oval with no text in it, and six empty
+   callout bubbles) — must remove the badge/pill/oval/button/banner/ribbon itself, not
+   just its contents. The offer ban needs explicit scarcity/stock-count/promo-code/
+   sale-wallpaper coverage — "SUMMER SALE" survived as a tiled background because the
+   existing ban read as applying to badges only, not a full-background pattern.
+7. **Prompt length check.** *Why it matters*: every item above has added more text to the
+   assembled prompt (rules 1-9, compliance C1-C6, operator instruction, edit-mode
+   instruction, palette, typography, efficacy ban, offer ban...) — nobody has yet checked
+   the total against Gemini's actual input token/character limit, so a long prompt could
+   be silently truncated with no visible symptom beyond a worse draft.
