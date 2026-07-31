@@ -228,6 +228,13 @@ def _build_user_prompt(blueprint, product=None, angle=None, realism=None, body_a
             "CTA button text - neither may appear either, even if the reference has one."
         )
     lines.append(
+        "Efficacy claims (STRICT, overrides anything above): describe NO quantified "
+        "efficacy claim of any kind - no percentage improvement (e.g. '+25% more "
+        "moisturised'), no ratio ('3x more effective', 'twice as fast'), and no timescale "
+        "('in just 7 days') - even if the reference ad had one. None has been approved "
+        "for this run."
+    )
+    lines.append(
         "Product category (STRICT, overrides anything above): Besque sells a body OIL, "
         "never any other category. Never name, describe, or imply 'lotion', 'cream', "
         "'serum', 'balm', 'gel', or any other product category anywhere in the scene or in "

@@ -407,6 +407,12 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             "reference has one. Reproduce any such button's shape and position as clean "
             "empty space or neutral wording only, never the competitor's urgency wording. "
         )
+    base += (
+        "EFFICACY CLAIMS: describe NO quantified efficacy claim of any kind - no "
+        "percentage improvement (e.g. '+25% more moisturised'), no ratio ('3x more "
+        "effective', 'twice as fast'), and no timescale ('in just 7 days') - even if the "
+        "reference shows one. None has been approved for this run. "
+    )
     return base
 
 # Per-production-style guidance, keyed by blueprint.production_style.style. Swapped in as a

@@ -60,7 +60,13 @@ QUOTE_PATTERN = re.compile(r'["“]([^"”]{12,})["”]')
 
 FIRST_PERSON_PATTERN = re.compile(
     r"\bI(?:'m|'ve|'d)?\b[^.!?]{0,60}\b(ordered|bought|received|tried|notic\w*|felt|"
-    r"love[d]?|recommend|us(?:e|ed|ing)|started|switched|repurchased|purchased)\b",
+    r"love[d]?|recommend|us(?:e|ed|ing)|started|switched|repurchased|purchased)\b"
+    # "my new staple"/"my go-to"/"my holy grail" etc. is first-person testimonial
+    # phrasing with no literal "I" anywhere - a real draft ("The results are incredible.
+    # This oil is my new staple.") slipped through the check above entirely because of
+    # this gap. "my" + a personal-favourite noun is the same class of endorsement as
+    # "I love this", just phrased as a possessive instead of a verb.
+    r"|\bmy\s+(?:new\s+|absolute\s+)?(?:favou?rite|go-to|staple|holy\s+grail)\b",
     re.IGNORECASE,
 )
 
@@ -207,6 +213,53 @@ def check_unapproved_numeric_claims(generated_copy, approved_claims=""):
     return issues
 
 
+# Rule C3 mechanical check, extending check_unapproved_numeric_claims: that function
+# already catches a bare percentage or "N out of M" via NUMERIC_CLAIM_PATTERN (so
+# "+25% VISIBLY MORE MOISTURISED SKIN*" was already flagged there) - these two patterns
+# catch the phrasing it does NOT: a ratio ("3x more", "twice as effective") or a timescale
+# ("in just 7 days") efficacy claim carrying no percentage sign at all.
+RATIO_CLAIM_PATTERN = re.compile(
+    r"\b\d+(?:\.\d+)?\s?x\s+(?:more|faster|better|stronger|greater)\b"
+    r"|\b\d+\s+times?\s+(?:more|faster|better|as\s+(?:effective|fast|strong))\b"
+    r"|\btwice\s+as\s+(?:effective|fast|strong|good)\b"
+    r"|\bdouble\s+the\b",
+    re.IGNORECASE,
+)
+
+TIMESCALE_CLAIM_PATTERN = re.compile(
+    r"\bin\s+(?:just\s+)?\d+\s+(?:days?|weeks?|hours?)\b"
+    r"|\bwithin\s+\d+\s+(?:days?|weeks?|hours?)\b"
+    r"|\b\d+-day\s+results?\b",
+    re.IGNORECASE,
+)
+
+
+def check_unauthorized_efficacy_claim(generated_copy, approved_claims=""):
+    """Rule C3 mechanical check for ratio/timescale efficacy claims - the class
+    check_unapproved_numeric_claims's percentage-only NUMERIC_CLAIM_PATTERN doesn't
+    reach. Same substantiation rule: any hit must be explicitly present in APPROVED
+    CLAIMS or it's flagged, no matter how the claim is phrased. Always on (unlike
+    check_unauthorized_offer's offer_text-gated design) - unlike an offer, which is
+    legitimately absent from most runs by design, an efficacy claim should never be
+    allowed through unsubstantiated, run or no run-level toggle."""
+    issues = []
+    gen = " ".join(str(v) for v in generated_copy.values())
+    approved_norm = _normalize(approved_claims)
+    for pattern, label in ((RATIO_CLAIM_PATTERN, "Ratio"), (TIMESCALE_CLAIM_PATTERN, "Timescale")):
+        for match in pattern.finditer(gen):
+            claim = match.group(0)
+            if approved_norm and _normalize(claim) in approved_norm:
+                continue
+            reason = ("no APPROVED CLAIMS were supplied to substantiate it (approved_claims is empty)"
+                      if not approved_norm else
+                      "it does not appear in the supplied APPROVED CLAIMS")
+            issues.append(
+                f"{label} efficacy claim '{claim}' found in generated copy but {reason} - "
+                f"flagged as likely fabricated, not a false positive."
+            )
+    return issues
+
+
 def check_compliance(generated_copy, competitor_page_name, competitor_text="",
                       approved_claims="", approved_testimonials="", offer_text=_UNSET):
     """Return (ok: bool, issues: list[str]).
@@ -215,7 +268,9 @@ def check_compliance(generated_copy, competitor_page_name, competitor_text="",
       - competitor brand/page name appearing in generated copy
       - any long verbatim run (>=6 words) copied from the competitor's ad text
       - fabricated testimonials / unapproved quoted or first-person endorsement (rule C2)
-      - unapproved numeric/quantified claims (rule C2/C3)
+      - unapproved numeric/quantified claims (rule C2/C3), including ratio/timescale
+        phrasing with no percentage sign (always on, never gated by a toggle - see
+        check_unauthorized_efficacy_claim)
       - unauthorized discount/price/urgency mechanic, ONLY when offer_text is explicitly
         passed (even as "" or None) - see check_unauthorized_offer and the _UNSET sentinel
         above. pipeline.py always passes it; every pre-existing caller that doesn't know
@@ -244,6 +299,11 @@ def check_compliance(generated_copy, competitor_page_name, competitor_text="",
 
     # 4. Unapproved numeric/quantified claims (rule C2/C3)
     issues.extend(check_unapproved_numeric_claims(generated_copy, approved_claims))
+
+    # 4b. Ratio/timescale efficacy claims (rule C3) - always on, unlike the offer check
+    # below: an efficacy claim should never be allowed through unsubstantiated regardless
+    # of any run-level toggle, so this isn't gated behind a sentinel.
+    issues.extend(check_unauthorized_efficacy_claim(generated_copy, approved_claims))
 
     # 5. Unauthorized offer/discount/urgency mechanic - opt-in via the _UNSET sentinel,
     # see check_compliance's docstring.

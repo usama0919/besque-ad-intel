@@ -316,3 +316,19 @@ def test_generate_image_edit_mode_skips_the_writer_even_with_an_angle(monkeypatc
         competitor_image_bytes=b"\x89PNG\r\n\x1a\ncompetitor-bytes",
     )
     assert calls == []
+
+
+# ---- Prompt 4, Item 2: efficacy claims banned unconditionally in edit mode too ----
+
+def test_edit_mode_instruction_bans_efficacy_claims_unconditionally():
+    for kwargs in ({}, {"offer_text": "20% off"}, {"include_product": False},
+                   {"reference_has_product": False}):
+        instruction = generate_image_prompt._edit_mode_instruction(**kwargs)
+        assert "describe NO quantified efficacy claim of any kind" in instruction
+        assert "percentage improvement" in instruction
+        assert "in just 7 days" in instruction
+
+
+def test_build_image_prompt_edit_mode_forwards_efficacy_ban():
+    prompt = generate_image_prompt.build_image_prompt(_blueprint(), edit_mode=True)
+    assert "describe NO quantified efficacy claim of any kind" in prompt

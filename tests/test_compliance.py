@@ -171,3 +171,81 @@ def test_discount_exemption_is_local_not_blanket():
     assert ok is False
     assert any("94%" in i for i in issues)
     assert not any("20%" in i for i in issues)
+
+
+# ---- Prompt 4, Item 2: two live compliance holes ----
+
+def test_my_new_staple_testimonial_without_pronoun_i_is_flagged():
+    """Regression guard for the exact real failure: "The results are incredible. This
+    oil is my new staple." is a fabricated testimonial with no approved testimonial
+    supplied - C2 forbids this, but FIRST_PERSON_PATTERN only matched literal "I
+    ordered/bought/etc", never catching first-person possessive phrasing like "my new
+    staple" that contains no "I" at all."""
+    copy = {"headline": "Firmer skin, naturally",
+            "primary_text": "The results are incredible. This oil is my new staple.",
+            "cta": "Shop now"}
+    ok, issues = compliance.check_compliance(copy, "Brand", "")
+    assert ok is False
+    assert any("First-person" in i for i in issues)
+
+
+def test_my_go_to_and_holy_grail_phrasing_also_flagged():
+    for phrase in ("this is my go-to", "this is my holy grail", "my absolute favourite"):
+        copy = {"headline": phrase, "primary_text": "x", "cta": "y"}
+        ok, issues = compliance.check_compliance(copy, "Brand", "")
+        assert ok is False, f"{phrase!r} should have been flagged"
+
+
+def test_percentage_efficacy_claim_still_flagged_by_existing_check():
+    """The reported "+25% VISIBLY MORE MOISTURISED SKIN*" claim is a plain percentage -
+    already caught by check_unapproved_numeric_claims's NUMERIC_CLAIM_PATTERN, not a new
+    gap. Confirms that path still works alongside the new ratio/timescale check."""
+    copy = {"headline": "+25% VISIBLY MORE MOISTURISED SKIN*", "primary_text": "x", "cta": "y"}
+    ok, issues = compliance.check_compliance(copy, "Brand", "")
+    assert ok is False
+    assert any("25%" in i for i in issues)
+
+
+def test_ratio_efficacy_claim_flagged():
+    copy = {"headline": "3x more effective than leading serums", "primary_text": "x", "cta": "y"}
+    issues = compliance.check_unauthorized_efficacy_claim(copy)
+    # The pattern captures up to the comparative word ("3x more") - the trailing
+    # adjective isn't part of the match, but the claim is still correctly flagged.
+    assert any("3x more" in i for i in issues)
+
+
+def test_twice_as_effective_phrasing_flagged():
+    copy = {"headline": "Twice as effective overnight", "primary_text": "x", "cta": "y"}
+    issues = compliance.check_unauthorized_efficacy_claim(copy)
+    assert any("twice as effective" in i.lower() for i in issues)
+
+
+def test_timescale_efficacy_claim_flagged():
+    copy = {"headline": "Visible results in just 7 days", "primary_text": "x", "cta": "y"}
+    issues = compliance.check_unauthorized_efficacy_claim(copy)
+    assert any("in just 7 days" in i for i in issues)
+
+
+def test_efficacy_claim_passes_when_present_in_approved_claims():
+    copy = {"headline": "3x more effective than leading serums", "primary_text": "x", "cta": "y"}
+    issues = compliance.check_unauthorized_efficacy_claim(
+        copy, approved_claims="3x more effective than leading serums, per an independent consumer trial"
+    )
+    assert issues == []
+
+
+def test_efficacy_claim_check_is_always_on_in_check_compliance():
+    """Unlike check_unauthorized_offer, this must fire with no sentinel/opt-in needed -
+    an efficacy claim should never be allowed through unsubstantiated, run or no
+    run-level toggle."""
+    copy = {"headline": "3x more effective overnight", "primary_text": "x", "cta": "y"}
+    ok, issues = compliance.check_compliance(copy, "Brand", "")  # no offer_text passed at all
+    assert ok is False
+    assert any("Ratio" in i for i in issues)
+
+
+def test_clean_copy_with_no_efficacy_claim_still_passes():
+    copy = {"headline": "Firmer skin at any age", "primary_text": "Natural oils for women 40+", "cta": "Shop"}
+    ok, issues = compliance.check_compliance(copy, "Brand", "")
+    assert ok is True
+    assert issues == []

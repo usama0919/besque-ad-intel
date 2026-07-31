@@ -421,3 +421,20 @@ def test_offer_text_absent_also_bans_urgency_phrasing_and_cta_button_text():
     assert "describe NO offer, badge, price, discount, or percentage of any kind" in prompt
     assert "urgency phrasing" in prompt
     assert "CTA button text" in prompt
+
+
+# ---- Prompt 4, Item 2: efficacy claims are always banned in the image path (no
+# approved_claims threading exists at this layer, so this is unconditional, not gated) ----
+
+def test_efficacy_claims_always_banned_regardless_of_offer_text():
+    for offer_text in (None, "20% off launch week"):
+        prompt = writer._build_user_prompt({}, offer_text=offer_text)
+        assert "describe NO quantified efficacy claim of any kind" in prompt
+        assert "percentage improvement" in prompt
+        assert "3x more effective" in prompt or "ratio" in prompt.lower()
+        assert "in just 7 days" in prompt
+
+
+def test_efficacy_claims_ban_present_even_with_include_product_false():
+    prompt = writer._build_user_prompt({}, include_product=False)
+    assert "describe NO quantified efficacy claim of any kind" in prompt
