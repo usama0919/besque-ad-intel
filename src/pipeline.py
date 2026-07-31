@@ -114,14 +114,18 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
             # default, but once text_in_image renders an angle-specific headline into the
             # image, copy that doesn't know the angle is likely to read mismatched - revisit
             # generate_copy_live's inputs if that mismatch shows up in practice.
-            copy_kwargs = {"product": product}
+            copy_kwargs = {"product": product, "offer_text": offer_text}
             if copy_attempt > 1:
                 # Fail-soft: feed the SPECIFIC prior failure back rather than discarding
                 # the ad outright. On-category pool is small (36 ads) - throwing one away
                 # over a fixable copy issue is expensive. Same blueprint, only copy retried.
                 copy_kwargs["compliance_feedback"] = issues
             copy = generate_copy.generate_copy_live(blueprint, **copy_kwargs)
-            ok, issues = compliance.check_compliance(copy, ad.get("page_name", ""), ad.get("text", ""))
+            # offer_text=offer_text (not omitted) activates check_unauthorized_offer - a
+            # real incident produced "50% off - ONLY while stock lasts" in generated copy
+            # with offer_text empty, sourced from the competitor's own blueprint.offer.
+            ok, issues = compliance.check_compliance(copy, ad.get("page_name", ""), ad.get("text", ""),
+                                                      offer_text=offer_text)
             if ok:
                 break
             log.warning("Ad %s failed compliance check (attempt %s/%s): %s",
@@ -146,7 +150,12 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
             draft_image = generate_image_prompt.generate_image(
                 blueprint, ad_id, product=product, reference_images=reference_images, angle_slug=angle_slug,
                 include_product=include_product, text_in_image=text_in_image,
-                headline=copy.get("headline"), subtext=copy.get("primary_text"),
+                # subtext MUST be the short image_subtext field, never primary_text: primary_text
+                # is long-form Facebook post body copy (~80 words) - passing it as subtext meant
+                # rule 6 permitted rendering the ENTIRE thing as in-scene typography against
+                # references that carried 10-20 words. image_subtext missing/empty (older copy,
+                # or Claude omitted it) falls back to headline-only, never to the paragraph.
+                headline=copy.get("headline"), subtext=copy.get("image_subtext") or None,
                 messaging_angle=messaging_angle, realism=realism,
                 body_area=body_area, offer_text=offer_text,
             )

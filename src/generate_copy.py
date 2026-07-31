@@ -17,6 +17,7 @@ Return ONLY valid JSON, no preamble or markdown, with exactly these fields:
 - headline (string)
 - primary_text (string)
 - cta (string)
+- image_subtext (string): ONE short line suitable for rendering directly ONTO the image itself - under about 12 words, NOT the full primary_text body copy. Empty string "" if no short line is appropriate for this ad.
 
 Rules:
 - Do NOT mention or reference any competitor brand name.
@@ -37,6 +38,9 @@ APPROVED TESTIMONIALS:
 
 PRODUCT (use ONLY these facts, never invent claims or ingredients):
 {product_info}
+
+OFFER (per-run operator input - governs what offer language, if any, may appear; overrides anything the CREATIVE BLUEPRINT below shows the competitor ad had):
+{offer_clause}
 
 LANGUAGE: Write the copy in the SAME language as the competitor ad shown in the blueprint. If the blueprint's text is in Italian, write Italian; if German, German; and so on. Default to English only if the source language is unclear.
 
@@ -61,8 +65,30 @@ NO_PRODUCT = (
     "None supplied. Refer to a Besque natural body oil in general terms only; do not "
     "invent a product name, ingredients, percentages or numeric results."
 )
+NO_OFFER_TEXT = (
+    "No offer has been supplied for this run. headline/primary_text/image_subtext must "
+    "contain NO discount, percentage, price, sale, or urgency/scarcity mechanic of any "
+    "kind (e.g. \"50% off\", \"while stock lasts\", \"today only\") even if the CREATIVE "
+    "BLUEPRINT below shows the competitor ad had one - that offer belongs to the "
+    "competitor, not Besque. A real incident produced \"50% off - ONLY while stock "
+    "lasts\" this way, lifted from the competitor's own clearance sale."
+)
 
 PRODUCT_FACT_KEYS = ("name", "description", "ingredients", "hero_claim")
+
+
+def _offer_clause(offer_text=""):
+    """STRICT offer instruction, mirroring the image prompt-writer's own offer rule
+    (generate_image_prompt_writer._build_user_prompt) so the same operator input governs
+    both copy and image generation identically: exact wording only when supplied, an
+    absolute ban on any offer/discount/urgency language when it isn't."""
+    if offer_text:
+        return (
+            f"An offer has been supplied for this run: {offer_text}. Use ONLY this exact "
+            f"offer/wording where an offer is mentioned - do not invent a different "
+            f"number, percentage, or term, and do not add a second offer."
+        )
+    return NO_OFFER_TEXT
 
 
 def _product_facts(product):
@@ -76,10 +102,14 @@ def _product_facts(product):
 
 
 def build_copy_prompt(blueprint, brand_voice="", approved_claims="", product=None,
-                       approved_testimonials="", compliance_feedback=None):
+                       approved_testimonials="", compliance_feedback=None, offer_text=""):
     """compliance_feedback is the list of issue strings from a prior failed
     check_compliance call - only passed on a retry, so it's appended as an explicit
-    revision instruction rather than a template placeholder that's usually empty."""
+    revision instruction rather than a template placeholder that's usually empty.
+
+    offer_text is the per-run operator input (dashboard run-strip control, threaded
+    exactly like realism/body_area) - never sourced from blueprint.offer, which is the
+    competitor's own offer, not an authorized Besque one."""
     prompt = COPY_PROMPT.format(
         brand_voice=brand_voice or NO_BRAND_VOICE,
         approved_claims=approved_claims or NO_APPROVED_CLAIMS,
@@ -87,6 +117,7 @@ def build_copy_prompt(blueprint, brand_voice="", approved_claims="", product=Non
         compliance_rules=COMPLIANCE_RULES,
         blueprint=json.dumps(blueprint, indent=2),
         product_info=_product_facts(product),
+        offer_clause=_offer_clause(offer_text),
     )
     if compliance_feedback:
         issues_text = "\n".join(f"- {issue}" for issue in compliance_feedback)
@@ -159,7 +190,7 @@ def _log_parse_failure(attempt, total, max_tokens, message, raw_text, exc):
 
 
 def generate_copy_live(blueprint, brand_voice="", approved_claims="", product=None,
-                        approved_testimonials="", compliance_feedback=None):
+                        approved_testimonials="", compliance_feedback=None, offer_text=""):
     """Send a blueprint to Claude and return validated Besque-adapted copy.
 
     Normally ONE API call. If the response cannot be parsed into the required fields,
@@ -169,7 +200,7 @@ def generate_copy_live(blueprint, brand_voice="", approved_claims="", product=No
     """
     prompt = build_copy_prompt(blueprint, brand_voice, approved_claims, product=product,
                                 approved_testimonials=approved_testimonials,
-                                compliance_feedback=compliance_feedback)
+                                compliance_feedback=compliance_feedback, offer_text=offer_text)
     client = anthropic.Anthropic(timeout=60.0, max_retries=1)  # reads ANTHROPIC_API_KEY from env
 
     total = len(_COPY_ATTEMPTS)

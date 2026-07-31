@@ -39,9 +39,14 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
             product_desc = (
                 f"The featured product is {product.get('name', 'a Besque product')}: {product.get('description', '')} "
                 + (f"Its fixed visual appearance: {visual_desc}. " if visual_desc else "")
-                + f"If any label or ingredient text appears on the product, it must show ONLY these real ingredients: "
-                f"{product.get('ingredients', '')}. Key claim: {product.get('hero_claim', '')}. "
-                f"Never invent ingredients or label text not listed here. "
+                + f"These are the ONLY real ingredients allowed to appear if the product's OWN "
+                f"printed label is legible in the shot: {product.get('ingredients', '')}. This "
+                f"ingredient list exists SOLELY to constrain what the product's own label may "
+                f"say - it is not a list of scene elements. NEVER render any ingredient name as "
+                f"a separate floating callout, badge, sticker, or piece of scene text anywhere "
+                f"else in the image, even if the reference ad's own layout used ingredient "
+                f"callouts. Key claim: {product.get('hero_claim', '')}. Never invent ingredients "
+                f"or label text not listed here. "
             )
         else:
             product_desc = "(a natural botanical body oil in an elegant bottle). "

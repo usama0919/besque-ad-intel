@@ -127,6 +127,29 @@ def _build_user_prompt(blueprint, product=None, angle=None, realism=None, body_a
             "don't copy - see rule 8): " + "; ".join(ld_bits)
         )
 
+    # Text DENSITY to match, distinct from exact wording (governed separately by the
+    # text-in-image STRICT rule below). Real failure this closes: subtext carried the
+    # full ~80-word Facebook primary_text body copy against a reference that legibility_notes/
+    # typography showed carried only a short headline and a name - Gemini rendered the
+    # whole paragraph into the scene. hierarchy_levels' length is the best available proxy
+    # for how many distinct text tiers the reference actually had.
+    density_bits = []
+    if (blueprint or {}).get("legibility_notes"):
+        density_bits.append(f"legibility notes: {blueprint['legibility_notes']}")
+    if layout_detail.get("text_zone"):
+        density_bits.append(f"text zone: {layout_detail['text_zone']}")
+    hierarchy_levels = typography.get("hierarchy_levels") or []
+    if hierarchy_levels:
+        density_bits.append(f"{len(hierarchy_levels)} distinct text tier(s) in the reference")
+    if density_bits:
+        lines.append(
+            "Text DENSITY to match from the competitor ad (composition guidance only - "
+            "exact wording is governed separately by the text-in-image rule below): "
+            + "; ".join(density_bits) + ". If the reference carried only a short headline "
+            "and little else, your description must not add a paragraph of copy or extra "
+            "text elements beyond what the text-in-image rule below actually permits."
+        )
+
     # These constraints are stated LAST, right before the writing instruction, and in
     # absolute terms - not "inspiration", not overridable by anything above (including the
     # competitor's own layout/palette/creative_objective/typography). Real failures this

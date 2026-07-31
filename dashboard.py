@@ -541,7 +541,17 @@ def api_delete_angle(angle_id: int):
 @app.get("/api/warnings")
 def api_warnings():
     dedupe.init_pipeline_warnings()
-    return JSONResponse(dedupe.get_recent_warnings())
+    rows = dedupe.get_recent_warnings()
+    # created_at is a raw datetime (dedupe.py never serialises it, same convention as
+    # get_artifacts_full/get_decisions) - this table being empty until 30 Jul is the only
+    # reason this endpoint ever returned 200: the warnings banner has never once actually
+    # rendered a real warning, since JSONResponse's default encoder can't serialise a
+    # datetime and raises TypeError before the response body is even built.
+    return JSONResponse([
+        {"id": r["id"], "kind": r["kind"], "detail": r["detail"],
+         "created_at": r["created_at"].strftime("%Y-%m-%d %H:%M") if r.get("created_at") else ""}
+        for r in rows
+    ])
 
 
 @app.get("/api/competitors")

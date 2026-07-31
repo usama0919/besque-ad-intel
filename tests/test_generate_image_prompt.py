@@ -219,6 +219,32 @@ def test_creative_description_productless_mode_still_forces_no_product_clause():
     assert "do not place any Besque product" in prompt
 
 
+# ---- Ingredient list constrains the product's OWN label only - never scene callouts
+# (2026-07-31): a real draft rendered "Almond, Primrose, Rosehip, Geranium, Lavender,
+# Vitamin E and Patchouli" as floating labels around the bottle. ----
+
+def test_ingredient_list_states_label_only_purpose():
+    product = {"name": "Magic Body Oil", "description": "seven cold-pressed oils",
+               "ingredients": "Almond, Primrose, Rosehip, Geranium, Lavender, Vitamin E, Patchouli",
+               "hero_claim": "Visibly firms"}
+    prompt = generate_image_prompt.build_image_prompt(_blueprint(), product=product)
+    assert "Almond, Primrose, Rosehip, Geranium, Lavender, Vitamin E, Patchouli" in prompt
+    assert "exists SOLELY to constrain what the product's own label may say" in prompt
+    assert "it is not a list of scene elements" in prompt
+
+
+def test_ingredient_callouts_forbidden_even_with_creative_description():
+    """product_clause (which carries the ingredient ban) is always mechanically appended
+    regardless of what the writer's creative_description says - this is the path a real
+    incident actually went through."""
+    product = {"name": "Magic Body Oil", "description": "seven cold-pressed oils",
+               "ingredients": "Almond, Primrose, Rosehip", "hero_claim": "Visibly firms"}
+    prompt = generate_image_prompt.build_image_prompt(
+        _blueprint(), product=product, creative_description="A calm spa scene."
+    )
+    assert "NEVER render any ingredient name as a separate floating callout" in prompt
+
+
 def test_no_creative_description_reproduces_default_path():
     """creative_description=None (the default) must be byte-identical to calling without
     the parameter at all - confirms this is purely additive."""

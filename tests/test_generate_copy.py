@@ -63,3 +63,57 @@ def test_build_copy_prompt_includes_compliance_feedback_on_retry():
 def test_build_copy_prompt_omits_revision_section_when_no_feedback():
     prompt = generate_copy.build_copy_prompt({"angle": "x"})
     assert "REVISION REQUIRED" not in prompt
+
+
+# ---- image_subtext: a short on-image line, distinct from the long-form primary_text ----
+
+def test_build_copy_prompt_requires_short_image_subtext_field():
+    """Regression guard: primary_text is long-form Facebook post body copy (~80 words) -
+    pipeline.py must have a SEPARATE short field to hand to the image side, or it ends up
+    passing the whole paragraph as in-scene subtext (the actual 2026-07-31 incident)."""
+    prompt = generate_copy.build_copy_prompt({"angle": "x"})
+    assert "image_subtext" in prompt
+    assert "under about 12 words" in prompt
+    assert "NOT the full primary_text" in prompt
+
+
+# ---- OFFER: offer_text governs discount/price/urgency language, never blueprint.offer ----
+
+def test_build_copy_prompt_offer_text_given_states_exact_wording_only():
+    prompt = generate_copy.build_copy_prompt({"angle": "x"}, offer_text="20% off this week only")
+    assert "An offer has been supplied for this run: 20% off this week only." in prompt
+    assert "No offer has been supplied" not in prompt
+
+
+def test_build_copy_prompt_offer_text_absent_forbids_discount_price_and_urgency():
+    """Regression guard for the 2026-07-31 incident: with offer_text empty, a draft read
+    "50% off - ONLY while stock lasts", lifted from the competitor's own clearance sale via
+    blueprint.offer. The ban must be explicit and present even though blueprint.offer isn't
+    read directly here - CREATIVE BLUEPRINT (which DOES include it) is rendered verbatim
+    later in the same prompt."""
+    prompt = generate_copy.build_copy_prompt({"angle": "x", "offer": {"type": "clearance", "value": "50% off"}})
+    assert "No offer has been supplied for this run" in prompt
+    assert "discount, percentage, price, sale, or urgency/scarcity mechanic" in prompt
+    assert "while stock lasts" in prompt
+
+
+def test_generate_copy_live_forwards_offer_text_to_prompt(monkeypatch):
+    """offer_text must actually reach the prompt sent to Claude, not just exist as an
+    unused generate_copy_live parameter."""
+    captured = {}
+
+    class FakeMessage:
+        content = [type("obj", (), {"text": _fake_copy_json()})()]
+
+    class FakeMessages:
+        def create(self, **kwargs):
+            captured["prompt"] = kwargs["messages"][0]["content"]
+            return FakeMessage()
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            self.messages = FakeMessages()
+
+    monkeypatch.setattr(generate_copy.anthropic, "Anthropic", FakeClient)
+    generate_copy.generate_copy_live({"angle": "x"}, offer_text="free shipping this week")
+    assert "free shipping this week" in captured["prompt"]

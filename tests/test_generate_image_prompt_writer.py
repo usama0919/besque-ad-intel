@@ -290,3 +290,38 @@ def test_product_category_ban_overrides_competitor_typography_naming_wrong_categ
     prompt = writer._build_user_prompt(bp)
     assert "Besque sells a body OIL, never any other category" in prompt
     assert "'lotion'" in prompt
+
+
+# ---- Text DENSITY must match the reference, not just exact wording (2026-07-31): subtext
+# carried the full ~80-word primary_text body copy against a reference that carried a
+# single short headline and a name - Gemini rendered the whole paragraph into the scene. ----
+
+def test_text_density_statement_includes_legibility_notes():
+    bp = {"legibility_notes": "only the headline and a small logo are legible at feed size"}
+    prompt = writer._build_user_prompt(bp)
+    assert "Text DENSITY to match" in prompt
+    assert "only the headline and a small logo are legible at feed size" in prompt
+
+
+def test_text_density_statement_includes_layout_detail_text_zone():
+    bp = {"layout_detail": {"text_zone": "single line, bottom third"}}
+    prompt = writer._build_user_prompt(bp)
+    assert "Text DENSITY to match" in prompt
+    assert "single line, bottom third" in prompt
+
+
+def test_text_density_statement_counts_typography_hierarchy_levels():
+    bp = {"typography": {"hierarchy_levels": ["large bold headline", "small CTA button label"]}}
+    prompt = writer._build_user_prompt(bp)
+    assert "2 distinct text tier(s) in the reference" in prompt
+
+
+def test_text_density_statement_warns_against_adding_a_paragraph():
+    bp = {"legibility_notes": "one short headline only"}
+    prompt = writer._build_user_prompt(bp)
+    assert "must not add a paragraph of copy" in prompt
+
+
+def test_text_density_statement_absent_when_no_density_signals_given():
+    prompt = writer._build_user_prompt({})
+    assert "Text DENSITY to match" not in prompt

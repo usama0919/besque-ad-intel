@@ -246,6 +246,28 @@ def test_api_run_stop_sets_flag():
 # six verified numeric page_ids, because the route defaulted it to `name` (correct for
 # add_competitor's brand-new-row case, wrong for an update of an existing, real page_id).
 
+# ---- /api/warnings: created_at datetime must be JSON-serialisable ----
+# Regression guard for the 2026-07-31 incident: /api/warnings raised TypeError ("Object of
+# type datetime is not JSON serializable") the moment pipeline_warnings held a real row -
+# it only ever returned 200 because the table was empty from 29 Jul, when it was added,
+# until this was hit. The warnings banner has never once actually displayed a warning.
+
+def test_api_warnings_200_with_a_real_warning_row(monkeypatch):
+    from src import dedupe
+    from fastapi.testclient import TestClient
+
+    dedupe.init_pipeline_warnings()
+    dedupe.record_warning("compliance_failed", "__test__ regression guard warning row")
+    client = TestClient(dashboard.app)
+    r = client.get("/api/warnings")
+    assert r.status_code == 200
+    body = r.json()
+    assert any(w["detail"] == "__test__ regression guard warning row" for w in body)
+    match = next(w for w in body if w["detail"] == "__test__ regression guard warning row")
+    assert match["kind"] == "compliance_failed"
+    assert isinstance(match["created_at"], str)
+
+
 def test_put_competitor_category_only_preserves_page_id(monkeypatch):
     import uuid
     from src import dedupe

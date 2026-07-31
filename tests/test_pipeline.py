@@ -19,8 +19,9 @@ def _mock_all_stages(monkeypatch):
     monkeypatch.setattr(pipeline.assets, "download_image", lambda url, aid: "fake.jpg")
     monkeypatch.setattr(pipeline.assets, "download_image_bytes", lambda url: b"fake-bytes")
     monkeypatch.setattr(pipeline.deconstruct, "deconstruct_image", lambda **k: {"format": "hero", "angle": "a"})
-    monkeypatch.setattr(pipeline.generate_copy, "generate_copy_live", lambda bp, product=None, **k: {"headline": "H", "primary_text": "P", "cta": "C"})
-    monkeypatch.setattr(pipeline.compliance, "check_compliance", lambda copy, name, text: (True, []))
+    monkeypatch.setattr(pipeline.generate_copy, "generate_copy_live",
+                        lambda bp, product=None, **k: {"headline": "H", "primary_text": "P", "image_subtext": "S", "cta": "C"})
+    monkeypatch.setattr(pipeline.compliance, "check_compliance", lambda copy, name, text, **k: (True, []))
     monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image", lambda bp, aid, product=None, reference_images=None, **k: "draft.png")
     monkeypatch.setattr(pipeline.slack_review, "post_review", lambda *a, **k: {"ts": "123"})
     monkeypatch.setattr(pipeline.dedupe, "save_artifact", lambda **k: None)
@@ -54,7 +55,7 @@ def test_process_ad_passes_product_to_copy_and_image(monkeypatch):
     _mock_all_stages(monkeypatch)
     seen = {}
 
-    def capture_copy(bp, product=None):
+    def capture_copy(bp, product=None, **k):
         seen["copy"] = product
         return {"headline": "H", "primary_text": "P", "cta": "C"}
 
@@ -104,7 +105,7 @@ def test_process_ad_persists_text_in_image_on_artifact(monkeypatch):
 def test_process_ad_forwards_toggles_and_copy_to_generate_image(monkeypatch):
     """Regression guard (Part 4): include_product/text_in_image must actually reach
     generate_image, not just sit as unused process_ad parameters - along with the
-    generated copy's headline/primary_text, which rule 6's text-in-image allow-list needs
+    generated copy's headline/image_subtext, which rule 6's text-in-image allow-list needs
     to know what's actually permitted."""
     dedupe.init_db()
     dedupe.init_artifacts()
@@ -126,7 +127,35 @@ def test_process_ad_forwards_toggles_and_copy_to_generate_image(monkeypatch):
     assert captured["include_product"] is False
     assert captured["text_in_image"] is True
     assert captured["headline"] == "H"
-    assert captured["subtext"] == "P"
+    assert captured["subtext"] == "S"
+
+
+def test_process_ad_never_passes_primary_text_as_image_subtext(monkeypatch):
+    """Regression guard for the 2026-07-31 incident: primary_text is long-form Facebook
+    post body copy (~80 words) - passing it as subtext meant rule 6 permitted rendering
+    the ENTIRE thing as in-scene typography. subtext must come from image_subtext ONLY,
+    and fall back to None (headline-only), never to primary_text, when image_subtext is
+    missing or empty."""
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+          "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    _mock_all_stages(monkeypatch)
+    long_primary_text = "This firming ritual " * 20  # ~80 words, matching the real incident
+    monkeypatch.setattr(pipeline.generate_copy, "generate_copy_live",
+                        lambda bp, product=None, **k: {"headline": "H", "primary_text": long_primary_text, "cta": "C"})
+    captured = {}
+
+    def capture_image(bp, aid, product=None, reference_images=None, subtext=None, **k):
+        captured["subtext"] = subtext
+        return "draft.png"
+
+    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image", capture_image)
+
+    assert pipeline.process_ad(ad, text_in_image=True) == "processed"
+    assert captured["subtext"] is None
+    assert long_primary_text not in (captured["subtext"] or "")
 
 
 def test_process_ad_forwards_angle_realism_body_area_offer_text_to_generate_image(monkeypatch):
@@ -155,6 +184,36 @@ def test_process_ad_forwards_angle_realism_body_area_offer_text_to_generate_imag
     assert captured["realism"] == "ugc_native"
     assert captured["body_area"] == "knees"
     assert captured["offer_text"] == "20% off"
+
+
+def test_process_ad_forwards_offer_text_to_copy_and_compliance(monkeypatch):
+    """offer_text must reach BOTH generate_copy_live (so the copy prompt's OFFER section
+    reflects it) and compliance.check_compliance (so check_unauthorized_offer actually
+    runs) - a competitor offer leaked through copy this time (blueprint.offer, via
+    generate_copy) even though the image side was already fixed, so offer_text must not
+    stop at generate_image."""
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+          "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    _mock_all_stages(monkeypatch)
+    captured = {}
+
+    def capture_copy(bp, product=None, **k):
+        captured["copy_offer_text"] = k.get("offer_text")
+        return {"headline": "H", "primary_text": "P", "cta": "C"}
+
+    def capture_compliance(copy, name, text, **k):
+        captured["compliance_offer_text"] = k.get("offer_text")
+        return (True, [])
+
+    monkeypatch.setattr(pipeline.generate_copy, "generate_copy_live", capture_copy)
+    monkeypatch.setattr(pipeline.compliance, "check_compliance", capture_compliance)
+
+    assert pipeline.process_ad(ad, offer_text="20% off") == "processed"
+    assert captured["copy_offer_text"] == "20% off"
+    assert captured["compliance_offer_text"] == "20% off"
 
 
 def test_process_ad_warns_when_text_in_image_requested_but_headline_missing(monkeypatch):
@@ -277,7 +336,7 @@ def test_process_ad_compliance_fail_is_failed(monkeypatch):
     # Force compliance to fail on every attempt
     call_count = {"n": 0}
 
-    def always_fail(copy, name, text):
+    def always_fail(copy, name, text, **k):
         call_count["n"] += 1
         return (False, ["competitor name"])
 

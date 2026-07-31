@@ -106,6 +106,62 @@ def test_n_out_of_m_claim_flagged():
     assert any("9 out of 10" in i for i in issues)
 
 
+# ---- Unauthorized offer/discount/urgency mechanic (2026-07-31): a real draft read
+# "50% off - ONLY while stock lasts" with offer_text empty, lifted from the competitor's
+# own clearance-sale blueprint.offer. Opt-in via the offer_text kwarg (see the _UNSET
+# sentinel in compliance.py) so every test above, which doesn't know about offer_text,
+# keeps passing unchanged. ----
+
+def test_discount_percentage_flagged_when_offer_text_omitted_entirely():
+    """Backward-compat guard: check_compliance called exactly as every pre-existing
+    caller calls it (no offer_text kwarg at all) must be COMPLETELY unaffected by this
+    new rule - the discount exemption tests above must keep passing forever."""
+    copy = {"headline": "20% off today only", "primary_text": "x", "cta": "Shop"}
+    ok, issues = compliance.check_compliance(copy, "Brand", "")
+    assert ok is True
+    assert issues == []
+
+
+def test_discount_percentage_flagged_when_offer_text_explicitly_empty():
+    copy = {"headline": "50% off", "primary_text": "ONLY while stock lasts", "cta": "Shop"}
+    ok, issues = compliance.check_compliance(copy, "Brand", "", offer_text="")
+    assert ok is False
+    assert any("50% off" in i for i in issues)
+    assert any("while stock lasts" in i for i in issues)
+
+
+def test_discount_percentage_flagged_when_offer_text_none():
+    copy = {"headline": "50% off today", "primary_text": "x", "cta": "Shop"}
+    ok, issues = compliance.check_compliance(copy, "Brand", "", offer_text=None)
+    assert ok is False
+
+
+def test_offer_allowed_when_offer_text_supplied():
+    """The same discount language passes once an operator-supplied offer_text exists for
+    this run - it's no longer unauthorized, it's the run's own configured offer."""
+    copy = {"headline": "50% off - ONLY while stock lasts", "primary_text": "x", "cta": "Shop"}
+    ok, issues = compliance.check_compliance(copy, "Brand", "", offer_text="50% off this week")
+    assert ok is True
+    assert issues == []
+
+
+def test_price_flagged_when_offer_text_absent():
+    copy = {"headline": "Now just $19.99", "primary_text": "x", "cta": "Shop"}
+    issues = compliance.check_unauthorized_offer(copy, offer_text="")
+    assert any("$19.99" in i for i in issues)
+
+
+def test_urgency_mechanic_flagged_without_discount():
+    copy = {"headline": "Limited time only", "primary_text": "x", "cta": "Shop"}
+    issues = compliance.check_unauthorized_offer(copy, offer_text="")
+    assert any("Limited time" in i or "limited time" in i for i in issues)
+
+
+def test_check_unauthorized_offer_empty_when_offer_text_given():
+    copy = {"headline": "50% off while stock lasts", "primary_text": "x", "cta": "Shop"}
+    assert compliance.check_unauthorized_offer(copy, offer_text="50% off") == []
+
+
 def test_discount_exemption_is_local_not_blanket():
     """The discount exemption must be scoped to the specific percentage it's adjacent
     to - a legitimate '20% off' elsewhere in the copy must NOT blanket-exempt an

@@ -16,6 +16,13 @@ is almost always real.
 """
 import re
 
+# Sentinel distinguishing "caller doesn't know about offer_text at all" (skip the new
+# check entirely - every pre-existing call site keeps its exact old behaviour) from
+# "caller explicitly passed offer_text, even empty/None" (the new rule applies). A plain
+# default of "" or None can't make that distinction, and pipeline.py legitimately needs to
+# pass an empty offer_text on every run where the operator didn't set one.
+_UNSET = object()
+
 
 def _normalize(text):
     return re.sub(r"\s+", " ", (text or "").lower()).strip()
@@ -86,6 +93,54 @@ def _is_discount_percentage(text, match):
                for d in DISCOUNT_PERCENTAGE_PATTERN.finditer(text))
 
 
+# New rule (2026-07-31): a real draft read "50% off - ONLY while stock lasts" with
+# offer_text empty, lifted from the competitor's own clearance-sale blueprint.offer field.
+# Mirrors the image prompt-writer's own offer STRICT block
+# (generate_image_prompt_writer._build_user_prompt) so copy and image are governed by the
+# identical rule: exact wording only when offer_text is supplied, an absolute ban on any
+# discount/price/urgency mechanic when it isn't.
+URGENCY_MECHANIC_PATTERN = re.compile(
+    r"\b(while (?:stock|supplies) last(?:s)?|today only|limited time|limited stock|hurry|"
+    r"act now|don'?t miss out|before it'?s gone|selling out fast|last chance|"
+    r"ends (?:soon|tonight|today))\b",
+    re.IGNORECASE,
+)
+
+CURRENCY_PRICE_PATTERN = re.compile(r"[$£€]\s?\d+(?:\.\d{1,2})?")
+
+
+def check_unauthorized_offer(generated_copy, offer_text=""):
+    """Unlike check_unapproved_numeric_claims, a discount percentage is NOT exempt here:
+    without an operator-supplied offer_text for this run, there is no legitimate Besque
+    offer for a discount/price/urgency mechanic to be describing, so any hit is flagged.
+    offer_text given is trusted per-run operator input and is not re-validated here - the
+    copy prompt already instructs exact-wording-only (generate_copy._offer_clause)."""
+    if offer_text:
+        return []
+    issues = []
+    gen = " ".join(str(v) for v in generated_copy.values())
+    for match in DISCOUNT_PERCENTAGE_PATTERN.finditer(gen):
+        issues.append(
+            f"Discount/offer language '{match.group(0)}' found in generated copy but no "
+            f"offer_text was supplied for this run - likely sourced from the competitor's "
+            f"own offer, not an authorized Besque promotion."
+        )
+    match = URGENCY_MECHANIC_PATTERN.search(gen)
+    if match:
+        issues.append(
+            f"Urgency/scarcity mechanic '{match.group(0)}' found in generated copy but no "
+            f"offer_text was supplied for this run - likely sourced from the competitor's "
+            f"own offer."
+        )
+    match = CURRENCY_PRICE_PATTERN.search(gen)
+    if match:
+        issues.append(
+            f"Price '{match.group(0)}' found in generated copy but no offer_text was "
+            f"supplied for this run - likely sourced from the competitor's own offer."
+        )
+    return issues
+
+
 def check_fabricated_testimonial(generated_copy, approved_testimonials=""):
     """Rule C2 mechanical check: quoted speech, first-person endorsement patterns,
     and reported-speech framing. Any hit is allowed through only if the flagged
@@ -153,7 +208,7 @@ def check_unapproved_numeric_claims(generated_copy, approved_claims=""):
 
 
 def check_compliance(generated_copy, competitor_page_name, competitor_text="",
-                      approved_claims="", approved_testimonials=""):
+                      approved_claims="", approved_testimonials="", offer_text=_UNSET):
     """Return (ok: bool, issues: list[str]).
 
     Flags:
@@ -161,6 +216,10 @@ def check_compliance(generated_copy, competitor_page_name, competitor_text="",
       - any long verbatim run (>=6 words) copied from the competitor's ad text
       - fabricated testimonials / unapproved quoted or first-person endorsement (rule C2)
       - unapproved numeric/quantified claims (rule C2/C3)
+      - unauthorized discount/price/urgency mechanic, ONLY when offer_text is explicitly
+        passed (even as "" or None) - see check_unauthorized_offer and the _UNSET sentinel
+        above. pipeline.py always passes it; every pre-existing caller that doesn't know
+        about offer_text keeps its exact old behaviour.
     """
     issues = []
     gen = " ".join(str(v) for v in generated_copy.values())
@@ -185,5 +244,10 @@ def check_compliance(generated_copy, competitor_page_name, competitor_text="",
 
     # 4. Unapproved numeric/quantified claims (rule C2/C3)
     issues.extend(check_unapproved_numeric_claims(generated_copy, approved_claims))
+
+    # 5. Unauthorized offer/discount/urgency mechanic - opt-in via the _UNSET sentinel,
+    # see check_compliance's docstring.
+    if offer_text is not _UNSET:
+        issues.extend(check_unauthorized_offer(generated_copy, offer_text))
 
     return (len(issues) == 0, issues)
