@@ -216,6 +216,55 @@ def test_process_ad_forwards_offer_text_to_copy_and_compliance(monkeypatch):
     assert captured["compliance_offer_text"] == "20% off"
 
 
+# ---- EDIT MODE (2026-08-01): reuse the SAME competitor bytes already downloaded for
+# deconstruct, never a second download; only forward them when edit_mode is actually on ----
+
+def test_process_ad_forwards_competitor_bytes_to_generate_image_when_edit_mode_on(monkeypatch):
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+          "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    _mock_all_stages(monkeypatch)
+    captured = {}
+
+    def capture_image(bp, aid, **k):
+        captured.update(k)
+        return "draft.png"
+
+    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image", capture_image)
+
+    assert pipeline.process_ad(ad, edit_mode=True) == "processed"
+    assert captured["edit_mode"] is True
+    # _mock_all_stages stubs download_image_bytes to return b"fake-bytes" - process_ad must
+    # reuse THAT exact value (the same bytes already downloaded for deconstruct_image),
+    # never re-download.
+    assert captured["competitor_image_bytes"] == b"fake-bytes"
+
+
+def test_process_ad_does_not_forward_competitor_bytes_when_edit_mode_off(monkeypatch):
+    """edit_mode defaults to False - the team confirmed edit-vs-generate is about 50/50,
+    so today's generate-only path must keep working unchanged: no competitor bytes at all,
+    even though they were still downloaded for the deconstruct call."""
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+          "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    _mock_all_stages(monkeypatch)
+    captured = {}
+
+    def capture_image(bp, aid, **k):
+        captured.update(k)
+        return "draft.png"
+
+    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image", capture_image)
+
+    assert pipeline.process_ad(ad) == "processed"
+    assert captured["edit_mode"] is False
+    assert captured["competitor_image_bytes"] is None
+
+
 def test_process_ad_warns_when_text_in_image_requested_but_headline_missing(monkeypatch):
     """If copy generation produces no usable headline (e.g. an empty string) while
     text_in_image was requested, rule 6 silently falls back to the blanket text ban -

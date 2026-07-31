@@ -190,6 +190,9 @@
   <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#555;">
     <input type="checkbox" id="includeProductToggle" checked style="width:auto;"> Include product
   </label>
+  <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#555;" title="Reproduce the competitor's ad, substituting only the product - off by default (generate from a text brief instead).">
+    <input type="checkbox" id="editModeToggle" style="width:auto;"> Edit mode (reproduce reference)
+  </label>
   <button class="run" id="runBtn" onclick="runPipeline()" disabled>Run Pipeline</button>
   <button class="stop" id="stopBtn" onclick="stopPipeline()" disabled>Stop</button>
   <span id="selectedCompName">No competitor selected</span>
@@ -949,6 +952,7 @@ async function runPipeline(){
   const includeProduct = document.getElementById('includeProductToggle').checked;
   const bodyArea = document.getElementById('bodyAreaInput').value.trim();
   const offerText = document.getElementById('offerTextInput').value.trim();
+  const editMode = document.getElementById('editModeToggle').checked;
   await fetch('/api/run?n='+nAds+'&competitor_id='+selectedCompetitorId
     +(selectedProductId?('&product_id='+selectedProductId):'')
     +(angleId?('&angle_id='+angleId):'')
@@ -956,7 +960,8 @@ async function runPipeline(){
     +'&text_in_image='+(textInImage?'1':'0')
     +'&include_product='+(includeProduct?'1':'0')
     +(bodyArea?('&body_area='+encodeURIComponent(bodyArea)):'')
-    +(offerText?('&offer_text='+encodeURIComponent(offerText)):''),
+    +(offerText?('&offer_text='+encodeURIComponent(offerText)):'')
+    +'&edit_mode='+(editMode?'1':'0'),
     {method:'POST'});
   const poll=setInterval(async()=>{
     const r=await fetch('/api/run/status'); const s=await r.json();

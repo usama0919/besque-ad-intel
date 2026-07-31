@@ -8,11 +8,11 @@ IMAGE_MODEL = os.getenv("IMAGE_MODEL", "placeholder-image-model")
 
 def build_image_prompt(blueprint: dict, product: dict = None, include_product: bool = True,
                         text_in_image: bool = False, headline: str = None, subtext: str = None,
-                        creative_description: str = None) -> str:
+                        creative_description: str = None, edit_mode: bool = False) -> str:
     """Construct a Besque-adapted image generation prompt from the blueprint's visual notes.
-    include_product=True, text_in_image=False, creative_description=None (today's defaults)
-    reproduce the prior output exactly for a given blueprint/product - none of these are a
-    rewrite of the default path.
+    include_product=True, text_in_image=False, creative_description=None, edit_mode=False
+    (today's defaults) reproduce the prior output exactly for a given blueprint/product -
+    none of these are a rewrite of the default path.
 
     creative_description, if given, is the Claude prompt-writer's output
     (generate_image_prompt_writer.write_creative_description) - it REPLACES the
@@ -20,7 +20,13 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
     is composition, mood, and how the angle is expressed), but brand_rules()/compliance and
     the product's factual description (product_clause, below) are still always assembled
     mechanically regardless of what the writer returned - the writer never controls the
-    guardrails."""
+    guardrails.
+
+    edit_mode=True takes priority over creative_description: the competitor's own ad image
+    (passed separately to generate_image as an input Part) IS the creative brief, so neither
+    the writer nor the template scene/layout/palette text is used - see
+    _edit_mode_instruction. product_clause/aspect-ratio/closing still always apply, same as
+    every other branch."""
     visual = blueprint.get("visual", {})
     # visual.subject is deliberately NOT read here. In practice it's where the vision
     # deconstruct step puts rich, identity-carrying descriptions of the competitor ad's
@@ -76,7 +82,20 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
             f"be added later as a separate HTML overlay; no competitor branding anywhere."
         )
 
-    if creative_description:
+    if edit_mode:
+        # The competitor's own ad image (attached separately by generate_image) IS the
+        # brief - takes priority over creative_description, which is never generated in
+        # this mode anyway (see generate_image). product_clause/aspect-ratio/closing still
+        # always follow, same guardrail-always-appended pattern as every other branch.
+        prompt = (
+            brand_rules(include_product=include_product, text_in_image=text_in_image,
+                        headline=headline, subtext=subtext, edit_mode=True) +
+            _edit_mode_instruction(text_in_image=text_in_image, headline=headline, subtext=subtext) +
+            product_clause +
+            f"Square 1:1 aspect ratio composition. " +
+            closing
+        )
+    elif creative_description:
         # The writer's job (scene/setting, subject, product placement, text styling,
         # palette, realism) replaces the template-assembled equivalent below - but
         # product_clause (the product's factual visual_description/ingredients guardrail)
@@ -192,21 +211,78 @@ _RULE_8_LAYOUT_IS_COMPOSITION = (
     "as text on the image. The only text permitted anywhere is governed by rule 6 above. "
 )
 
+# New rule, EDIT MODE only. In edit mode Gemini is handed the competitor's own ad as an
+# image Part, not just a text description of it - it contains their real product,
+# packaging, logo, and brand name in frame. Rules 6/7 above still decide exactly what text
+# and product may appear, but they now have to survive a real photograph being edited
+# rather than a from-scratch generation, so this states explicitly that none of the
+# source image's own branding may carry through.
+_RULE_9_SOURCE_IMAGE_IS_THE_COMPETITORS_AD = (
+    "9) SOURCE IMAGE IS THE COMPETITOR'S OWN AD (STRICT, EDIT MODE): the attached reference "
+    "image being reproduced is the competitor's own advertisement - it contains their real "
+    "product, packaging, logo, and brand name. NEVER let any of the competitor's logo, "
+    "product, packaging, brand name, or label text survive into the output image, even "
+    "though you are copying its composition, background, lighting, and layout. Rules 6 and "
+    "7 above still govern exactly which text and product may appear - they now apply to a "
+    "real photograph you are editing, not just a text brief. "
+)
 
-def brand_rules(include_product=True, text_in_image=False, headline=None, subtext=None):
+
+def brand_rules(include_product=True, text_in_image=False, headline=None, subtext=None, edit_mode=False):
     """The mechanically-enforced brand + compliance rules prepended to every image prompt.
-    Called with all defaults (include_product=True, text_in_image=False), this reproduces
-    the old flat BRAND_RULES constant character for character through rule 7 - see
-    test_brand_rules_default_reproduces_prior_rules_verbatim. Rule 8 and the
-    include_product/text_in_image conditionality are additive, not a rewrite of the
-    existing default path."""
+    Called with all defaults (include_product=True, text_in_image=False, edit_mode=False),
+    this reproduces the old flat BRAND_RULES constant character for character through rule
+    7 - see test_brand_rules_default_reproduces_prior_rules_verbatim. Rule 8, rule 9, and
+    the include_product/text_in_image/edit_mode conditionality are additive, not a rewrite
+    of the existing default path."""
     return (
         _RULES_1_TO_5
         + _rule6_text_policy(text_in_image, headline, subtext)
         + _rule7_product_policy(include_product)
         + _RULE_8_LAYOUT_IS_COMPOSITION
+        + (_RULE_9_SOURCE_IMAGE_IS_THE_COMPETITORS_AD if edit_mode else "")
         + COMPLIANCE_RULES
     )
+
+
+def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None):
+    """EDIT MODE (2026-08-01): Gemini receives the competitor's own ad as an input image
+    Part, not just a text description of it - the reference image IS the creative brief,
+    so no template scene/layout/palette description is assembled here (see
+    build_image_prompt's edit_mode branch, which skips that entirely).
+
+    Must agree with rule 6 (_rule6_text_policy) in BOTH text_in_image states - see
+    test_edit_mode_instruction_and_rule6_agreement - the same class of contradiction that
+    caused the Part A writer/rule6 disagreement (a description permitting/describing text
+    the mechanical rule then forbade, which made Gemini discard the whole composition)."""
+    base = (
+        "EDIT MODE: the FIRST attached image is the competitor's own advertisement. "
+        "Reproduce its composition, background, camera angle, lighting, colour palette, "
+        "text placement, and overall layout as closely as possible - changing ONLY the "
+        "product. Remove the competitor's product entirely and place the Besque product "
+        "(shown in the reference photo(s) that follow, if any) in its position, at its "
+        "scale, with its lighting, matching the original shot as faithfully as possible. "
+        "Everything else in the scene stays exactly as it appears in the source image. "
+    )
+    if text_in_image and headline:
+        permitted = f'the headline "{headline}"'
+        if subtext:
+            permitted += f' and the supporting text "{subtext}"'
+        base += (
+            f"TEXT: preserve the reference image's text zones, typography, size, and "
+            f"position EXACTLY as they appear - but replace the wording with {permitted} "
+            f"only, same layout, our words. The competitor's brand name, product name, "
+            f"and claims must NEVER survive into the output, even inside the preserved "
+            f"typography. "
+        )
+    else:
+        base += (
+            "TEXT: leave the reference image's text zones as clean, empty space in the "
+            "SAME positions they occupy in the source image - do not render any text, "
+            "headline, or competitor wording there; that space will be filled later as a "
+            "separate HTML overlay. "
+        )
+    return base
 
 # Per-production-style guidance, keyed by blueprint.production_style.style. Swapped in as a
 # single Style clause so ugc_native does not fight the studio-look wording it replaces.
@@ -275,9 +351,23 @@ def _draft_stem(ad_id, angle_slug=None):
     return ad_id if not angle_slug else f"{ad_id}__{angle_slug}"
 
 
+def _sniff_mime_type(data):
+    """Magic-byte sniff, same fallback-to-jpeg logic as deconstruct.py's
+    _b64_from_bytes/_load_image_b64_v2 - duplicated rather than imported since it's a
+    one-line lookup and deconstruct.py already duplicates it twice itself."""
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data[:4] == b"GIF8":
+        return "image/gif"
+    return "image/jpeg"
+
+
 def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_slug=None,
                     include_product=True, text_in_image=False, headline=None, subtext=None,
-                    messaging_angle=None, realism=None, body_area=None, offer_text=None):
+                    messaging_angle=None, realism=None, body_area=None, offer_text=None,
+                    edit_mode=False, competitor_image_bytes=None):
     """Single-pass image generation from the blueprint. One image, no iteration.
     Saves to assets/<stem>_draft.png (stem = ad_id, or ad_id+angle if angle_slug is given)
     and returns the path. Returns None on failure. include_product/text_in_image/headline/
@@ -285,15 +375,23 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
     behaviour exactly.
 
     messaging_angle (resolved angle dict) gates the Claude prompt-writer pass: only runs
-    when an angle is selected, matching every other angle-driven behaviour in this
-    pipeline. realism/body_area/offer_text are handed to the writer as creative context -
-    this is the first (and only) place any of the three are actually consumed; if the
-    writer doesn't run (no angle), they have no effect. The writer's failure mode is
-    silent-by-design: write_creative_description never raises, it returns None, and
-    build_image_prompt's creative_description=None branch is exactly today's template
-    assembly - so a writer failure degrades to the pre-Part-5 prompt, never to nothing."""
+    when an angle is selected AND edit_mode is off, matching every other angle-driven
+    behaviour in this pipeline. realism/body_area/offer_text are handed to the writer as
+    creative context - this is the first (and only) place any of the three are actually
+    consumed when the writer runs; if it doesn't (no angle, or edit_mode), they have no
+    effect on the image side. The writer's failure mode is silent-by-design:
+    write_creative_description never raises, it returns None, and build_image_prompt's
+    creative_description=None branch is exactly today's template assembly - so a writer
+    failure degrades to the pre-Part-5 prompt, never to nothing.
+
+    edit_mode=True (competitor_image_bytes given) skips the writer entirely - the reference
+    IS the brief, a text creative_description would just fight it - and attaches
+    competitor_image_bytes to Gemini as an input Part ahead of the product reference
+    photos, clearly distinguished in the framing text: one is the ad to reproduce, the
+    others are the Besque product to substitute in. Defaults (edit_mode=False,
+    competitor_image_bytes=None) reproduce today's generate-only behaviour exactly."""
     creative_description = None
-    if messaging_angle:
+    if messaging_angle and not edit_mode:
         creative_description = generate_image_prompt_writer.write_creative_description(
             blueprint, product=product, angle=messaging_angle, realism=realism,
             body_area=body_area, offer_text=offer_text,
@@ -303,19 +401,36 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
         )
     prompt = build_image_prompt(blueprint, product=product, include_product=include_product,
                                  text_in_image=text_in_image, headline=headline, subtext=subtext,
-                                 creative_description=creative_description)
+                                 creative_description=creative_description, edit_mode=edit_mode)
     stem = _draft_stem(ad_id, angle_slug)
     try:
         client = genai.Client(vertexai=True, project="besque-martech", location="global")
         # Defense in depth for rule 7's productless mode: the prompt already says no
         # product may appear, but don't also hand the model reference photos of one.
         reference_images = (reference_images or []) if include_product else []
-        if reference_images:
+        competitor_part = None
+        if edit_mode and competitor_image_bytes:
             from google.genai import types as genai_types
-            contents = (
-                [genai_types.Part.from_bytes(data=img, mime_type="image/png") for img in reference_images]
-                + [_reference_framing(len(reference_images)) + prompt]
+            competitor_part = genai_types.Part.from_bytes(
+                data=competitor_image_bytes, mime_type=_sniff_mime_type(competitor_image_bytes)
             )
+        if reference_images or competitor_part is not None:
+            from google.genai import types as genai_types
+            image_parts = []
+            framing = ""
+            if competitor_part is not None:
+                image_parts.append(competitor_part)
+                framing += (
+                    "FIRST IMAGE ABOVE: the competitor's own advertisement - this is THE "
+                    "AD TO REPRODUCE (its composition, background, camera angle, lighting, "
+                    "palette, text placement, and layout). Its product, packaging, logo, "
+                    "and brand name must NOT survive - see the instructions below. "
+                )
+            if reference_images:
+                image_parts += [genai_types.Part.from_bytes(data=img, mime_type="image/png")
+                                for img in reference_images]
+                framing += _reference_framing(len(reference_images))
+            contents = image_parts + [framing + prompt]
         else:
             contents = prompt
         import time as _time
