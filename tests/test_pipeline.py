@@ -38,6 +38,42 @@ def test_process_ad_full_flow_mocked(monkeypatch):
     assert dedupe.is_new(ad_id) is False
 
 
+# ---- Regression guard (2026-08-05): every process_ad test above mocks
+# dedupe.save_artifact away via _mock_all_stages, so none of them can catch process_ad
+# passing a kwarg the REAL save_artifact doesn't accept (or vice versa) - a signature
+# drift between the two would pass this whole file's other tests silently. This one
+# deliberately does NOT mock save_artifact, hitting the real test DB, so a kwarg mismatch
+# raises TypeError here instead of shipping unnoticed. ----
+
+def test_process_ad_end_to_end_writes_a_real_unmocked_artifact_row(monkeypatch):
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+          "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    monkeypatch.setattr(pipeline.assets, "download_image", lambda url, aid: "fake.jpg")
+    monkeypatch.setattr(pipeline.assets, "download_image_bytes", lambda url: b"fake-bytes")
+    monkeypatch.setattr(pipeline.deconstruct, "deconstruct_image", lambda **k: {"format": "hero", "angle": "a"})
+    monkeypatch.setattr(pipeline.generate_copy, "generate_copy_live",
+                        lambda bp, product=None, **k: {"headline": "H", "primary_text": "P",
+                                                         "image_subtext": "S", "cta": "C"})
+    monkeypatch.setattr(pipeline.compliance, "check_compliance", lambda copy, name, text, **k: (True, []))
+    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image",
+                        lambda bp, aid, product=None, reference_images=None, **k: "draft.png")
+    monkeypatch.setattr(pipeline.slack_review, "post_review", lambda *a, **k: {"ts": "123"})
+    # dedupe.save_artifact deliberately NOT mocked - that's the entire point of this test.
+    try:
+        assert pipeline.process_ad(ad) == "processed"
+        rows = dedupe.get_artifacts_full(limit=500)
+        match = next(r for r in rows if r["ad_id"] == ad_id)
+        assert match["format_flag"] == ""
+        assert match["product_override_note"] == ""
+    finally:
+        with dedupe.get_conn() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM artifacts WHERE ad_id=%s", (ad_id,))
+            conn.commit()
+
+
 # ---- Prompt 4, Item 3: hard-block medical/clinical/anatomical references BEFORE
 # generation - not a judgment call, so this skips outright, never flags for review ----
 
@@ -275,6 +311,84 @@ def test_process_ad_no_warning_when_operator_instruction_within_limit(monkeypatc
 
     assert pipeline.process_ad(ad, operator_instruction="make it brighter") == "processed"
     assert not any(kind == "operator_instruction_truncated" for kind, detail in warnings)
+
+
+# ---- Stop-button responsiveness (2026-08-05): run_once's own should_stop is only
+# checked between ads/competitors - a click mid-ad couldn't interrupt an in-flight paid
+# Gemini call. process_ad must check it once more immediately before that call. ----
+
+def test_process_ad_stops_before_image_generation_when_should_stop_true(monkeypatch):
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+          "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    _mock_all_stages(monkeypatch)
+    image_calls = []
+    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image",
+                        lambda *a, **k: image_calls.append(1) or "draft.png")
+
+    assert pipeline.process_ad(ad, should_stop=lambda: True) == "skipped"
+    assert image_calls == []  # the paid call must never happen
+
+
+def test_process_ad_should_stop_false_proceeds_to_image_generation(monkeypatch):
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+          "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    _mock_all_stages(monkeypatch)
+    image_calls = []
+    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image",
+                        lambda *a, **k: image_calls.append(1) or "draft.png")
+
+    assert pipeline.process_ad(ad, should_stop=lambda: False) == "processed"
+    assert image_calls == [1]
+
+
+def test_process_ad_should_stop_none_default_proceeds_normally(monkeypatch):
+    """None (a test or the writer calling process_ad directly, exactly as every other
+    existing test in this file does) must behave as "never stop" - not raise, not skip."""
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+          "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    _mock_all_stages(monkeypatch)
+
+    assert pipeline.process_ad(ad) == "processed"
+
+
+def test_run_once_forwards_should_stop_to_process_ad(monkeypatch):
+    """run_once must thread its OWN should_stop into process_ad, not just check it between
+    ads - that's the exact gap this item closes."""
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    dedupe.init_decisions()
+    dedupe.init_competitors()
+    dedupe.init_products()
+    dedupe.init_angles()
+    dedupe.init_run_progress()
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    monkeypatch.setattr(pipeline.dedupe, "get_competitors",
+                        lambda: [{"id": 999999, "name": "TestBrand", "page_id": "TestBrand"}])
+    monkeypatch.setattr(pipeline, "with_retry", lambda fn, **k: fn())
+    monkeypatch.setattr(pipeline.scrape, "scrape_ads", lambda name, page_id=None: [
+        {"ad_id": ad_id, "page_name": "TestBrand", "image_url": "http://x/img.jpg",
+         "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    ])
+    captured = {}
+
+    def fake_process_ad(ad, **k):
+        captured["should_stop"] = k.get("should_stop")
+        return "processed"
+
+    monkeypatch.setattr(pipeline, "process_ad", fake_process_ad)
+    my_should_stop = lambda: False
+
+    pipeline.run_once(competitor_id=999999, should_stop=my_should_stop)
+    assert captured["should_stop"] is my_should_stop
 
 
 # ---- Prompt 4, Item 5: retheme_colours threads through to generate_image ----

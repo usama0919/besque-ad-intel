@@ -62,7 +62,8 @@ def fetch_reference_images(product):
 def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
                 realism=None, text_in_image=False, include_product=True,
                 body_area=None, offer_text=None, edit_mode=False, operator_instruction=None,
-                check_output=False, retheme_colours=True, ad_index=None, total_ads=None):
+                check_output=False, retheme_colours=True, ad_index=None, total_ads=None,
+                should_stop=None):
     """Run one ad through the full pipeline. Returns processed/skipped/failed.
     messaging_angle, if given, is a resolved angle dict (dedupe.get_angle's shape) - it
     changes the dedup identity of this ad to (ad_id, angle_id) instead of ad_id alone, so
@@ -122,12 +123,21 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
     operator_instruction longer than generate_image_prompt_writer.MAX_OPERATOR_INSTRUCTION_CHARS
     is silently truncated by clip_operator_instruction - now also recorded as a
     pipeline_warning naming the original length, same defect class, just for free text
-    instead of a toggle."""
+    instead of a toggle.
+
+    should_stop (Stop-button responsiveness, 2026-08-05): run_once's own should_stop is
+    only checked BETWEEN ads/competitors - a click mid-ad couldn't interrupt an in-flight
+    paid Gemini call, observed live as "Stop greyed out, run continued for over a minute."
+    Forwarded here and checked once more, immediately before generate_image, so a stop
+    request can't be missed for the cost of one full image generation. None (the default,
+    e.g. a test or the writer calling process_ad directly) behaves as "never stop," same
+    fallback run_once itself already uses for its own should_stop."""
     ad_id = ad.get("ad_id")
     if not ad_id:
         return "failed"
     angle_id = messaging_angle["id"] if messaging_angle else None
     angle_slug = messaging_angle["slug"] if messaging_angle else None
+    _stop = should_stop or (lambda: False)
     try:
         # angle_id=None here checks the exact same identity as before angle support
         # existed. All 138 pre-angle artifacts have angle_id NULL, so the first
@@ -250,6 +260,9 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
                 f"Ad {ad_id} ({ad.get('page_name', '?')}): text_in_image was requested but "
                 f"generated copy had no headline - image rendered without in-image text.",
             )
+        if _stop():
+            log.info("Ad %s: stop requested, skipping before the paid image generation call", ad_id)
+            return "skipped"
         log.info("Ad %s: image generation starting (edit_mode=%s)", ad_id, edit_mode)
         try:
             draft_image = generate_image_prompt.generate_image(
@@ -482,7 +495,8 @@ def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product
                                 realism=realism, text_in_image=text_in_image, include_product=include_product,
                                 body_area=body_area, offer_text=offer_text, edit_mode=edit_mode,
                                 operator_instruction=operator_instruction, check_output=check_output,
-                                retheme_colours=retheme_colours, ad_index=ad_index, total_ads=len(ads))
+                                retheme_colours=retheme_colours, ad_index=ad_index, total_ads=len(ads),
+                                should_stop=should_stop)
             summary[result] += 1
             comp_summary[result] += 1
             if result == "processed":
