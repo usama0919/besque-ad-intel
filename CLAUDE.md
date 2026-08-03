@@ -27,6 +27,29 @@ prompt clause to `brand_rules()`/the writer/`_edit_mode_instruction`.** A ninth 
 longer STRICT block has the same failure mode as the first eight rules already there —
 more prompt text is not the lever that has ever worked for this class of bug.
 
+## Operational gotchas (learned 3 Aug 2026)
+
+- **Restart uvicorn after any commit touching `src/`.** No `--reload` (deliberate —
+  the watcher kills runs mid-flight), so Python holds each module as first imported.
+  This cost an afternoon: every ad failed on a `save_artifact` kwarg that was
+  demonstrably present in the repo, the venv, and a live `inspect.signature()`.
+  The process had new `pipeline.py` and old `dedupe.py`.
+- **A burst of Google failures usually means expired ADC, not a code bug.**
+  Re-auth *and* restart. Permanent fix is a service-account key, deferred to the
+  security pass.
+- **The long silent scrape is not a hang.** `client.actor().call()` blocks until
+  Apify reaches a terminal state; the SDK's `_stream_log` thread dies on
+  `impit.TimeoutException` and takes all progress visibility with it. Heartbeat
+  now covers this.
+- **A green suite has been wrong three times.** It asserts prompt assembly, not
+  that components were told consistent things. `process_ad` tests mock
+  `save_artifact`, so caller/callee mismatches are invisible.
+- **Tests must not write to the prod DB.** Five manual cleanups in one day.
+- **Claude Code stalls on background commands.** It cannot wake itself. Say
+  "report now from what you already have — plain text, no tool calls."
+- **Never `update_product` / `update_competitor` for a single field.** Read-modify-write;
+  this shape wiped six verified page IDs. Demand targeted SQL and see it first.
+
 ## Environment
 - Windows 11 + **PowerShell**. No bash syntax: no heredocs, no inline `VAR=x cmd`, no
   `&&`/`||` (use `;` or `if ($?) { }`), `2>$null` not `2>/dev/null`.
