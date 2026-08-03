@@ -59,6 +59,34 @@ def fetch_reference_images(product):
     return images, None
 
 
+def fetch_pool(competitor_id, cap=50):
+    """Fetch a pool of candidate ads for one competitor and store them, unprocessed,
+    in scraped_ads. Fetch-and-store ONLY - does not call deconstruct, generate_image,
+    or touch seen_ads/artifacts in any way. This populates the pool that run_once's
+    dedup gates sit downstream of; it is not a replacement for either gate.
+
+    Runs the exact same Apify scrape and image-only/page-match filter run_once uses
+    (scrape.scrape_ads_with_raw shares scrape.py's _scrape_raw with scrape_ads, so
+    the two filters can never drift apart), then upserts every survivor via
+    dedupe.upsert_scraped_ad - a direct upsert on scraped_ads' own unique index, not
+    a read-modify-write pass-through like update_competitor.
+
+    Returns {"fetched": n_raw, "stored": n_stored, "skipped": n_filtered}: n_raw is
+    every record Apify's dataset returned before the image/page filter, n_filtered is
+    how many of those the filter rejected, n_stored is how many survivors were
+    upserted into the pool."""
+    competitor = next((c for c in dedupe.get_competitors() if c["id"] == competitor_id), None)
+    if not competitor:
+        raise ValueError(f"competitor {competitor_id} not found")
+    dedupe.init_scraped_ads()
+    pairs = scrape.scrape_ads_with_raw(competitor["name"], max_results=cap, page_id=competitor.get("page_id"))
+    survivors = [(mapped, raw) for raw, mapped in pairs if mapped]
+    for mapped, raw in survivors:
+        dedupe.upsert_scraped_ad(ad_id=mapped["ad_id"], competitor_id=competitor_id,
+                                  image_url=mapped["image_url"], raw_meta=raw)
+    return {"fetched": len(pairs), "stored": len(survivors), "skipped": len(pairs) - len(survivors)}
+
+
 def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
                 realism=None, text_in_image=False, include_product=True,
                 body_area=None, offer_text=None, edit_mode=False, operator_instruction=None,

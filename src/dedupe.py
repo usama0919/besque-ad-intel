@@ -685,3 +685,69 @@ def set_suggested_name(competitor_id, suggested):
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("UPDATE competitors SET suggested_name = %s WHERE id = %s", (suggested or "", competitor_id))
         conn.commit()
+
+
+# ---- Scraped ad pool (fetch-and-store only - pipeline.fetch_pool's home table).
+# Deliberately separate from seen_ads/artifacts: this is the candidate pool BEFORE
+# any dedup/generation gate, not a replacement for either. gcs_path is left NULL by
+# fetch_pool for now - no step yet downloads bytes into the bucket, only Apify's own
+# image_url and metadata are stored here. ----
+
+def init_scraped_ads():
+    """Create the scraped_ads table if missing. Unique on (ad_id, competitor_id), not
+    ad_id alone - the same ad_id can legitimately show up under two different
+    competitors' searches (a reshare/cross-post), and that's a distinct pool row,
+    not a duplicate to collapse."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS scraped_ads (
+                id            SERIAL PRIMARY KEY,
+                ad_id         TEXT NOT NULL,
+                competitor_id INT NOT NULL,
+                image_url     TEXT,
+                gcs_path      TEXT,
+                raw_meta      JSONB,
+                fetched_at    TIMESTAMPTZ DEFAULT now(),
+                status        TEXT DEFAULT 'pool'
+            )
+        """)
+        cur.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS scraped_ads_ad_competitor_uq
+            ON scraped_ads (ad_id, competitor_id)
+        """)
+        conn.commit()
+
+
+def upsert_scraped_ad(ad_id, competitor_id, image_url, raw_meta):
+    """Insert one scraped ad into the pool, or refresh raw_meta/fetched_at if this
+    exact (ad_id, competitor_id) pair is already stored. A direct upsert on the
+    pool's own unique index - NOT update_competitor's read-modify-write shape, which
+    wiped six verified page_ids once already (see CLAUDE.md); there is no
+    partial-field update path here to get wrong."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO scraped_ads (ad_id, competitor_id, image_url, raw_meta)
+               VALUES (%s, %s, %s, %s)
+               ON CONFLICT (ad_id, competitor_id) DO UPDATE
+               SET raw_meta = EXCLUDED.raw_meta, fetched_at = now()""",
+            (ad_id, competitor_id, image_url, _json.dumps(raw_meta)),
+        )
+        conn.commit()
+
+
+def get_scraped_ads(competitor_id=None, status=None):
+    """Return pool rows, newest first. Optional filters by competitor_id and/or
+    status (default 'pool' for everything fetch_pool has stored)."""
+    with get_conn() as conn, conn.cursor() as cur:
+        query = "SELECT id, ad_id, competitor_id, image_url, gcs_path, raw_meta, fetched_at, status FROM scraped_ads WHERE 1=1"
+        params = []
+        if competitor_id is not None:
+            query += " AND competitor_id = %s"
+            params.append(competitor_id)
+        if status is not None:
+            query += " AND status = %s"
+            params.append(status)
+        query += " ORDER BY fetched_at DESC"
+        cur.execute(query, params)
+        cols = ["id", "ad_id", "competitor_id", "image_url", "gcs_path", "raw_meta", "fetched_at", "status"]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]

@@ -100,18 +100,14 @@ def _page_matches(page_name, search_term):
     return overlap >= 0.6
 
 
-def scrape_ads(search_term, max_results=None, image_only=True, page_id=None):
-    """Run the Apify actor. Returns mapped ad dicts, filtered to image ads
-    that have both an ad_id and a downloadable image URL.
-
-    max_results is an explicit per-call cap on how many ads Apify returns.
-    None (the default) means use SCRAPE_FETCH_CAP.
-
-    Deliberately NOT wired to the pipeline's max_per_competitor: that caps how
-    many *new* ads get processed after the seen_ads gate, while this caps the
-    candidate pool fetched before it. Scraping wide and processing narrow is the
-    point - do not couple them again.
-    """
+def _scrape_raw(search_term, max_results=None, image_only=True, page_id=None):
+    """Shared core: call the Apify actor and iterate the dataset, applying the same
+    image-only / page-match filter every caller must use. Returns a list of
+    (raw, mapped) pairs for EVERY record Apify returned - mapped is None for
+    anything filtered out (video ad, missing ad_id, page mismatch). scrape_ads and
+    pipeline.fetch_pool (via scrape_ads_with_raw) both sit on top of this single
+    pass rather than each re-implementing the filter, so the two can never drift
+    apart the way update_competitor's read-modify-write once did for page_ids."""
     token = os.getenv("APIFY_TOKEN")
     if not token:
         raise ValueError("APIFY_TOKEN must be set")
@@ -128,14 +124,40 @@ def scrape_ads(search_term, max_results=None, image_only=True, page_id=None):
         run_input = {"searchTerms": [search_term], "maxResults": fetch_cap, "maxAds": fetch_cap, "mediaType": "image"}
     run = _call_actor_with_heartbeat(client, APIFY_ACTOR, run_input)
 
-    ads = []
+    results = []
     for raw in client.dataset(run.default_dataset_id).iterate_items():
         if image_only and raw.get("media_type") != "IMAGE":
+            results.append((raw, None))
             continue
         mapped = _map_ad(raw)
         if mapped["ad_id"] and mapped["image_url"] and (use_page or _page_matches(mapped.get("page_name", ""), search_term)):
-            ads.append(mapped)
+            results.append((raw, mapped))
         else:
             reason = "no ad_id" if not mapped["ad_id"] else ("no image (video ad?)" if not mapped["image_url"] else f"page mismatch: got page_name={mapped.get('page_name','')!r} vs search={search_term!r}")
             print(f"[scrape] rejected ad {mapped.get('ad_id','?')}: {reason}")
-    return ads
+            results.append((raw, None))
+    return results
+
+
+def scrape_ads(search_term, max_results=None, image_only=True, page_id=None):
+    """Run the Apify actor. Returns mapped ad dicts, filtered to image ads
+    that have both an ad_id and a downloadable image URL.
+
+    max_results is an explicit per-call cap on how many ads Apify returns.
+    None (the default) means use SCRAPE_FETCH_CAP.
+
+    Deliberately NOT wired to the pipeline's max_per_competitor: that caps how
+    many *new* ads get processed after the seen_ads gate, while this caps the
+    candidate pool fetched before it. Scraping wide and processing narrow is the
+    point - do not couple them again.
+    """
+    return [mapped for raw, mapped in _scrape_raw(search_term, max_results, image_only, page_id) if mapped]
+
+
+def scrape_ads_with_raw(search_term, max_results=None, image_only=True, page_id=None):
+    """Like _scrape_raw, but named for external callers: returns (raw, mapped) pairs
+    for EVERY record Apify returned (mapped=None for anything the filter rejected).
+    Used by pipeline.fetch_pool, which needs the full unmodified Apify record to
+    persist as raw_meta and needs accurate fetched/skipped counts - scrape_ads alone
+    only exposes survivors."""
+    return _scrape_raw(search_term, max_results, image_only, page_id)
