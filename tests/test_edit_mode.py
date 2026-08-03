@@ -656,6 +656,60 @@ def test_build_image_prompt_non_edit_mode_unaffected_by_suppression_exception():
     assert "The ONE exception to full geometry preservation" not in prompt
 
 
+# ---- Item 2 (2026-08-05): resolve_effective_include_product - the single source
+# build_image_prompt and pipeline.process_ad both call, so there's one derivation to keep
+# in sync rather than two ----
+
+def test_resolve_effective_include_product_forces_false_when_reference_has_no_product():
+    bp = {"layout_detail": {"product_count": 0}}
+    effective, reference_has_product = generate_image_prompt.resolve_effective_include_product(
+        bp, include_product=True, edit_mode=True
+    )
+    assert effective is False
+    assert reference_has_product is False
+
+
+def test_resolve_effective_include_product_forces_false_when_not_product_category():
+    bp = {"product_category": {"category": "not_product"}}
+    effective, reference_has_product = generate_image_prompt.resolve_effective_include_product(
+        bp, include_product=True, edit_mode=True
+    )
+    assert effective is False
+    assert reference_has_product is False
+
+
+def test_resolve_effective_include_product_true_when_reference_has_product():
+    bp = {"layout_detail": {"product_count": 1}}
+    effective, reference_has_product = generate_image_prompt.resolve_effective_include_product(
+        bp, include_product=True, edit_mode=True
+    )
+    assert effective is True
+    assert reference_has_product is True
+
+
+def test_resolve_effective_include_product_operator_false_never_widened():
+    """include_product=False (operator's own toggle) must stay False even when the
+    reference clearly has a product - reference_has_product only ever narrows, never
+    widens, the operator's own choice."""
+    bp = {"layout_detail": {"product_count": 2}}
+    effective, reference_has_product = generate_image_prompt.resolve_effective_include_product(
+        bp, include_product=False, edit_mode=True
+    )
+    assert effective is False
+    assert reference_has_product is True  # the reference itself still has a product
+
+
+def test_resolve_effective_include_product_noop_outside_edit_mode():
+    """Outside edit_mode this must be a no-op regardless of the blueprint - there's no
+    reference photograph being edited, so nothing to check the blueprint against."""
+    bp = {"layout_detail": {"product_count": 0}, "product_category": {"category": "not_product"}}
+    effective, reference_has_product = generate_image_prompt.resolve_effective_include_product(
+        bp, include_product=True, edit_mode=False
+    )
+    assert effective is True
+    assert reference_has_product is True
+
+
 def test_build_image_prompt_edit_mode_include_product_false_unaffected_by_reference_has_product():
     """include_product=False (operator's own toggle) must still mean no product, exactly
     as before - reference_has_product only ever narrows include_product, never widens it."""

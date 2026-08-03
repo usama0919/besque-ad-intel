@@ -96,6 +96,10 @@ def api_artifacts():
             # reference's own composition argued for a multi-product/bundle message that
             # rule 7 collapsed to one Besque bottle.
             "format_flag": r.get("format_flag") or "",
+            # Silent-override audit (2026-08-05): the reference had no product to
+            # substitute, so include_product was overridden off for this draft even
+            # though the operator asked for one.
+            "product_override_note": r.get("product_override_note") or "",
         })
     return JSONResponse(out)
 

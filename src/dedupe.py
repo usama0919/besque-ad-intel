@@ -134,7 +134,8 @@ def init_artifacts():
                 text_in_image BOOLEAN DEFAULT false,
                 operator_instruction TEXT DEFAULT '',
                 critic_findings JSONB DEFAULT '[]',
-                format_flag TEXT DEFAULT ''
+                format_flag TEXT DEFAULT '',
+                product_override_note TEXT DEFAULT ''
             )
         """)
         # Self-migrating: unlike angle_id/text_in_image/category before it (which each
@@ -151,12 +152,18 @@ def init_artifacts():
         # a FLAG, never a filter, so it's just a string surfaced on the card, not
         # anything that gates save_artifact itself.
         cur.execute("ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS format_flag TEXT DEFAULT ''")
+        # product_override_note (silent-override audit, 2026-08-05): set when
+        # resolve_effective_include_product forced include_product off against an
+        # explicit operator True - a human decision silently overruled with no feedback
+        # is the actual defect this closes, same "surface, never gate" pattern as
+        # format_flag above.
+        cur.execute("ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS product_override_note TEXT DEFAULT ''")
         conn.commit()
 
 
 def save_artifact(ad_id, page_name, image_path, blueprint, generated_copy, draft_image, metadata,
                    image_prompt="", copy_prompt="", model_info="", angle_id=None, text_in_image=False,
-                   operator_instruction="", format_flag=""):
+                   operator_instruction="", format_flag="", product_override_note=""):
     """Persist all artifacts for one (ad_id, angle_id) pair with a timestamp. Skips if that
     exact pair is already stored. angle_id=None reproduces the pre-angle behaviour exactly -
     one artifact per ad_id. A different angle_id for an already-processed ad is a distinct
@@ -168,7 +175,12 @@ def save_artifact(ad_id, page_name, image_path, blueprint, generated_copy, draft
 
     format_flag (Prompt 4, Item 4) is reference_format.format_flag_reason's verdict on
     the COMPETITOR reference (e.g. "reference was a 6-product bundle offer") - a flag for
-    a human to weigh, never a reason to skip generation."""
+    a human to weigh, never a reason to skip generation.
+
+    product_override_note (silent-override audit, 2026-08-05) is set by process_ad when
+    resolve_effective_include_product forced include_product off against an explicit
+    operator True - worded so the operator understands the reference had no product to
+    substitute, not just that the toggle "didn't work." Empty when no override happened."""
     with get_conn() as conn, conn.cursor() as cur:
         if FORCE_REPROCESS:
             cur.execute("DELETE FROM artifacts WHERE ad_id = %s AND angle_id IS NOT DISTINCT FROM %s", (ad_id, angle_id))
@@ -180,12 +192,13 @@ def save_artifact(ad_id, page_name, image_path, blueprint, generated_copy, draft
             """INSERT INTO artifacts
                (ad_id, page_name, image_path, blueprint, generated_copy, draft_image, metadata,
                 image_prompt, copy_prompt, model_info, angle_id, text_in_image, operator_instruction,
-                format_flag)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                format_flag, product_override_note)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (ad_id, page_name, image_path,
              _json.dumps(blueprint), _json.dumps(generated_copy),
              draft_image, _json.dumps(metadata), image_prompt, copy_prompt, model_info,
-             angle_id, text_in_image, operator_instruction or "", format_flag or ""),
+             angle_id, text_in_image, operator_instruction or "", format_flag or "",
+             product_override_note or ""),
         )
         conn.commit()
 
@@ -276,7 +289,7 @@ def get_artifacts_full(limit=50):
                    a.generated_copy, a.draft_image, a.metadata, a.created_at,
                    d.decision, a.image_prompt, a.copy_prompt, a.model_info,
                    a.angle_id, a.text_in_image, a.operator_instruction, a.critic_findings,
-                   a.format_flag
+                   a.format_flag, a.product_override_note
             FROM artifacts a
             LEFT JOIN LATERAL (
                 SELECT decision FROM review_decisions r
@@ -290,7 +303,7 @@ def get_artifacts_full(limit=50):
                 "draft_image", "metadata", "created_at", "decision",
                 "image_prompt", "copy_prompt", "model_info",
                 "angle_id", "text_in_image", "operator_instruction", "critic_findings",
-                "format_flag"]
+                "format_flag", "product_override_note"]
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 

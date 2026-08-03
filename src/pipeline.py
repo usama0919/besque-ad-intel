@@ -5,7 +5,7 @@ ad or failed stage is skipped cleanly without stopping the run.
 """
 import os
 import logging
-from src import dedupe, scrape, assets, deconstruct, generate_copy, generate_image_prompt, slack_review, compliance, output_critic, content_safety, reference_format
+from src import dedupe, scrape, assets, deconstruct, generate_copy, generate_image_prompt, generate_image_prompt_writer, slack_review, compliance, output_critic, content_safety, reference_format
 from src.retry import with_retry
 
 FORCE_REPROCESS = os.getenv("FORCE_REPROCESS") == "1"
@@ -109,7 +109,20 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
 
     ad_index/total_ads are diagnostic-only (silent-hang investigation, 2026-08-04) - purely
     for the entry-point log line below, no effect on behaviour. None/None (the default,
-    e.g. when a test or the writer calls process_ad directly) just omits them from that line."""
+    e.g. when a test or the writer calls process_ad directly) just omits them from that line.
+
+    Silent-override audit (2026-08-05): two places where a derived value can override an
+    explicit operator input now both surface it rather than doing so silently. (1) When
+    resolve_effective_include_product forces include_product off against an explicit True
+    (the reference ad has no product to substitute), a pipeline_warning is recorded AND
+    product_override_note is persisted onto the artifact for the card - a human decision
+    silently overruled with no feedback anywhere was the actual defect, not just the two
+    critic false positives it also caused (see effective_include_product's use below,
+    replacing the raw include_product the critic used to be told). (2) A pasted
+    operator_instruction longer than generate_image_prompt_writer.MAX_OPERATOR_INSTRUCTION_CHARS
+    is silently truncated by clip_operator_instruction - now also recorded as a
+    pipeline_warning naming the original length, same defect class, just for free text
+    instead of a toggle."""
     ad_id = ad.get("ad_id")
     if not ad_id:
         return "failed"
@@ -159,6 +172,43 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
         # save_artifact below regardless of what happens next, so it's on the card
         # whether the ad is approved, rejected, or still pending.
         format_flag = reference_format.format_flag_reason(blueprint) or ""
+
+        # Silent-override audit (2026-08-05): a real HIGH critic false positive traced
+        # back to include_product being silently overridden off, with no feedback anywhere
+        # that the tool had overruled an explicit operator choice. effective_include_product
+        # is the SAME value build_image_prompt will use internally for this exact blueprint -
+        # resolve_effective_include_product is the single source both call, so there's one
+        # derivation to keep in sync, not two (see effective_authorised_text above, added
+        # after rule 6 and the critic drifted apart on exactly this shape of duplication).
+        effective_include_product, reference_has_product = generate_image_prompt.resolve_effective_include_product(
+            blueprint, include_product, edit_mode
+        )
+        product_override_note = ""
+        if include_product and not effective_include_product:
+            product_override_note = (
+                "Product suppressed for this draft: the reference ad has no product to "
+                "substitute, so include_product was overridden off for this run."
+            )
+            dedupe.init_pipeline_warnings()
+            dedupe.record_warning(
+                "product_override_no_reference_product",
+                f"Ad {ad_id} ({ad.get('page_name', '?')}): include_product was True but "
+                f"the reference ad has no product in frame - overridden to off for this draft.",
+            )
+
+        # Silent-override audit (2026-08-05): a pasted operator brief past
+        # MAX_OPERATOR_INSTRUCTION_CHARS is silently truncated by clip_operator_instruction
+        # (appends "..." with no signal anywhere that anything was cut) - same defect
+        # class as the product override above, just for free text instead of a toggle.
+        _stripped_operator_instruction = (operator_instruction or "").strip()
+        if len(_stripped_operator_instruction) > generate_image_prompt_writer.MAX_OPERATOR_INSTRUCTION_CHARS:
+            dedupe.init_pipeline_warnings()
+            dedupe.record_warning(
+                "operator_instruction_truncated",
+                f"Ad {ad_id} ({ad.get('page_name', '?')}): operator instruction was "
+                f"{len(_stripped_operator_instruction)} characters, truncated to "
+                f"{generate_image_prompt_writer.MAX_OPERATOR_INSTRUCTION_CHARS} for generation.",
+            )
 
         MAX_COPY_ATTEMPTS = 2
         ok, issues = False, []
@@ -245,6 +295,7 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
             text_in_image=text_in_image,
             operator_instruction=operator_instruction or "",
             format_flag=format_flag,
+            product_override_note=product_override_note,
         )
 
         if check_output:
@@ -256,16 +307,33 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
             try:
                 from pathlib import Path as _Path
                 draft_bytes = _Path(draft_image).read_bytes()
+                # effective_include_product, not the raw operator toggle - the critic must
+                # be told the SAME product-presence rule the generator was actually given
+                # (build_image_prompt resolved this identically for this blueprint), never
+                # the pre-override value. Same asymmetry class as the text_in_image fix
+                # below - this was the OTHER live false positive ("Missing authorised
+                # product" on a run where none was ever authorised).
                 brand_rules_text = generate_image_prompt.brand_rules(
-                    include_product=include_product, text_in_image=text_in_image,
+                    include_product=effective_include_product, text_in_image=text_in_image,
                     headline=copy.get("headline"), subtext=copy.get("image_subtext") or None,
                     edit_mode=edit_mode,
                 )
+                # The critic must never be told something the generator wasn't told (a
+                # real HIGH "Missing authorised text" false positive, 2026-08-04): rule 6
+                # above gates the headline/subtext it permits on text_in_image via
+                # effective_authorised_text - the critic's own authorised-text line must
+                # be built from the SAME call, not a second, independent truthy check on
+                # copy.get("headline") alone (which is always truthy regardless of
+                # text_in_image - generate_copy_live produces a headline whether or not
+                # the operator asked for it in-image).
+                critic_headline, critic_subtext = generate_image_prompt.effective_authorised_text(
+                    text_in_image, copy.get("headline"), copy.get("image_subtext") or None,
+                )
                 log.info("Ad %s: output critic starting", ad_id)
                 findings = output_critic.check_draft(
-                    draft_bytes, brand_rules_text, headline=copy.get("headline"),
-                    subtext=copy.get("image_subtext") or None, offer_text=offer_text,
-                    include_product=include_product,
+                    draft_bytes, brand_rules_text, headline=critic_headline,
+                    subtext=critic_subtext, offer_text=offer_text,
+                    include_product=effective_include_product,
                 )
                 if findings is None:
                     dedupe.init_pipeline_warnings()

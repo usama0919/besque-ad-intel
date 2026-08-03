@@ -125,6 +125,158 @@ def test_process_ad_format_flag_empty_string_when_no_mismatch(monkeypatch):
     assert captured["format_flag"] == ""
 
 
+# ---- Silent-override audit (2026-08-05): a derived value silently overriding an
+# explicit operator input is the actual defect, not just the critic false positives it
+# also caused - both cases now record a pipeline_warning AND surface on the card. ----
+
+def _no_product_in_reference_blueprint():
+    return {
+        "format": "before_after",
+        "layout_detail": {"product_count": 0},
+        "product_category": {"category": "firming", "signals": []},
+        "visual": {"subject": "before/after skin comparison, no product in frame"},
+    }
+
+
+def test_process_ad_records_warning_when_reference_has_no_product_to_substitute(monkeypatch):
+    """Behavioural, not a string check on the prompt: a real warning ROW must be written
+    when resolve_effective_include_product overrides an explicit include_product=True."""
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    dedupe.init_pipeline_warnings()
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+          "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    _mock_all_stages(monkeypatch)
+    monkeypatch.setattr(pipeline.deconstruct, "deconstruct_image",
+                        lambda **k: _no_product_in_reference_blueprint())
+    warnings = []
+    monkeypatch.setattr(pipeline.dedupe, "record_warning", lambda kind, detail: warnings.append((kind, detail)))
+
+    assert pipeline.process_ad(ad, edit_mode=True, include_product=True) == "processed"
+    assert any(kind == "product_override_no_reference_product" for kind, detail in warnings)
+
+
+def test_process_ad_persists_product_override_note_on_artifact(monkeypatch):
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+          "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    _mock_all_stages(monkeypatch)
+    monkeypatch.setattr(pipeline.deconstruct, "deconstruct_image",
+                        lambda **k: _no_product_in_reference_blueprint())
+    captured = {}
+    monkeypatch.setattr(pipeline.dedupe, "save_artifact", lambda **k: captured.update(k))
+
+    assert pipeline.process_ad(ad, edit_mode=True, include_product=True) == "processed"
+    assert "no product to substitute" in captured["product_override_note"]
+    assert "overridden off" in captured["product_override_note"]
+
+
+def test_process_ad_no_override_note_when_operator_already_disabled_product(monkeypatch):
+    """include_product=False is the operator's own choice, not an override - nothing to
+    report, since there was nothing to overrule."""
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+          "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    _mock_all_stages(monkeypatch)
+    monkeypatch.setattr(pipeline.deconstruct, "deconstruct_image",
+                        lambda **k: _no_product_in_reference_blueprint())
+    captured = {}
+    monkeypatch.setattr(pipeline.dedupe, "save_artifact", lambda **k: captured.update(k))
+    warnings = []
+    monkeypatch.setattr(pipeline.dedupe, "record_warning", lambda kind, detail: warnings.append((kind, detail)))
+
+    assert pipeline.process_ad(ad, edit_mode=True, include_product=False) == "processed"
+    assert captured["product_override_note"] == ""
+    assert warnings == []
+
+
+def test_process_ad_no_override_when_reference_has_a_product(monkeypatch):
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+          "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    _mock_all_stages(monkeypatch)
+    monkeypatch.setattr(pipeline.deconstruct, "deconstruct_image", lambda **k: {
+        "format": "product_hero", "layout_detail": {"product_count": 1},
+        "product_category": {"category": "body_oil", "signals": []},
+    })
+    captured = {}
+    monkeypatch.setattr(pipeline.dedupe, "save_artifact", lambda **k: captured.update(k))
+    warnings = []
+    monkeypatch.setattr(pipeline.dedupe, "record_warning", lambda kind, detail: warnings.append((kind, detail)))
+
+    assert pipeline.process_ad(ad, edit_mode=True, include_product=True) == "processed"
+    assert captured["product_override_note"] == ""
+    assert warnings == []
+
+
+def test_process_ad_critic_receives_effective_include_product_not_raw(monkeypatch, tmp_path):
+    """The other live false positive this closes: "Missing authorised product" on a run
+    where the reference had none to substitute - the critic must be told the SAME
+    effective value the generator actually used, not the pre-override operator toggle."""
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+          "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    _mock_all_stages(monkeypatch)
+    monkeypatch.setattr(pipeline.deconstruct, "deconstruct_image",
+                        lambda **k: _no_product_in_reference_blueprint())
+    draft_path = tmp_path / "draft.png"
+    draft_path.write_bytes(b"\x89PNG\r\n\x1a\nfakepngbytes")
+    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image",
+                        lambda bp, aid, product=None, reference_images=None, **k: str(draft_path))
+    captured = {}
+    monkeypatch.setattr(pipeline.output_critic, "check_draft",
+                        lambda image_bytes, brand_rules_text, **k: captured.update(k) or [])
+    monkeypatch.setattr(pipeline.dedupe, "update_artifact_findings", lambda *a, **k: None)
+
+    assert pipeline.process_ad(ad, edit_mode=True, include_product=True, check_output=True) == "processed"
+    assert captured["include_product"] is False
+
+
+# ---- Silent-override audit item 2: a pasted operator brief past
+# generate_image_prompt_writer.MAX_OPERATOR_INSTRUCTION_CHARS is silently truncated by
+# clip_operator_instruction - same defect class as the product override above. ----
+
+def test_process_ad_records_warning_when_operator_instruction_truncated(monkeypatch):
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    dedupe.init_pipeline_warnings()
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+          "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    _mock_all_stages(monkeypatch)
+    long_instruction = "x" * (pipeline.generate_image_prompt_writer.MAX_OPERATOR_INSTRUCTION_CHARS + 50)
+    warnings = []
+    monkeypatch.setattr(pipeline.dedupe, "record_warning", lambda kind, detail: warnings.append((kind, detail)))
+
+    assert pipeline.process_ad(ad, operator_instruction=long_instruction) == "processed"
+    matches = [detail for kind, detail in warnings if kind == "operator_instruction_truncated"]
+    assert len(matches) == 1
+    assert str(len(long_instruction)) in matches[0]
+
+
+def test_process_ad_no_warning_when_operator_instruction_within_limit(monkeypatch):
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+          "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    _mock_all_stages(monkeypatch)
+    warnings = []
+    monkeypatch.setattr(pipeline.dedupe, "record_warning", lambda kind, detail: warnings.append((kind, detail)))
+
+    assert pipeline.process_ad(ad, operator_instruction="make it brighter") == "processed"
+    assert not any(kind == "operator_instruction_truncated" for kind, detail in warnings)
+
+
 # ---- Prompt 4, Item 5: retheme_colours threads through to generate_image ----
 
 def test_process_ad_forwards_retheme_colours_to_generate_image(monkeypatch):
@@ -529,6 +681,93 @@ def test_process_ad_critic_uses_the_same_flags_as_generation(monkeypatch, tmp_pa
 
     assert pipeline.process_ad(ad, check_output=True, edit_mode=True) == "processed"
     assert "SOURCE IMAGE IS THE COMPETITOR'S OWN AD" in captured["brand_rules_text"]
+
+
+# ---- Silent-hang investigation follow-up (2026-08-04): the critic must never be told
+# something the generator wasn't told. check_draft used to receive copy.get("headline")
+# unconditionally - generate_copy_live always produces a headline whether or not
+# text_in_image was requested, so a text_in_image=False run told the critic a headline
+# WAS authorised while rule 6 (correctly) told the generator to render none - a real HIGH
+# "Missing authorised text" false positive. Both sides must now derive from
+# generate_image_prompt.effective_authorised_text. ----
+
+def test_process_ad_critic_headline_gated_by_text_in_image_false(monkeypatch, tmp_path):
+    """_mock_all_stages' generate_copy_live always returns a truthy headline regardless of
+    text_in_image - this is deliberately the exact shape of the live bug: text_in_image=False
+    here must still gate the critic's headline/subtext to None, not pass "H"/"S" through
+    just because generate_copy_live produced them."""
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+          "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    _mock_all_stages(monkeypatch)
+    draft_path = tmp_path / "draft.png"
+    draft_path.write_bytes(b"\x89PNG\r\n\x1a\nfakepngbytes")
+    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image",
+                        lambda bp, aid, product=None, reference_images=None, **k: str(draft_path))
+    captured = {}
+    monkeypatch.setattr(pipeline.output_critic, "check_draft",
+                        lambda image_bytes, brand_rules_text, **k: captured.update(k) or [])
+    monkeypatch.setattr(pipeline.dedupe, "update_artifact_findings", lambda *a, **k: None)
+
+    assert pipeline.process_ad(ad, check_output=True, text_in_image=False) == "processed"
+    assert captured["headline"] is None
+    assert captured["subtext"] is None
+
+
+def test_process_ad_critic_headline_passed_through_when_text_in_image_true(monkeypatch, tmp_path):
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+          "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    _mock_all_stages(monkeypatch)
+    draft_path = tmp_path / "draft.png"
+    draft_path.write_bytes(b"\x89PNG\r\n\x1a\nfakepngbytes")
+    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image",
+                        lambda bp, aid, product=None, reference_images=None, **k: str(draft_path))
+    captured = {}
+    monkeypatch.setattr(pipeline.output_critic, "check_draft",
+                        lambda image_bytes, brand_rules_text, **k: captured.update(k) or [])
+    monkeypatch.setattr(pipeline.dedupe, "update_artifact_findings", lambda *a, **k: None)
+
+    assert pipeline.process_ad(ad, check_output=True, text_in_image=True) == "processed"
+    assert captured["headline"] == "H"
+    assert captured["subtext"] == "S"
+
+
+def test_rule6_and_critic_authorised_text_never_contradict():
+    """The highest-value test in this set: it fails on the CLASS of bug (two independent
+    derivations of "is text authorised" drifting apart) rather than the one instance
+    already fixed above. Pins literal substrings from the actual current source text
+    rather than deriving the expected value from effective_authorised_text itself - a test
+    that read its expectation back from the code under test would pass vacuously if that
+    code's condition ever changed. All 410 tests existing before this one passed while the
+    live bug shipped, because nothing asserted the generator and critic were told the same
+    thing - this is what closes that gap."""
+    from src import generate_image_prompt, output_critic
+    headline, subtext = "Then & Now", "7 oils. Deeper hydration. Visibly firmer skin."
+
+    # text_in_image=False: rule 6 (the generator) must forbid rendering it...
+    rule6_off = generate_image_prompt._rule6_text_policy(text_in_image=False, headline=headline, subtext=subtext)
+    assert "NEVER render any headline" in rule6_off
+    # ...and the critic must be told the same thing, not the raw headline regardless.
+    eff_headline_off, eff_subtext_off = generate_image_prompt.effective_authorised_text(False, headline, subtext)
+    critic_prompt_off = output_critic._build_user_prompt("(rules)", headline=eff_headline_off,
+                                                          subtext=eff_subtext_off)
+    assert "NONE - no text was authorised for this image" in critic_prompt_off
+    assert headline not in critic_prompt_off
+
+    # text_in_image=True with a real headline: rule 6 must permit exactly it...
+    rule6_on = generate_image_prompt._rule6_text_policy(text_in_image=True, headline=headline, subtext=subtext)
+    assert f'the headline "{headline}"' in rule6_on
+    # ...and the critic must be told exactly that same headline, not "none authorised".
+    eff_headline_on, eff_subtext_on = generate_image_prompt.effective_authorised_text(True, headline, subtext)
+    critic_prompt_on = output_critic._build_user_prompt("(rules)", headline=eff_headline_on,
+                                                         subtext=eff_subtext_on)
+    assert headline in critic_prompt_on
+    assert "NONE - no text was authorised for this image" not in critic_prompt_on
 
 
 def test_process_ad_records_warning_and_leaves_card_unflagged_when_critic_fails(monkeypatch, tmp_path):

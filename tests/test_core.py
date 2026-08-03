@@ -299,6 +299,57 @@ def test_save_artifact_format_flag_defaults_to_empty_string():
             conn.commit()
 
 
+# ---- Silent-override audit (2026-08-05): product_override_note round-trips through
+# save_artifact/get_artifacts_full, same shape as format_flag above ----
+
+def test_save_artifact_persists_product_override_note():
+    from src import dedupe
+    import uuid
+    dedupe.init_artifacts()
+    ad_id = f"ART_{uuid.uuid4().hex[:8]}"
+    try:
+        dedupe.save_artifact(
+            ad_id=ad_id, page_name="TestBrand", image_path="assets/x.jpg",
+            blueprint={"format": "before_after"}, generated_copy={"headline": "H"},
+            draft_image="assets/x_draft.png",
+            metadata={"cta": "Shop", "destination_url": "http://x"},
+            product_override_note="Product suppressed for this draft: the reference ad "
+                                   "has no product to substitute, so include_product was "
+                                   "overridden off for this run.",
+        )
+        rows = dedupe.get_artifacts_full(limit=500)
+        match = next(r for r in rows if r["ad_id"] == ad_id)
+        assert match["product_override_note"] == (
+            "Product suppressed for this draft: the reference ad has no product to "
+            "substitute, so include_product was overridden off for this run."
+        )
+    finally:
+        with dedupe.get_conn() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM artifacts WHERE ad_id=%s", (ad_id,))
+            conn.commit()
+
+
+def test_save_artifact_product_override_note_defaults_to_empty_string():
+    from src import dedupe
+    import uuid
+    dedupe.init_artifacts()
+    ad_id = f"ART_{uuid.uuid4().hex[:8]}"
+    try:
+        dedupe.save_artifact(
+            ad_id=ad_id, page_name="TestBrand", image_path="assets/x.jpg",
+            blueprint={"format": "hero"}, generated_copy={"headline": "H"},
+            draft_image="assets/x_draft.png",
+            metadata={"cta": "Shop", "destination_url": "http://x"},
+        )
+        rows = dedupe.get_artifacts_full(limit=500)
+        match = next(r for r in rows if r["ad_id"] == ad_id)
+        assert match["product_override_note"] == ""
+    finally:
+        with dedupe.get_conn() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM artifacts WHERE ad_id=%s", (ad_id,))
+            conn.commit()
+
+
 def test_get_artifact_returns_angle_id_and_text_in_image():
     """dashboard.py's api_edit_image reads these back to restore the original generation's
     rule-6 mode on edit - get_artifact must actually return them, not just accept angle_id

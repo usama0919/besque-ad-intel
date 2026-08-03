@@ -9,6 +9,40 @@ from src.compliance_rules import COMPLIANCE_RULES
 IMAGE_MODEL = os.getenv("IMAGE_MODEL", "placeholder-image-model")
 
 
+def resolve_effective_include_product(blueprint, include_product, edit_mode):
+    """The single source for whether a Besque product is actually being substituted in -
+    Item 2 (2026-08-05), extracted from build_image_prompt's own inline computation so
+    pipeline.process_ad can learn the same answer instead of independently re-deriving it
+    (exactly the two-independent-derivations shape that let rule 6 and the output critic
+    drift apart on text_in_image - see effective_authorised_text above).
+
+    In edit_mode, the reference ad governs whether there's a product to substitute at all:
+    layout_detail.product_count==0 or product_category.category=="not_product" (both from
+    deconstruct.py's blueprint schema) force this False even when the operator explicitly
+    asked for a product (include_product=True), since there's nothing in the reference to
+    substitute. Outside edit_mode this is a no-op (reference_has_product stays True,
+    effective_include_product == include_product exactly).
+
+    Returns (effective_include_product, reference_has_product) - the caller needs
+    reference_has_product too, since include_product and reference_has_product
+    independently select one of three explanations for a productless outcome (operator
+    disabled it / nothing to substitute / both), the same distinction
+    _edit_mode_instruction's docstring already establishes.
+
+    Deliberately a plain function, not a build_image_prompt return value (~55 existing
+    call sites treat that function's return as a bare string) and not a module-level
+    attribute like generate_image.last_prompt (the exact kind of hidden coupling that
+    made the text_in_image bug possible - state one function sets and another reads, with
+    nothing in either signature saying so)."""
+    reference_has_product = True
+    if edit_mode:
+        layout_detail_bp = (blueprint or {}).get("layout_detail") or {}
+        product_category_bp = ((blueprint or {}).get("product_category") or {}).get("category")
+        reference_has_product = not (product_category_bp == "not_product"
+                                      or layout_detail_bp.get("product_count") == 0)
+    return include_product and reference_has_product, reference_has_product
+
+
 def build_image_prompt(blueprint: dict, product: dict = None, include_product: bool = True,
                         text_in_image: bool = False, headline: str = None, subtext: str = None,
                         creative_description: str = None, edit_mode: bool = False,
@@ -73,21 +107,9 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
     text_placement = visual.get("text_placement", "minimal")
     prod_style = (blueprint.get("production_style") or {}).get("style", "")
 
-    # Step 2, Part 4: in edit mode the reference ad governs whether there's a product to
-    # substitute at all - "add a Besque product" only makes sense when the reference
-    # actually shows one. layout_detail.product_count==0 or product_category=="not_product"
-    # (both from deconstruct.py's blueprint schema) are the two available signals; either
-    # forces effective_include_product False even if the operator's own toggle was True,
-    # since there is nothing in the reference to substitute. Outside edit_mode this is a
-    # no-op (reference_has_product stays True, effective_include_product == include_product).
-    effective_include_product = include_product
-    reference_has_product = True
-    if edit_mode:
-        layout_detail_bp = (blueprint or {}).get("layout_detail") or {}
-        product_category_bp = ((blueprint or {}).get("product_category") or {}).get("category")
-        reference_has_product = not (product_category_bp == "not_product"
-                                      or layout_detail_bp.get("product_count") == 0)
-        effective_include_product = include_product and reference_has_product
+    effective_include_product, reference_has_product = resolve_effective_include_product(
+        blueprint, include_product, edit_mode
+    )
 
     if effective_include_product:
         if product:
@@ -210,6 +232,23 @@ _RULES_1_TO_5 = (
 )
 
 
+def effective_authorised_text(text_in_image, headline=None, subtext=None):
+    """The (headline, subtext) actually authorised to render in-scene, given text_in_image -
+    the single source for a condition (text_in_image and headline) that used to be
+    re-derived independently at three sites (rule 6 here, _edit_mode_instruction's TEXT
+    branch, and - the live bug this closes - the output critic's authorised-text line,
+    which pipeline.process_ad computed with no text_in_image check at all). A False flag,
+    or a True flag with no headline actually supplied, returns (None, None) - nothing
+    confirmed to render, so nothing is authorised, matching rule 6's own fallback. Every
+    caller that needs to know "what text is the model/critic actually told is allowed"
+    must call this, not re-check text_in_image/headline itself - see
+    test_rule6_and_critic_authorised_text_never_contradict, which exists because two
+    independent truthy checks drifted apart in exactly this way."""
+    if text_in_image and headline:
+        return headline, subtext
+    return None, None
+
+
 def _rule6_text_policy(text_in_image=False, headline=None, subtext=None):
     """Rule 6, TEXT POLICY. Default (text_in_image=False) is the original blanket-ban
     wording, verbatim. When text_in_image is True AND a headline was actually supplied,
@@ -217,7 +256,8 @@ def _rule6_text_policy(text_in_image=False, headline=None, subtext=None):
     generic "headline is now OK" opening, so nothing beyond the approved copy can slip in.
     A True flag with no headline supplied falls back to the default (nothing confirmed to
     render, so nothing is permitted)."""
-    if text_in_image and headline:
+    headline, subtext = effective_authorised_text(text_in_image, headline, subtext)
+    if headline:
         permitted = f"the headline \"{headline}\""
         if subtext:
             permitted += f" and the supporting text \"{subtext}\""
@@ -530,10 +570,11 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             "bottle, or packaging anywhere in the scene. Everything else in the scene "
             "stays exactly as it appears in the source image. "
         )
-    if text_in_image and headline:
-        permitted = f'the headline "{headline}"'
-        if subtext:
-            permitted += f' and the supporting text "{subtext}"'
+    eff_headline, eff_subtext = effective_authorised_text(text_in_image, headline, subtext)
+    if eff_headline:
+        permitted = f'the headline "{eff_headline}"'
+        if eff_subtext:
+            permitted += f' and the supporting text "{eff_subtext}"'
         typo_guidance = TYPOGRAPHY_GUIDANCE.get(creative_format, DEFAULT_TYPOGRAPHY_GUIDANCE)
         base += (
             f"TEXT: preserve the reference image's text zones, size, and position "
