@@ -62,7 +62,7 @@ def fetch_reference_images(product):
 def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
                 realism=None, text_in_image=False, include_product=True,
                 body_area=None, offer_text=None, edit_mode=False, operator_instruction=None,
-                check_output=False, retheme_colours=True):
+                check_output=False, retheme_colours=True, ad_index=None, total_ads=None):
     """Run one ad through the full pipeline. Returns processed/skipped/failed.
     messaging_angle, if given, is a resolved angle dict (dedupe.get_angle's shape) - it
     changes the dedup identity of this ad to (ad_id, angle_id) instead of ad_id alone, so
@@ -105,7 +105,11 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
     the team's own doc calls for re-theming the reference's palette to Besque's on every
     clone unless the angle specifically calls for something else; the operator disables
     it per run for that stated exception, which also protects today's validated
-    faithful-clone behaviour."""
+    faithful-clone behaviour.
+
+    ad_index/total_ads are diagnostic-only (silent-hang investigation, 2026-08-04) - purely
+    for the entry-point log line below, no effect on behaviour. None/None (the default,
+    e.g. when a test or the writer calls process_ad directly) just omits them from that line."""
     ad_id = ad.get("ad_id")
     if not ad_id:
         return "failed"
@@ -121,6 +125,7 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
             log.info("Ad %s already seen for angle_id=%s, skipping", ad_id, angle_id)
             return "skipped"
 
+        log.info("Ad %s (index %s/%s): deconstruct starting", ad_id, ad_index, total_ads)
         image_bytes = assets.download_image_bytes(ad["image_url"])
         image_path = assets.download_image(ad["image_url"], ad_id)
         blueprint = deconstruct.deconstruct_image(
@@ -195,6 +200,7 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
                 f"Ad {ad_id} ({ad.get('page_name', '?')}): text_in_image was requested but "
                 f"generated copy had no headline - image rendered without in-image text.",
             )
+        log.info("Ad %s: image generation starting (edit_mode=%s)", ad_id, edit_mode)
         try:
             draft_image = generate_image_prompt.generate_image(
                 blueprint, ad_id, product=product, reference_images=reference_images, angle_slug=angle_slug,
@@ -255,6 +261,7 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
                     headline=copy.get("headline"), subtext=copy.get("image_subtext") or None,
                     edit_mode=edit_mode,
                 )
+                log.info("Ad %s: output critic starting", ad_id)
                 findings = output_critic.check_draft(
                     draft_bytes, brand_rules_text, headline=copy.get("headline"),
                     subtext=copy.get("image_subtext") or None, offer_text=offer_text,
@@ -370,6 +377,7 @@ def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product
             ads = with_retry(lambda: scrape.scrape_ads(name, page_id=competitor.get("page_id")),
                              attempts=2, delay=2)
             comp_summary["ads_seen"] = len(ads)
+            log.info("Scrape complete for %s: %s ads returned", name, len(ads))
             # suggest the real page name if it differs from our list
             try:
                 if ads:
@@ -395,7 +403,7 @@ def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product
             summary["by_competitor"][name] = comp_summary
             continue
         processed_this_comp = 0
-        for ad in ads:
+        for ad_index, ad in enumerate(ads, 1):
             if should_stop():
                 log.info("Stop requested, halting run.")
                 break
@@ -406,7 +414,7 @@ def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product
                                 realism=realism, text_in_image=text_in_image, include_product=include_product,
                                 body_area=body_area, offer_text=offer_text, edit_mode=edit_mode,
                                 operator_instruction=operator_instruction, check_output=check_output,
-                                retheme_colours=retheme_colours)
+                                retheme_colours=retheme_colours, ad_index=ad_index, total_ads=len(ads))
             summary[result] += 1
             comp_summary[result] += 1
             if result == "processed":

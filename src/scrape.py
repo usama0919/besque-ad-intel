@@ -1,9 +1,67 @@
 """Live Apify Meta Ad Library scrape. Maps results to the pipeline ad dict,
 including a direct downloadable image URL for verifiable image-based analysis."""
+import logging
 import os
+import threading
+import time
 from apify_client import ApifyClient
 
+log = logging.getLogger("scrape")
+
 APIFY_ACTOR = os.getenv("APIFY_ACTOR_ID", "automly/facebook-ad-library-scraper")
+
+
+def _call_actor_with_heartbeat(client, actor_id, run_input):
+    """client.actor(actor_id).call(...) blocks until the Apify actor run reaches a
+    terminal state, which can take several minutes with zero output otherwise - the exact
+    silence that made a real run look hung (2026-08-04 diagnosis). Runs the call on a
+    background thread and logs a heartbeat every 30s while it's still running. Deliberately
+    NO timeout: the actor is doing real, billed work fetching the ad pool - killing it
+    mid-run would waste the fetch, not save time; this only adds visibility.
+
+    Also quiets one specific, expected failure while the call is in flight: apify_client
+    spawns its OWN background thread (_stream_log) that streams the actor's live console
+    output to ours - the "[apify...] -> Scraped N/M ads" lines. On a long-running actor
+    (observed 2026-08-04: a ~5min run) that stream's own HTTP connection can time out
+    mid-run and raise an uncaught impit.TimeoutException in that thread, which Python's
+    default threading.excepthook dumps as a full traceback. The actor run itself is a
+    separate, unrelated poll and is unaffected - this is a cosmetic failure of the
+    log-streaming convenience feature, not a real error, so it's caught and logged as one
+    line instead for the duration of this call only; the previous hook (whatever it
+    actually was, not a stale module-level snapshot) is restored in `finally` and used for
+    every other thread's exception."""
+    previous_hook = threading.excepthook
+
+    def _quiet_stream_log_timeout(args):
+        if args.exc_type is not None and args.exc_type.__module__ == "impit" \
+                and args.exc_type.__name__ == "TimeoutException":
+            log.info("Apify log-stream connection timed out (actor run unaffected, cosmetic only): %s",
+                      args.exc_value)
+            return
+        previous_hook(args)
+
+    result, error = {}, {}
+
+    def _target():
+        try:
+            result["run"] = client.actor(actor_id).call(run_input=run_input)
+        except Exception as e:
+            error["exc"] = e
+
+    threading.excepthook = _quiet_stream_log_timeout
+    try:
+        thread = threading.Thread(target=_target, daemon=True)
+        started = time.monotonic()
+        thread.start()
+        while thread.is_alive():
+            thread.join(timeout=30)
+            if thread.is_alive():
+                log.info("Still waiting on Apify actor, elapsed %ss", int(time.monotonic() - started))
+    finally:
+        threading.excepthook = previous_hook
+    if "exc" in error:
+        raise error["exc"]
+    return result["run"]
 
 
 def _map_ad(raw):
@@ -68,7 +126,7 @@ def scrape_ads(search_term, max_results=None, image_only=True, page_id=None):
         run_input = {"urls": [{"url": pid}], "maxAds": fetch_cap, "mediaType": "image"}
     else:
         run_input = {"searchTerms": [search_term], "maxResults": fetch_cap, "maxAds": fetch_cap, "mediaType": "image"}
-    run = client.actor(APIFY_ACTOR).call(run_input=run_input)
+    run = _call_actor_with_heartbeat(client, APIFY_ACTOR, run_input)
 
     ads = []
     for raw in client.dataset(run.default_dataset_id).iterate_items():
