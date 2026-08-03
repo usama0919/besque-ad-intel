@@ -3,6 +3,8 @@ only the product. Covers brand_rules()'s new rule 9, _edit_mode_instruction's ag
 with rule 6 (the same class of contradiction Part C guarded against for the writer), and
 generate_image() actually attaching the competitor image bytes as an input Part only when
 edit_mode is on."""
+import io
+from PIL import Image
 from src import generate_image_prompt
 
 
@@ -15,6 +17,16 @@ def _blueprint():
             "text_placement": "lower third",
         }
     }
+
+
+def _png_bytes(width=100, height=100):
+    """A real, readable PNG of the given shape - used wherever a test needs
+    competitor_image_bytes to survive Image.open() (Item 6a's derive_aspect_ratio), as
+    opposed to the old placeholder b"\\x89PNG...competitor-bytes" literal, which has a
+    real PNG signature but no valid image data after it."""
+    buf = io.BytesIO()
+    Image.new("RGB", (width, height), color=(200, 150, 100)).save(buf, format="PNG")
+    return buf.getvalue()
 
 
 # ---- brand_rules(): rule 9 is edit-mode-only, additive ----
@@ -121,8 +133,31 @@ def test_build_image_prompt_edit_mode_still_forces_guardrails():
     prompt = generate_image_prompt.build_image_prompt(_blueprint(), product=product, edit_mode=True)
     assert "C1. NO REAL PEOPLE" in prompt  # compliance rules, always present
     assert "almond; rosehip" in prompt  # product_clause, always present
-    assert "Square 1:1 aspect ratio composition." in prompt
     assert "9) SOURCE IMAGE IS THE COMPETITOR'S OWN AD" in prompt
+
+
+# ---- Item 6a (2026-08-04): edit mode's aspect ratio comes from the reference image via
+# generation config, not a hardcoded "Square 1:1" prompt-text line ----
+
+def test_build_image_prompt_edit_mode_has_no_aspect_ratio_instruction():
+    """The old hardcoded line must be gone entirely from edit mode - not replaced by a
+    different hardcoded string, since Item 6a moves this to the generation config
+    (derive_aspect_ratio + genai_types.ImageConfig in generate_image), which needs the
+    real reference image's dimensions, not something build_image_prompt has access to."""
+    prompt = generate_image_prompt.build_image_prompt(_blueprint(), edit_mode=True)
+    assert "1:1" not in prompt
+    assert "aspect ratio" not in prompt.lower()
+
+
+def test_build_image_prompt_generate_mode_still_has_hardcoded_square_1_1():
+    """Generate mode (edit_mode=False, both the template and creative_description
+    branches) is unaffected by Item 6a - it keeps its explicit prompt-text aspect ratio."""
+    prompt = generate_image_prompt.build_image_prompt(_blueprint())
+    assert "Square 1:1 aspect ratio composition." in prompt
+    prompt_writer = generate_image_prompt.build_image_prompt(
+        _blueprint(), creative_description="A calm spa scene."
+    )
+    assert "Square 1:1 aspect ratio composition." in prompt_writer
 
 
 def test_build_image_prompt_edit_mode_false_reproduces_default_path():
@@ -134,15 +169,18 @@ def test_build_image_prompt_edit_mode_false_reproduces_default_path():
 # ---- generate_image(): competitor bytes reach Gemini only when edit_mode is on ----
 
 class _CapturingGenaiClient:
-    """Stands in for genai.Client, capturing the exact `contents` passed to
-    generate_content so tests can inspect which Parts were actually attached."""
+    """Stands in for genai.Client, capturing the exact `contents` (and, since Item 6a,
+    `config`) passed to generate_content so tests can inspect which Parts were actually
+    attached and which aspect ratio was requested."""
     last_contents = None
+    last_config = None
 
     def __init__(self, *a, **k):
         self.models = self
 
-    def generate_content(self, model, contents):
+    def generate_content(self, model, contents, config=None):
         _CapturingGenaiClient.last_contents = contents
+        _CapturingGenaiClient.last_config = config
         part = type("Part", (), {"inline_data": type("Data", (), {"data": b"fake-png-bytes"})()})()
         candidate = type("Candidate", (), {"content": type("Content", (), {"parts": [part]})()})()
         return type("Response", (), {"candidates": [candidate]})()
@@ -151,13 +189,14 @@ class _CapturingGenaiClient:
 def test_generate_image_attaches_competitor_bytes_when_edit_mode_on(monkeypatch, tmp_path):
     monkeypatch.setattr(generate_image_prompt, "genai", type("obj", (), {"Client": _CapturingGenaiClient}))
     monkeypatch.setattr(generate_image_prompt, "ASSET_DIR", tmp_path)
+    competitor_bytes = _png_bytes()
 
     generate_image_prompt.generate_image(
-        _blueprint(), "AD_EDIT", edit_mode=True, competitor_image_bytes=b"\x89PNG\r\n\x1a\ncompetitor-bytes",
+        _blueprint(), "AD_EDIT", edit_mode=True, competitor_image_bytes=competitor_bytes,
     )
     contents = _CapturingGenaiClient.last_contents
     assert isinstance(contents, list)
-    assert contents[0].inline_data.data == b"\x89PNG\r\n\x1a\ncompetitor-bytes"
+    assert contents[0].inline_data.data == competitor_bytes
     assert "THE AD TO REPRODUCE" in contents[-1]
 
 
@@ -177,18 +216,122 @@ def test_generate_image_omits_competitor_bytes_when_edit_mode_off(monkeypatch, t
 def test_generate_image_edit_mode_orders_competitor_before_product_reference_images(monkeypatch, tmp_path):
     monkeypatch.setattr(generate_image_prompt, "genai", type("obj", (), {"Client": _CapturingGenaiClient}))
     monkeypatch.setattr(generate_image_prompt, "ASSET_DIR", tmp_path)
+    competitor_bytes = _png_bytes()
 
     generate_image_prompt.generate_image(
         _blueprint(), "AD_EDIT2", edit_mode=True,
-        competitor_image_bytes=b"\x89PNG\r\n\x1a\ncompetitor-bytes",
+        competitor_image_bytes=competitor_bytes,
         reference_images=[b"product-photo-1", b"product-photo-2"],
     )
     contents = _CapturingGenaiClient.last_contents
-    assert contents[0].inline_data.data == b"\x89PNG\r\n\x1a\ncompetitor-bytes"
+    assert contents[0].inline_data.data == competitor_bytes
     assert [p.inline_data.data for p in contents[1:3]] == [b"product-photo-1", b"product-photo-2"]
     framing_and_prompt = contents[-1]
     assert "THE AD TO REPRODUCE" in framing_and_prompt
     assert "REFERENCE PRODUCT PHOTOS ABOVE" in framing_and_prompt
+
+
+# ---- Item 6a (2026-08-04): derive_aspect_ratio - snap the reference image's own
+# width:height to the nearest ratio Vertex's ImageConfig.aspect_ratio actually supports ----
+
+def test_derive_aspect_ratio_square():
+    assert generate_image_prompt.derive_aspect_ratio(_png_bytes(200, 200)) == "1:1"
+
+
+def test_derive_aspect_ratio_landscape_16_9():
+    assert generate_image_prompt.derive_aspect_ratio(_png_bytes(1920, 1080)) == "16:9"
+
+
+def test_derive_aspect_ratio_portrait_9_16():
+    assert generate_image_prompt.derive_aspect_ratio(_png_bytes(1080, 1920)) == "9:16"
+
+
+def test_derive_aspect_ratio_landscape_4_3():
+    assert generate_image_prompt.derive_aspect_ratio(_png_bytes(800, 600)) == "4:3"
+
+
+def test_derive_aspect_ratio_portrait_3_4():
+    assert generate_image_prompt.derive_aspect_ratio(_png_bytes(600, 800)) == "3:4"
+
+
+def test_derive_aspect_ratio_portrait_4_5():
+    """4:5 (2026-08-04) - added after a live probe confirmed gemini-3.1-flash-image
+    accepts and honours it; Meta creative is commonly this shape (24/101 of this
+    project's own stored competitor references sit here) and previously mis-snapped to
+    3:4 under the old 8-value table."""
+    assert generate_image_prompt.derive_aspect_ratio(_png_bytes(800, 1000)) == "4:5"
+
+
+def test_derive_aspect_ratio_landscape_5_4():
+    assert generate_image_prompt.derive_aspect_ratio(_png_bytes(1000, 800)) == "5:4"
+
+
+def test_derive_aspect_ratio_exact_3_4_still_wins_over_nearby_4_5():
+    """A true 3:4 reference (ratio 0.75 exactly) must still snap to 3:4, not 4:5 (0.8) -
+    confirms adding 4:5 didn't regress the existing 3:4 boundary."""
+    assert generate_image_prompt.derive_aspect_ratio(_png_bytes(750, 1000)) == "3:4"
+
+
+def test_derive_aspect_ratio_none_bytes_returns_none():
+    assert generate_image_prompt.derive_aspect_ratio(None) is None
+
+
+def test_derive_aspect_ratio_empty_bytes_returns_none():
+    assert generate_image_prompt.derive_aspect_ratio(b"") is None
+
+
+def test_derive_aspect_ratio_unreadable_bytes_returns_none():
+    """A PNG signature with no valid image data after it - Image.open() must raise, not
+    crash the caller; derive_aspect_ratio swallows it and returns None."""
+    assert generate_image_prompt.derive_aspect_ratio(b"\x89PNG\r\n\x1a\nnot-a-real-image") is None
+
+
+# ---- Item 6a: generate_image() sets the derived ratio on the generation config in edit
+# mode, and only in edit mode ----
+
+def test_generate_image_edit_mode_sets_aspect_ratio_config_from_reference(monkeypatch, tmp_path):
+    monkeypatch.setattr(generate_image_prompt, "genai", type("obj", (), {"Client": _CapturingGenaiClient}))
+    monkeypatch.setattr(generate_image_prompt, "ASSET_DIR", tmp_path)
+
+    generate_image_prompt.generate_image(
+        _blueprint(), "AD_ASPECT", edit_mode=True, competitor_image_bytes=_png_bytes(1080, 1920),
+    )
+    config = _CapturingGenaiClient.last_config
+    assert config is not None
+    assert config.image_config.aspect_ratio == "9:16"
+
+
+def test_generate_image_generate_mode_passes_no_config(monkeypatch, tmp_path):
+    """Generate mode is unaffected by Item 6a - it keeps its prompt-text "Square 1:1"
+    instruction and never sets a generation config."""
+    monkeypatch.setattr(generate_image_prompt, "genai", type("obj", (), {"Client": _CapturingGenaiClient}))
+    monkeypatch.setattr(generate_image_prompt, "ASSET_DIR", tmp_path)
+
+    generate_image_prompt.generate_image(_blueprint(), "AD_GENERATE", edit_mode=False)
+    assert _CapturingGenaiClient.last_config is None
+
+
+def test_generate_image_edit_mode_missing_reference_falls_back_and_warns(monkeypatch, tmp_path):
+    """competitor_image_bytes=None (or unreadable) in edit mode must not fail the draft -
+    it OMITS image_config entirely (not a forced "1:1" - a live probe, 2026-08-04, showed
+    that forces the wrong shape while omitting it lets the model infer the reference's own
+    ratio) and records a pipeline_warning instead."""
+    from src import dedupe
+    monkeypatch.setattr(generate_image_prompt, "genai", type("obj", (), {"Client": _CapturingGenaiClient}))
+    monkeypatch.setattr(generate_image_prompt, "ASSET_DIR", tmp_path)
+    warnings = []
+    monkeypatch.setattr(dedupe, "init_pipeline_warnings", lambda: None)
+    monkeypatch.setattr(dedupe, "record_warning", lambda kind, detail: warnings.append((kind, detail)))
+
+    dest = generate_image_prompt.generate_image(
+        _blueprint(), "AD_ASPECT_FALLBACK", edit_mode=True, competitor_image_bytes=None,
+    )
+    assert dest is not None  # the draft still succeeds
+    assert _CapturingGenaiClient.last_config is None  # no image_config forced onto the call
+    assert len(warnings) == 1
+    kind, detail = warnings[0]
+    assert kind == "edit_mode_aspect_ratio_fallback"
+    assert "AD_ASPECT_FALLBACK" in detail
 
 
 # ---- Step 2, Part 3 (2026-08-02): urgency/CTA text must not survive with offer_text
@@ -313,7 +456,7 @@ def test_generate_image_edit_mode_skips_the_writer_even_with_an_angle(monkeypatc
     generate_image_prompt.generate_image(
         _blueprint(), "AD_EDIT_ANGLE", edit_mode=True,
         messaging_angle={"name": "Crepey Skin", "notes": "warm light"},
-        competitor_image_bytes=b"\x89PNG\r\n\x1a\ncompetitor-bytes",
+        competitor_image_bytes=_png_bytes(),
     )
     assert calls == []
 
@@ -465,6 +608,10 @@ def test_generate_image_fetches_palette_when_edit_mode_and_retheme_on(monkeypatc
     monkeypatch.setattr(generate_image_prompt, "ASSET_DIR", tmp_path)
     calls = []
     monkeypatch.setattr(dedupe, "get_brand_settings", lambda: calls.append(1) or {"palette": "custom test palette"})
+    # No competitor_image_bytes supplied here (not what this test is about) - Item 6a's
+    # aspect-ratio fallback would otherwise hit the real pipeline_warnings table.
+    monkeypatch.setattr(dedupe, "init_pipeline_warnings", lambda: None)
+    monkeypatch.setattr(dedupe, "record_warning", lambda *a, **k: None)
 
     generate_image_prompt.generate_image(_blueprint(), "AD_PALETTE", edit_mode=True, retheme_colours=True)
     assert calls == [1]
@@ -477,6 +624,8 @@ def test_generate_image_does_not_fetch_palette_when_retheme_off(monkeypatch, tmp
     monkeypatch.setattr(generate_image_prompt, "ASSET_DIR", tmp_path)
     calls = []
     monkeypatch.setattr(dedupe, "get_brand_settings", lambda: calls.append(1) or {"palette": "should not be used"})
+    monkeypatch.setattr(dedupe, "init_pipeline_warnings", lambda: None)
+    monkeypatch.setattr(dedupe, "record_warning", lambda *a, **k: None)
 
     generate_image_prompt.generate_image(_blueprint(), "AD_NO_RETHEME", edit_mode=True, retheme_colours=False)
     assert calls == []

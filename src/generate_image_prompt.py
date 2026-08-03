@@ -1,5 +1,8 @@
 """Regeneration step (image prompt): turn a blueprint's visual into an image-gen prompt."""
+import io
+import math
 import os
+from PIL import Image
 from src import assets, generate_image_prompt_writer
 from src.compliance_rules import COMPLIANCE_RULES
 
@@ -28,8 +31,11 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
     edit_mode=True takes priority over creative_description: the competitor's own ad image
     (passed separately to generate_image as an input Part) IS the creative brief, so neither
     the writer nor the template scene/layout/palette text is used - see
-    _edit_mode_instruction. product_clause/aspect-ratio/closing still always apply, same as
-    every other branch. offer_text is only consumed here in edit_mode (see
+    _edit_mode_instruction. product_clause/closing still always apply, same as every other
+    branch. Aspect ratio is NOT stated in edit-mode prompt text (Item 6a) - it's derived
+    from the reference image itself and set on the generation config instead, see
+    generate_image/derive_aspect_ratio; generate mode keeps its explicit "Square 1:1"
+    prompt-text instruction unchanged. offer_text is only consumed here in edit_mode (see
     _edit_mode_instruction's OFFER branch); the non-edit-mode/writer path already gets
     offer_text via generate_image's separate call into write_creative_description.
 
@@ -124,8 +130,10 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
     if edit_mode:
         # The competitor's own ad image (attached separately by generate_image) IS the
         # brief - takes priority over creative_description, which is never generated in
-        # this mode anyway (see generate_image). product_clause/aspect-ratio/closing still
-        # always follow, same guardrail-always-appended pattern as every other branch.
+        # this mode anyway (see generate_image). product_clause/closing still always
+        # follow, same guardrail-always-appended pattern as every other branch. No aspect
+        # ratio line here (Item 6a) - edit mode derives it from the reference image and
+        # sets it on the generation config in generate_image, not in prompt text.
         prompt = (
             brand_rules(include_product=effective_include_product, text_in_image=text_in_image,
                         headline=headline, subtext=subtext, edit_mode=True) +
@@ -142,7 +150,6 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
                                    retheme_colours=retheme_colours, palette=brand_palette,
                                    creative_format=blueprint.get("creative_format")) +
             product_clause +
-            f"Square 1:1 aspect ratio composition. " +
             closing
         )
     elif creative_description:
@@ -563,6 +570,61 @@ def _sniff_mime_type(data):
     return "image/jpeg"
 
 
+# Item 6a (2026-08-04): edit mode must clone the reference ad's own shape, not a hardcoded
+# square - a portrait reference cloned to a hardcoded 1:1 isn't a clone. google.genai.types.
+# ImageConfig.aspect_ratio's own field description only lists "1:1", "2:3", "3:2", "3:4",
+# "4:3", "9:16", "16:9", "21:9" - but that description is stale documentation, not a
+# client-side constraint (the field is a plain untyped str). "4:5"/"5:4" are added here on
+# the strength of a live probe against the real gemini-3.1-flash-image model (not this
+# model's first-party docs, which only confirm 4:5/5:4 for the separate Lite variant, nor
+# the SDK docstring, which doesn't mention them at all): a real 1080x1350 (exactly 4:5)
+# competitor reference, edited with aspect_ratio="4:5" explicitly, succeeded with no error
+# and returned a 928x1152 (~4:5) image - see scratchpad probe results, 2026-08-04. 23.8% of
+# this project's own stored competitor references (24/101) sit at ~4:5 and previously
+# mis-snapped to 3:4 under the old 8-value table.
+SUPPORTED_ASPECT_RATIOS = {
+    "1:1": 1.0,
+    "2:3": 2 / 3,
+    "3:2": 3 / 2,
+    "3:4": 3 / 4,
+    "4:3": 4 / 3,
+    "4:5": 4 / 5,
+    "5:4": 5 / 4,
+    "9:16": 9 / 16,
+    "16:9": 16 / 9,
+    "21:9": 21 / 9,
+}
+
+
+def derive_aspect_ratio(reference_bytes):
+    """The SUPPORTED_ASPECT_RATIOS key nearest reference_bytes' own width:height, compared
+    on a log scale (so a ratio and its reciprocal, e.g. 2:1 vs 1:2, aren't treated as
+    equidistant from 1:1 the way raw subtraction would). Returns None - never raises -
+    when reference_bytes is falsy or Pillow can't read it (corrupt, truncated, or
+    zero-dimension). generate_image treats None as "omit image_config entirely, don't
+    force a ratio" plus a pipeline_warning, not a failed draft - a live probe (2026-08-04)
+    confirmed gemini-3.1-flash-image infers and preserves the ATTACHED reference image's
+    own aspect ratio when no image_config is given at all, which is only relevant when
+    reference_bytes exists but Pillow specifically couldn't decode it (still attached as
+    the input Part regardless of whether this function could read it) - so omitting the
+    config is a strictly better fallback than forcing "1:1", which is guaranteed wrong for
+    exactly the portrait/landscape refs this function exists to get right."""
+    if not reference_bytes:
+        return None
+    try:
+        with Image.open(io.BytesIO(reference_bytes)) as img:
+            width, height = img.size
+    except Exception:
+        return None
+    if not width or not height:
+        return None
+    target = width / height
+    return min(
+        SUPPORTED_ASPECT_RATIOS,
+        key=lambda name: abs(math.log(target) - math.log(SUPPORTED_ASPECT_RATIOS[name])),
+    )
+
+
 def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_slug=None,
                     include_product=True, text_in_image=False, headline=None, subtext=None,
                     messaging_angle=None, realism=None, body_area=None, offer_text=None,
@@ -603,7 +665,21 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
     retheme_colours (Prompt 4, Item 5) defaults to True - the palette itself is DATA, read
     from dedupe.get_brand_settings() here (not a hardcoded string), so a future correction
     made in the UI takes effect immediately. Only fetched when it will actually be used
-    (edit_mode) - no DB read on the far more common non-edit-mode path."""
+    (edit_mode) - no DB read on the far more common non-edit-mode path.
+
+    Aspect ratio (Item 6a) is edit_mode-only too: derive_aspect_ratio(competitor_image_bytes)
+    snaps the reference ad's own width:height to the nearest ratio Vertex's ImageConfig
+    actually supports, and that ratio is set on the generate_content call's config - not
+    stated in prompt text (see build_image_prompt's edit_mode branch, which no longer
+    mentions an aspect ratio at all). If competitor_image_bytes is missing or unreadable,
+    this OMITS image_config from the call entirely (not a forced "1:1") and records a
+    pipeline_warning rather than failing the draft - a live probe (2026-08-04) confirmed
+    the model infers and preserves the attached reference image's own aspect ratio with no
+    image_config at all, which is only reachable here when the bytes exist but Pillow
+    couldn't decode them (still attached as the input Part either way); forcing "1:1"
+    would have been guaranteed-wrong for a portrait/landscape reference in exactly that
+    case. Generate mode is unaffected - it keeps stating "Square 1:1" in prompt text only,
+    no config passed."""
     operator_instruction = generate_image_prompt_writer.clip_operator_instruction(operator_instruction)
     creative_description = None
     if messaging_angle and not edit_mode:
@@ -626,17 +702,16 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
     stem = _draft_stem(ad_id, angle_slug)
     try:
         client = genai.Client(vertexai=True, project="besque-martech", location="global")
+        from google.genai import types as genai_types
         # Defense in depth for rule 7's productless mode: the prompt already says no
         # product may appear, but don't also hand the model reference photos of one.
         reference_images = (reference_images or []) if include_product else []
         competitor_part = None
         if edit_mode and competitor_image_bytes:
-            from google.genai import types as genai_types
             competitor_part = genai_types.Part.from_bytes(
                 data=competitor_image_bytes, mime_type=_sniff_mime_type(competitor_image_bytes)
             )
         if reference_images or competitor_part is not None:
-            from google.genai import types as genai_types
             image_parts = []
             framing = ""
             if competitor_part is not None:
@@ -654,14 +729,46 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
             contents = image_parts + [framing + prompt]
         else:
             contents = prompt
+
+        # Item 6a (2026-08-04): edit mode sets aspect ratio on the generation config,
+        # derived from the reference ad's own shape - see derive_aspect_ratio - instead of
+        # a hardcoded "Square 1:1" prompt-text line (removed from build_image_prompt's
+        # edit_mode branch). Generate mode is untouched: it keeps stating its aspect ratio
+        # in prompt text only, no config passed here.
+        #
+        # aspect_ratio is None (bytes missing, or present but Pillow couldn't decode them)
+        # -> generation_config stays None, i.e. image_config is OMITTED from the call
+        # entirely, NOT forced to "1:1". A live probe (2026-08-04, scratchpad
+        # aspect_ratio_probe.py) confirmed this is the better fallback: with no
+        # image_config at all, gemini-3.1-flash-image inferred and preserved a real
+        # 1080x1350 (0.8000) reference's own ratio almost exactly (922x1152, 0.8003) -
+        # forcing "1:1" would have been guaranteed-wrong here, the exact failure mode this
+        # item exists to fix.
+        generation_config = None
+        if edit_mode:
+            aspect_ratio = derive_aspect_ratio(competitor_image_bytes)
+            if aspect_ratio is None:
+                from src import dedupe as _dedupe
+                _dedupe.init_pipeline_warnings()
+                _dedupe.record_warning(
+                    "edit_mode_aspect_ratio_fallback",
+                    f"ad_id={ad_id}: could not derive aspect ratio from the reference "
+                    f"image (missing or unreadable); omitting image_config so the model "
+                    f"infers aspect ratio from the attached reference image itself.",
+                )
+            else:
+                generation_config = genai_types.GenerateContentConfig(
+                    image_config=genai_types.ImageConfig(aspect_ratio=aspect_ratio)
+                )
+
         import time as _time
         response = None
         for _attempt in range(3):
             try:
-                response = client.models.generate_content(
-                    model="gemini-3.1-flash-image",
-                    contents=contents,
-                )
+                call_kwargs = {"model": "gemini-3.1-flash-image", "contents": contents}
+                if generation_config is not None:
+                    call_kwargs["config"] = generation_config
+                response = client.models.generate_content(**call_kwargs)
                 break
             except Exception as _e:
                 if "429" in str(_e) and _attempt < 2:
