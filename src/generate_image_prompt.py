@@ -55,7 +55,12 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
     local assignment silently shadowed the caller's value before _edit_mode_instruction
     ever saw it. blueprint.get("creative_format") is read directly here for the TEXT
     branch's typeface guidance (TYPOGRAPHY_GUIDANCE), not threaded as a separate
-    parameter since it's already part of the blueprint passed in."""
+    parameter since it's already part of the blueprint passed in.
+
+    substance_colour (Item 6b) is read straight from product.get("substance_colour") here
+    in the edit_mode branch only, the same "read it directly, don't add a parameter"
+    pattern as creative_format above - it's already part of the product dict already
+    passed in. See _substance_recolour_clause for what happens when it's unset."""
     visual = blueprint.get("visual", {})
     # visual.subject is deliberately NOT read here. In practice it's where the vision
     # deconstruct step puts rich, identity-carrying descriptions of the competitor ad's
@@ -148,7 +153,8 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
                                    offer_text=offer_text, include_product=include_product,
                                    reference_has_product=reference_has_product,
                                    retheme_colours=retheme_colours, palette=brand_palette,
-                                   creative_format=blueprint.get("creative_format")) +
+                                   creative_format=blueprint.get("creative_format"),
+                                   substance_colour=(product or {}).get("substance_colour")) +
             product_clause +
             closing
         )
@@ -332,9 +338,45 @@ def _operator_instruction_clause(operator_instruction=None):
     )
 
 
+def _substance_recolour_clause(substance_colour=None):
+    """Item 6b (2026-08-04): a product-derived substance in frame (a drip, pour, pool,
+    droplet, smear, texture swatch, or a smear on skin) must take OUR product's real
+    colour, not the reference's. substance_colour is products.substance_colour - when set,
+    it's NAMED explicitly (e.g. "bright golden-amber oil"), replacing the old generic
+    "match OUR product's actual colour and texture" wording entirely, since pointing at a
+    colour ("match the product") is strictly weaker than naming it. When unset (None or
+    empty), this reproduces the exact original wording verbatim, including its own
+    hardcoded "golden-amber oil" example - not a regression, since parsing
+    visual_description for a real value was explicitly ruled out (prose, not reliably
+    parseable) and inventing one here would be exactly the fabrication compliance rule C3
+    (never invent product facts) forbids."""
+    if substance_colour:
+        return (
+            "Any substance in frame that ORIGINATES FROM THE PRODUCT - a drip, pour, pool, "
+            "droplet, smear, texture swatch, or a smear on skin - is part of the product, "
+            "not the scene: preserve its position, volume, and motion exactly, but "
+            f"recolour and re-texture it to our product's actual colour and texture - "
+            f"{substance_colour} - never the reference's own product substance (e.g. a "
+            f"clear serum drip must become our {substance_colour}, not stay clear). "
+            "\"Preserve everything except the product\" means this too - a product-derived "
+            "substance is the product, even when it has left the bottle. "
+        )
+    return (
+        "Any substance in frame that ORIGINATES FROM THE PRODUCT - a drip, pour, pool, "
+        "droplet, smear, texture swatch, or a smear on skin - is part of the product, "
+        "not the scene: preserve its position, volume, and motion exactly, but "
+        "recolour and re-texture it to match OUR product's actual colour and texture, "
+        "never the reference's own product substance (e.g. a clear serum drip must "
+        "become our golden-amber oil, not stay clear). \"Preserve everything except the "
+        "product\" means this too - a product-derived substance is the product, even "
+        "when it has left the bottle. "
+    )
+
+
 def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, offer_text=None,
                             include_product=True, reference_has_product=True,
-                            retheme_colours=True, palette=None, creative_format=None):
+                            retheme_colours=True, palette=None, creative_format=None,
+                            substance_colour=None):
     """EDIT MODE (2026-08-01): Gemini receives the competitor's own ad as an input image
     Part, not just a text description of it - the reference image IS the creative brief,
     so no template scene/layout/palette description is assembled here (see
@@ -369,7 +411,16 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
     sentence naming both halves, never a separate clause that could be read as
     contradicting "reproduce faithfully". retheme_colours=False reverts to the exact
     original wording (colour palette folded into the reproduce list) - the doc's own
-    stated exception, and the faithful-clone behaviour already validated in production."""
+    stated exception, and the faithful-clone behaviour already validated in production.
+
+    substance_colour (Item 6b, 2026-08-04) is products.substance_colour, forwarded by
+    build_image_prompt from the product dict - see _substance_recolour_clause, which does
+    the actual branching. Naming the real colour ("bright golden-amber oil") replaces the
+    old generic "match OUR product's actual colour and texture" wording entirely rather
+    than living alongside it, since pointing at a colour is strictly weaker than naming it,
+    not a complement to it. None (unset on the product) reproduces the exact old wording,
+    including its own hardcoded "golden-amber oil" example - not a regression, since that
+    was always this function's only behaviour before this parameter existed."""
     if retheme_colours:
         effective_palette = palette or "terracotta, maroon, gold, cream"
         opening = (
@@ -396,14 +447,8 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             "place the Besque product (shown in the reference photo(s) that follow, if "
             "any) in its position, at its scale, with its lighting, matching the "
             "original shot as faithfully as possible. "
-            "Any substance in frame that ORIGINATES FROM THE PRODUCT - a drip, pour, pool, "
-            "droplet, smear, texture swatch, or a smear on skin - is part of the product, "
-            "not the scene: preserve its position, volume, and motion exactly, but "
-            "recolour and re-texture it to match OUR product's actual colour and texture, "
-            "never the reference's own product substance (e.g. a clear serum drip must "
-            "become our golden-amber oil, not stay clear). \"Preserve everything except the "
-            "product\" means this too - a product-derived substance is the product, even "
-            "when it has left the bottle. Everything else in the scene stays exactly as it "
+            + _substance_recolour_clause(substance_colour) +
+            "Everything else in the scene stays exactly as it "
             "appears in the source image. "
         )
     elif include_product and not reference_has_product:

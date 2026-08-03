@@ -484,7 +484,7 @@ async def api_add_product(request: Request):
         return JSONResponse({"ok": False, "error": "name required"}, status_code=400)
     new_id = dedupe.add_product(name, body.get("description", ""), body.get("ingredients", ""),
                                 body.get("hero_claim", ""), body.get("category", ""),
-                                body.get("visual_description", ""))
+                                body.get("visual_description", ""), body.get("substance_colour", ""))
     return JSONResponse({"ok": True, "id": new_id})
 
 
@@ -493,7 +493,7 @@ async def api_update_product(product_id: int, request: Request):
     body = await request.json()
     dedupe.update_product(product_id, body.get("name", ""), body.get("description", ""), body.get("ingredients", ""),
                           body.get("hero_claim", ""), body.get("category", ""),
-                          body.get("visual_description", ""))
+                          body.get("visual_description", ""), body.get("substance_colour", ""))
     return JSONResponse({"ok": True, "id": product_id})
 
 

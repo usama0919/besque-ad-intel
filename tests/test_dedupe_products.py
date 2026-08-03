@@ -74,6 +74,26 @@ def test_visual_description_round_trips_through_add_and_update():
         dedupe.delete_product(pid)
 
 
+def test_substance_colour_round_trips_through_add_and_update():
+    """Item 6b (2026-08-04): substance_colour is a separate self-migrating column, not
+    parsed out of visual_description - same round-trip shape as visual_description above."""
+    pid = _make_product(substance_colour="bright golden-amber oil")
+    try:
+        assert dedupe.get_product(pid)["substance_colour"] == "bright golden-amber oil"
+        dedupe.update_product(pid, "renamed", "", "", "", substance_colour="updated colour")
+        assert dedupe.get_product(pid)["substance_colour"] == "updated colour"
+    finally:
+        dedupe.delete_product(pid)
+
+
+def test_substance_colour_defaults_to_empty_string():
+    pid = _make_product()
+    try:
+        assert dedupe.get_product(pid)["substance_colour"] == ""
+    finally:
+        dedupe.delete_product(pid)
+
+
 def test_pipeline_warnings_record_and_fetch_recent():
     dedupe.init_pipeline_warnings()
     marker = uuid.uuid4().hex[:8]

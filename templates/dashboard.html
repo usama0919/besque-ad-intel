@@ -733,6 +733,7 @@ let selectedProductId = null;
     document.getElementById('pmHero').value = p.hero_claim || '';
     document.getElementById('pmCat').value = p.category || '';
     document.getElementById('pmVisDesc').value = p.visual_description || '';
+    document.getElementById('pmSubColour').value = p.substance_colour || '';
     document.getElementById('pmPhoto').value = '';
     renderPmPhotoList(p);
     document.getElementById('prodModal').classList.add('open');
@@ -741,7 +742,7 @@ let selectedProductId = null;
   function openNewProdModal(){
     prodModalId = null;
     document.getElementById('prodModalTitle').textContent = 'New Product';
-    ['pmName','pmDesc','pmIngr','pmHero','pmCat','pmVisDesc'].forEach(i=>document.getElementById(i).value='');
+    ['pmName','pmDesc','pmIngr','pmHero','pmCat','pmVisDesc','pmSubColour'].forEach(i=>document.getElementById(i).value='');
     renderPmPhotoList(null);
     document.getElementById('prodModal').classList.add('open');
   }
@@ -756,6 +757,7 @@ let selectedProductId = null;
       hero_claim: document.getElementById('pmHero').value.trim(),
       category: document.getElementById('pmCat').value,
       visual_description: document.getElementById('pmVisDesc').value.trim(),
+      substance_colour: document.getElementById('pmSubColour').value.trim(),
     });
     if(!JSON.parse(body).name){ alert('Name is required'); return; }
     const url = prodModalId ? '/api/products/'+prodModalId : '/api/products';
@@ -1292,6 +1294,8 @@ document.addEventListener('focusout', e=>{
     <input type="text" id="pmHero">
     <label>Visual description (for image generation - fixed visual facts: bottle, cap, label, colour)</label>
     <textarea id="pmVisDesc" placeholder="e.g. amber glass bottle, gold pump top, maroon label with BESQUE MAGIC in gold serif, warm golden amber oil"></textarea>
+    <label>Substance colour (exact wording for the product's own colour when it appears outside the bottle - e.g. a drip or smear in an edit-mode reference)</label>
+    <input type="text" id="pmSubColour" placeholder="e.g. bright golden-amber oil">
     <label>Category</label>
     <select id="pmCat" style="width:100%;padding:9px 12px;border:1px solid #ccc;border-radius:7px;font-size:13px;">
       <option value="">(not set)</option>

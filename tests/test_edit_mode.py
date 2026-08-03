@@ -432,6 +432,56 @@ def test_edit_mode_instruction_substance_recolour_absent_when_nothing_to_substit
     assert "recolour and re-texture" not in operator_disabled
 
 
+# ---- Item 6b (2026-08-04): name the substance colour, don't point at it ----
+
+def test_substance_recolour_clause_names_colour_when_set():
+    clause = generate_image_prompt._substance_recolour_clause("bright golden-amber oil")
+    assert "recolour and re-texture it to our product's actual colour and texture - " \
+           "bright golden-amber oil - never the reference's own product substance" in clause
+    assert "a clear serum drip must become our bright golden-amber oil, not stay clear" in clause
+    assert "match OUR product's actual colour and texture," not in clause  # generic phrase fully replaced
+    assert "a product-derived substance is the product, even when it has left the bottle" in clause
+
+
+def test_substance_recolour_clause_falls_back_to_generic_when_unset():
+    """None (the default - nothing in products.substance_colour) reproduces the exact
+    original wording verbatim, including its own hardcoded "golden-amber oil" example -
+    not a regression, just this function's only behaviour before the parameter existed."""
+    assert (generate_image_prompt._substance_recolour_clause(None)
+            == generate_image_prompt._substance_recolour_clause())
+    clause = generate_image_prompt._substance_recolour_clause(None)
+    assert "recolour and re-texture it to match OUR product's actual colour and texture," in clause
+    assert "a clear serum drip must become our golden-amber oil, not stay clear" in clause
+
+
+def test_substance_recolour_clause_empty_string_same_as_none():
+    assert (generate_image_prompt._substance_recolour_clause("")
+            == generate_image_prompt._substance_recolour_clause(None))
+
+
+def test_edit_mode_instruction_forwards_substance_colour():
+    instruction = generate_image_prompt._edit_mode_instruction(substance_colour="bright golden-amber oil")
+    assert "bright golden-amber oil" in instruction
+
+
+def test_build_image_prompt_edit_mode_names_substance_colour_from_product():
+    product = {"name": "Besque Magic Body Oil", "substance_colour": "bright golden-amber oil"}
+    prompt = generate_image_prompt.build_image_prompt(_blueprint(), product=product, edit_mode=True)
+    assert "recolour and re-texture it to our product's actual colour and texture - " \
+           "bright golden-amber oil -" in prompt
+
+
+def test_build_image_prompt_edit_mode_omits_colour_phrase_when_substance_colour_unset():
+    """A product with no substance_colour (or no product at all) must not have one
+    invented - falls back to the exact old generic wording."""
+    product_no_colour = {"name": "Besque Shower Oil"}  # no substance_colour key at all
+    prompt = generate_image_prompt.build_image_prompt(_blueprint(), product=product_no_colour, edit_mode=True)
+    assert "recolour and re-texture it to match OUR product's actual colour and texture," in prompt
+
+    prompt_no_product = generate_image_prompt.build_image_prompt(_blueprint(), edit_mode=True)
+    assert "recolour and re-texture it to match OUR product's actual colour and texture," in prompt_no_product
+
+
 def test_build_image_prompt_edit_mode_include_product_false_unaffected_by_reference_has_product():
     """include_product=False (operator's own toggle) must still mean no product, exactly
     as before - reference_has_product only ever narrows include_product, never widens it."""

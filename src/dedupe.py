@@ -310,19 +310,30 @@ def init_products():
                 image_key TEXT DEFAULT '',
                 category TEXT DEFAULT '',
                 image_keys JSONB DEFAULT '[]'::jsonb,
-                visual_description TEXT DEFAULT ''
+                visual_description TEXT DEFAULT '',
+                substance_colour TEXT DEFAULT ''
             )"""
         )
+        # Self-migrating (Item 6b, 2026-08-04), same pattern as artifacts' operator_instruction/
+        # critic_findings/format_flag - CREATE TABLE IF NOT EXISTS above is a no-op against an
+        # already-existing products table, so this is what actually adds the column in
+        # production. Free text naming the product-derived substance's real colour (e.g.
+        # "bright golden-amber oil"), used verbatim by generate_image_prompt's edit-mode
+        # substance-recolour instruction INSTEAD OF parsing visual_description - that field is
+        # prose, not reliably parseable. Empty by default: omit the colour phrase entirely
+        # rather than inventing one, see generate_image_prompt._substance_recolour_clause.
+        cur.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS substance_colour TEXT DEFAULT ''")
         conn.commit()
 
 
-_PRODUCT_COLS = "id, name, description, ingredients, hero_claim, image_key, category, image_keys, visual_description"
+_PRODUCT_COLS = ("id, name, description, ingredients, hero_claim, image_key, category, "
+                  "image_keys, visual_description, substance_colour")
 
 
 def _product_row_to_dict(r):
     return {"id": r[0], "name": r[1], "description": r[2], "ingredients": r[3], "hero_claim": r[4],
             "image_key": r[5] or "", "category": r[6] or "", "image_keys": r[7] or [],
-            "visual_description": r[8] or ""}
+            "visual_description": r[8] or "", "substance_colour": r[9] or ""}
 
 
 def get_products():
@@ -331,24 +342,26 @@ def get_products():
         return [_product_row_to_dict(r) for r in cur.fetchall()]
 
 
-def add_product(name, description="", ingredients="", hero_claim="", category="", visual_description=""):
+def add_product(name, description="", ingredients="", hero_claim="", category="", visual_description="",
+                 substance_colour=""):
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO products (name, description, ingredients, hero_claim, category, visual_description) "
-            "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
-            (name, description, ingredients, hero_claim, category, visual_description),
+            "INSERT INTO products (name, description, ingredients, hero_claim, category, visual_description, "
+            "substance_colour) VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
+            (name, description, ingredients, hero_claim, category, visual_description, substance_colour),
         )
         new_id = cur.fetchone()[0]
         conn.commit()
         return new_id
 
 
-def update_product(product_id, name, description, ingredients, hero_claim, category="", visual_description=""):
+def update_product(product_id, name, description, ingredients, hero_claim, category="", visual_description="",
+                    substance_colour=""):
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
             "UPDATE products SET name=%s, description=%s, ingredients=%s, hero_claim=%s, category=%s, "
-            "visual_description=%s WHERE id=%s",
-            (name, description, ingredients, hero_claim, category, visual_description, product_id),
+            "visual_description=%s, substance_colour=%s WHERE id=%s",
+            (name, description, ingredients, hero_claim, category, visual_description, substance_colour, product_id),
         )
         conn.commit()
 
