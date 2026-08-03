@@ -339,24 +339,72 @@ def test_generate_image_edit_mode_missing_reference_falls_back_and_warns(monkeyp
 
 def test_edit_mode_instruction_offer_text_absent_bans_urgency_and_cta():
     instruction = generate_image_prompt._edit_mode_instruction(offer_text=None)
-    assert "no urgency phrasing, discount, price, or CTA button text may appear" in instruction
-    assert "neutral wording only" in instruction
+    assert "none of the following may survive anywhere in the image" in instruction
+    assert "Reproduce no urgency wording, tiling, code, or button shape" in instruction
 
 
 def test_edit_mode_instruction_offer_text_given_states_exact_wording_only():
     instruction = generate_image_prompt._edit_mode_instruction(offer_text="20% off this week")
     assert "ONLY this exact wording: 20% off this week" in instruction
-    assert "no urgency phrasing, discount, price, or CTA button text may appear" not in instruction
+    assert "none of the following may survive anywhere in the image" not in instruction
 
 
 def test_build_image_prompt_edit_mode_forwards_offer_text_to_edit_instruction():
     prompt_no_offer = generate_image_prompt.build_image_prompt(_blueprint(), edit_mode=True)
-    assert "no urgency phrasing, discount, price, or CTA button text may appear" in prompt_no_offer
+    assert "none of the following may survive anywhere in the image" in prompt_no_offer
 
     prompt_with_offer = generate_image_prompt.build_image_prompt(
         _blueprint(), edit_mode=True, offer_text="free shipping this week"
     )
     assert "ONLY this exact wording: free shipping this week" in prompt_with_offer
+
+
+# ---- Item 6d (2026-08-04): strengthen the offer ban - "SUMMER SALE" survived as a tiled
+# background because the old ban read as covering a single badge only ----
+
+def test_offer_ban_covers_every_named_category():
+    """A refactor can't silently drop a category - each of these must appear somewhere in
+    the offer-absent instruction. Mirrors test_rule_9_covers_every_kind_of_brand_mark's
+    shape for a different guardrail."""
+    instruction = generate_image_prompt._edit_mode_instruction(offer_text=None)
+    for category in (
+        "percentage or amount off", "a price", "promo or discount code",
+        "scarcity or stock-count claim", "limited-time or urgency wording",
+        "free-shipping offer", "sale wallpaper", "tiled or repeated promotional pattern",
+    ):
+        assert category in instruction
+
+
+def test_offer_ban_covers_every_named_location():
+    instruction = generate_image_prompt._edit_mode_instruction(offer_text=None)
+    for location in ("badge", "banner", "background", "watermark", "product's own label"):
+        assert location in instruction
+
+
+def test_offer_ban_states_container_removal_per_6c():
+    """Iterates the shared _SUPPRESSIBLE_CONTAINER_TYPES constant, not a hardcoded literal
+    - test_suppression_exception_names_every_container_type is the one that pins the
+    constant itself against a literal; this one just confirms the OFFER clause draws from
+    the same shared list, so it deliberately follows the constant if it ever changes."""
+    instruction = generate_image_prompt._edit_mode_instruction(offer_text=None)
+    for container in generate_image_prompt._SUPPRESSIBLE_CONTAINER_TYPES:
+        assert container in instruction
+    assert "that container is removed entirely" in instruction
+    assert "never left behind empty" in instruction
+
+
+def test_offer_ban_covers_tiled_background_not_just_a_single_badge():
+    """The exact failure this item fixes: "SUMMER SALE" tiled across the whole
+    background, which a badge-only ban never named."""
+    instruction = generate_image_prompt._edit_mode_instruction(offer_text=None)
+    assert "not just in a single discrete badge" in instruction
+    assert "the whole pattern is replaced with clean background" in instruction
+
+
+def test_build_image_prompt_edit_mode_forwards_offer_ban_coverage():
+    prompt = generate_image_prompt.build_image_prompt(_blueprint(), edit_mode=True)
+    for category in ("scarcity or stock-count claim", "sale wallpaper", "promo or discount code"):
+        assert category in prompt
 
 
 # ---- Step 2, Part 4 (2026-08-02): don't invent a product the reference doesn't have ----
@@ -502,19 +550,53 @@ def test_suppression_exception_states_one_partition_with_full_preservation():
 
 
 def test_suppression_exception_names_every_container_type():
+    """Deliberately a hardcoded literal, NOT generate_image_prompt._SUPPRESSIBLE_CONTAINER_TYPES
+    - this is the one test that pins the shared constant itself against something outside
+    the source file, so deleting an entry from the constant can't silently take every
+    container-list test down with it."""
     instruction = generate_image_prompt._edit_mode_instruction(text_in_image=False)
     for container in ("badge", "pill", "oval", "button", "banner", "ribbon", "starburst"):
         assert container in instruction
 
 
-def test_suppression_exception_absent_when_text_is_shown():
-    """No suppression happening when a headline IS being rendered - opening must be
-    byte-for-byte what it was before Item 6c, the same additive-only pattern as item 5."""
+def test_suppression_exception_absent_when_neither_text_nor_offer_is_suppressed():
+    """No suppression happening AT ALL - a headline is shown AND a real offer is given -
+    opening must be byte-for-byte what it was before Item 6c/6d, the same additive-only
+    pattern as item 5. Both must be supplied: offer_text defaults to None (suppressed) -
+    supplying only headline still leaves the offer exception active (see
+    test_suppression_exception_present_when_only_offer_is_suppressed), which is exactly
+    the gap found and closed while building 6d."""
     instruction = generate_image_prompt._edit_mode_instruction(
-        text_in_image=True, headline="Firmer Skin By Friday"
+        text_in_image=True, headline="Firmer Skin By Friday", offer_text="free shipping this week"
     )
     assert "The ONE exception to full geometry preservation" not in instruction
-    assert "starburst" not in instruction
+    assert "any container that held the suppressed text" not in instruction
+
+
+def test_suppression_exception_present_when_only_offer_is_suppressed():
+    """The gap found during 6d: a headline IS shown (no text suppression) but no offer was
+    given (offer suppression still active) - the exception must still fire, naming the
+    offer specifically, not text."""
+    instruction = generate_image_prompt._edit_mode_instruction(
+        text_in_image=True, headline="Firmer Skin By Friday", offer_text=None,
+    )
+    assert "The ONE exception to full geometry preservation" in instruction
+    assert "any container holding an offer that's being suppressed this run" in instruction
+    assert "any container holding text that's being suppressed this run" not in instruction
+
+
+def test_suppression_exception_present_when_only_text_is_suppressed():
+    instruction = generate_image_prompt._edit_mode_instruction(
+        text_in_image=False, offer_text="free shipping this week",
+    )
+    assert "The ONE exception to full geometry preservation" in instruction
+    assert "any container holding text that's being suppressed this run" in instruction
+    assert "any container holding an offer that's being suppressed this run" not in instruction
+
+
+def test_suppression_exception_names_both_when_both_suppressed():
+    instruction = generate_image_prompt._edit_mode_instruction(text_in_image=False, offer_text=None)
+    assert "any container holding text or an offer that's being suppressed this run" in instruction
 
 
 def test_suppression_exception_present_by_default():
@@ -535,6 +617,7 @@ def test_suppression_exception_present_regardless_of_retheme_colours():
 
 def test_text_clause_removes_container_not_just_contents():
     instruction = generate_image_prompt._edit_mode_instruction(text_in_image=False)
+    assert "any container that held the suppressed text" in instruction
     assert "the container shape itself does not survive" in instruction
     assert "clean background continuous with its immediate surroundings" in instruction
     assert "no empty outline, box, or shape left behind" in instruction
@@ -546,11 +629,22 @@ def test_build_image_prompt_edit_mode_forwards_suppression_exception():
     assert "the container shape itself does not survive" in prompt
 
 
-def test_build_image_prompt_edit_mode_text_shown_omits_suppression_exception():
+def test_build_image_prompt_edit_mode_neither_suppressed_omits_suppression_exception():
+    prompt = generate_image_prompt.build_image_prompt(
+        _blueprint(), edit_mode=True, text_in_image=True, headline="Firmer Skin By Friday",
+        offer_text="free shipping this week",
+    )
+    assert "The ONE exception to full geometry preservation" not in prompt
+
+
+def test_build_image_prompt_edit_mode_text_shown_but_offer_absent_keeps_exception():
+    """Regression guard for the gap closed while building 6d: text_in_image=True alone
+    must NOT be read as "no suppression" - offer_text still defaults to unsuppressed-offer
+    unless explicitly given."""
     prompt = generate_image_prompt.build_image_prompt(
         _blueprint(), edit_mode=True, text_in_image=True, headline="Firmer Skin By Friday"
     )
-    assert "The ONE exception to full geometry preservation" not in prompt
+    assert "The ONE exception to full geometry preservation" in prompt
 
 
 def test_build_image_prompt_non_edit_mode_unaffected_by_suppression_exception():

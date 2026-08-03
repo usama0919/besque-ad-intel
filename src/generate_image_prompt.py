@@ -373,21 +373,52 @@ def _substance_recolour_clause(substance_colour=None):
     )
 
 
-# Item 6c (2026-08-04): stated as ONE partition of the reproduce-faithfully instruction,
+# Item 6d (2026-08-04): the container-type list was typed out three times (here, the TEXT
+# clause, and the OFFER clause) - a shared constant so a refactor adding/removing a type
+# only has to change one place. Deliberately NOT iterated by every coverage test below
+# (see test_suppression_exception_names_every_container_type) - a test that derives its
+# expectation from this same constant would silently follow it if an entry were ever
+# deleted here, and still pass; at least one test keeps the names as a hardcoded literal
+# so the constant itself stays pinned to something outside the source file.
+_SUPPRESSIBLE_CONTAINER_TYPES = ("badge", "pill", "oval", "button", "banner", "ribbon", "starburst")
+
+
+def _container_list_phrase():
+    return ", ".join(_SUPPRESSIBLE_CONTAINER_TYPES[:-1]) + ", or " + _SUPPRESSIBLE_CONTAINER_TYPES[-1]
+
+
+# Item 6c/6d (2026-08-04): stated as ONE partition of the reproduce-faithfully instruction,
 # same class as item 5's retheme_colours integration - "geometry carries over EXACTLY...
 # in any way" would directly contradict a later instruction to remove a container if the
 # two were left as separate, unrelated clauses. This is the exception clause folded into
 # the SAME opening paragraph that makes the full-preservation claim, naming it as the one
 # thing full preservation doesn't cover, rather than a competing statement appearing only
-# later in TEXT. Real failure this fixes: a draft rendered an empty green "Don't Miss
-# Out!" oval with no text in it, and six empty callout bubbles - the container survived
-# because nothing ever said it shouldn't.
-_SUPPRESSED_CONTAINER_EXCEPTION = (
-    "The ONE exception to full geometry preservation: any container holding text that's "
-    "being suppressed this run - badge, pill, oval, button, banner, ribbon, or starburst - "
-    "is removed entirely, not preserved empty; see TEXT below for exactly which elements "
-    "this covers and how the freed area is healed. "
-)
+# later in TEXT/OFFER. Real failure this fixes: a draft rendered an empty green "Don't
+# Miss Out!" oval with no text in it, and six empty callout bubbles - the container
+# survived because nothing ever said it shouldn't.
+#
+# Covers BOTH suppressed-text containers (6c) and suppressed-offer containers (6d) -
+# initially 6c only covered text_in_image/headline, but an offer is independently
+# suppressible (offer_text falsy) regardless of whether a headline is shown, so a
+# text_in_image=True + offer_text=None run had opening claim UNQUALIFIED full geometry
+# preservation while the OFFER clause below still removed a container - the exact
+# contradiction 6c was built to prevent, just for a different suppressed category. Found
+# during 6d, not by a live run.
+def _suppressed_container_exception(suppressing_text, suppressing_offer):
+    if not (suppressing_text or suppressing_offer):
+        return ""
+    if suppressing_text and suppressing_offer:
+        removed = "any container holding text or an offer that's being suppressed this run"
+    elif suppressing_text:
+        removed = "any container holding text that's being suppressed this run"
+    else:
+        removed = "any container holding an offer that's being suppressed this run"
+    return (
+        f"The ONE exception to full geometry preservation: {removed} - "
+        f"{_container_list_phrase()}, or a tiled promotional background pattern - is "
+        f"removed entirely, not preserved empty; see TEXT/OFFER below for exactly which "
+        f"elements this covers and how the freed area is healed. "
+    )
 
 
 def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, offer_text=None,
@@ -439,15 +470,20 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
     including its own hardcoded "golden-amber oil" example - not a regression, since that
     was always this function's only behaviour before this parameter existed.
 
-    Item 6c (2026-08-04): suppressing_text (derived below from text_in_image/headline, the
-    same condition TEXT already branches on) gates _SUPPRESSED_CONTAINER_EXCEPTION into
+    Item 6c/6d (2026-08-04): suppressing_text (text_in_image/headline, the same condition
+    TEXT already branches on) and suppressing_offer (offer_text falsy, the same condition
+    OFFER already branches on) together gate _suppressed_container_exception(...) into
     `opening` - the ONE exception to that same paragraph's "carries over EXACTLY... in any
-    way" claim, stated in the SAME place as that claim rather than as a separate TEXT-only
-    clause a reader could read as contradicting it. When text IS being shown (headline
-    given), there is no suppression and no exception - opening is unaffected, byte-for-byte
-    identical to before this item, the same additive-only pattern retheme_colours/
-    substance_colour already established."""
+    way" claim, stated in the SAME place as that claim rather than as a separate TEXT/OFFER
+    -only clause a reader could read as contradicting it. Both conditions feed the SAME
+    exception (not two separate ones) because a run can suppress either, both, or neither
+    independently - text_in_image=True with offer_text unset must still except the offer
+    container, exactly the gap a text_in_image-only check left open. Neither suppressed ->
+    opening is unaffected, byte-for-byte identical to before this item, the same
+    additive-only pattern retheme_colours/substance_colour already established."""
     suppressing_text = not (text_in_image and headline)
+    suppressing_offer = not offer_text
+    exception_clause = _suppressed_container_exception(suppressing_text, suppressing_offer)
     if retheme_colours:
         effective_palette = palette or "terracotta, maroon, gold, cream"
         opening = (
@@ -458,7 +494,7 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             "hierarchy, and text placement all carry over EXACTLY as shot in the "
             "reference - do not change the framing, angle, spacing, or structure in any "
             "way. "
-            + (_SUPPRESSED_CONTAINER_EXCEPTION if suppressing_text else "") +
+            + exception_clause +
             f"At the same time, every hue in the scene (background, props, "
             f"wardrobe, surfaces) re-maps to Besque's palette: {effective_palette} - "
             f"overriding the reference's own colours entirely. "
@@ -468,7 +504,7 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             "EDIT MODE: the FIRST attached image is the competitor's own advertisement. "
             "Reproduce its composition, background, camera angle, lighting, colour "
             "palette, text placement, and overall layout as closely as possible. "
-            + (_SUPPRESSED_CONTAINER_EXCEPTION if suppressing_text else "")
+            + exception_clause
         )
 
     if include_product and reference_has_product:
@@ -509,14 +545,14 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
         )
     else:
         base += (
-            "TEXT: any container that held the suppressed text - badge, pill, oval, "
-            "button, banner, ribbon, or starburst - is removed ENTIRELY along with its "
-            "wording, not just emptied: the container shape itself does not survive. Fill "
-            "the freed area with clean background continuous with its immediate "
-            "surroundings (matching colour, texture, and lighting), in the SAME position "
-            "the container occupied in the source image - no empty outline, box, or shape "
-            "left behind, and no text, headline, or competitor wording rendered there "
-            "either. That space will be filled later as a separate HTML overlay. "
+            f"TEXT: any container that held the suppressed text - {_container_list_phrase()} "
+            f"- is removed ENTIRELY along with its wording, not just emptied: the "
+            f"container shape itself does not survive. Fill the freed area with clean "
+            f"background continuous with its immediate surroundings (matching colour, "
+            f"texture, and lighting), in the SAME position the container occupied in the "
+            f"source image - no empty outline, box, or shape left behind, and no text, "
+            f"headline, or competitor wording rendered there either. That space will be "
+            f"filled later as a separate HTML overlay. "
         )
     if offer_text:
         base += (
@@ -525,11 +561,28 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             f"{offer_text}. Do not invent a different number, percentage, or term. "
         )
     else:
+        # Item 6d (2026-08-04): enumerated explicitly after "SUMMER SALE" survived as a
+        # tiled background - the old wording ("no urgency phrasing, discount, price, or
+        # CTA button text") read as covering a single discrete badge/button only, not a
+        # full-background pattern, and named no scarcity/stock-count/promo-code category
+        # at all. Locations (badge, banner, background, watermark, product label) and the
+        # per-6c container-removal principle are stated together with the category list so
+        # this reads as one ban, not a badge-only one a full-background case falls outside.
         base += (
-            "OFFER: no offer was supplied for this run - no urgency phrasing, discount, "
-            "price, or CTA button text may appear anywhere in the image, even if the "
-            "reference has one. Reproduce any such button's shape and position as clean "
-            "empty space or neutral wording only, never the competitor's urgency wording. "
+            "OFFER: no offer was supplied for this run - none of the following may "
+            "survive anywhere in the image, even if the reference shows one: a "
+            "percentage or amount off, a price, a promo or discount code, a scarcity or "
+            "stock-count claim (e.g. 'only 100 left', 'selling fast'), limited-time or "
+            "urgency wording, a free-shipping offer, or sale wallpaper - a tiled or "
+            "repeated promotional pattern covering part or all of the background. This "
+            "ban applies wherever any of it appears - badge, banner, background, "
+            "watermark, or the product's own label - not just in a single discrete "
+            f"badge. Where it sits inside a container ({_container_list_phrase()}), that "
+            f"container is removed entirely, per the exception stated above - never left "
+            f"behind empty. Where it takes the form of a tiled background pattern, the "
+            f"whole pattern is replaced with clean background, not just the wording "
+            f"within it. Reproduce no urgency wording, tiling, code, or button shape from "
+            f"the reference. "
         )
     base += (
         "EFFICACY CLAIMS: describe NO quantified efficacy claim of any kind - no "
