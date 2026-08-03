@@ -94,8 +94,8 @@ def test_edit_mode_instruction_and_rule6_agree_text_in_image_false():
     instruction = generate_image_prompt._edit_mode_instruction(text_in_image=False)
     rule6 = generate_image_prompt._rule6_text_policy(text_in_image=False)
 
-    assert "leave the reference image's text zones as clean, empty space" in instruction
-    assert "do not render any text" in instruction
+    assert "removed ENTIRELY along with its wording" in instruction  # Item 6c
+    assert "no text, headline, or competitor wording rendered there either" in instruction
     assert "NEVER render any headline" in rule6
     # Neither may permit rendering wording in this mode.
     assert "preserve the reference image's text zones" not in instruction
@@ -480,6 +480,86 @@ def test_build_image_prompt_edit_mode_omits_colour_phrase_when_substance_colour_
 
     prompt_no_product = generate_image_prompt.build_image_prompt(_blueprint(), edit_mode=True)
     assert "recolour and re-texture it to match OUR product's actual colour and texture," in prompt_no_product
+
+
+# ---- Item 6c (2026-08-04): remove suppressed containers, not just their contents - ONE
+# integrated instruction with reproduce-faithfully, same class as item 5's retheme_colours ----
+
+def test_suppression_exception_states_one_partition_with_full_preservation():
+    """The exception must live in the SAME paragraph as the "carries over EXACTLY... in
+    any way" claim - not a separate clause elsewhere a reader could take as contradicting
+    it. Mirrors test_retheme_colours_on_states_one_integrated_instruction's shape."""
+    instruction = generate_image_prompt._edit_mode_instruction(text_in_image=False)
+    assert "carry over EXACTLY as shot in the reference" in instruction
+    assert "in any way." in instruction
+    assert "The ONE exception to full geometry preservation" in instruction
+    assert "is removed entirely, not preserved empty" in instruction
+    # Both must appear in the SAME opening paragraph, before the product-substitution text.
+    carries_over_pos = instruction.index("carry over EXACTLY")
+    exception_pos = instruction.index("The ONE exception")
+    product_pos = instruction.index("Changing ONLY the product")
+    assert carries_over_pos < exception_pos < product_pos
+
+
+def test_suppression_exception_names_every_container_type():
+    instruction = generate_image_prompt._edit_mode_instruction(text_in_image=False)
+    for container in ("badge", "pill", "oval", "button", "banner", "ribbon", "starburst"):
+        assert container in instruction
+
+
+def test_suppression_exception_absent_when_text_is_shown():
+    """No suppression happening when a headline IS being rendered - opening must be
+    byte-for-byte what it was before Item 6c, the same additive-only pattern as item 5."""
+    instruction = generate_image_prompt._edit_mode_instruction(
+        text_in_image=True, headline="Firmer Skin By Friday"
+    )
+    assert "The ONE exception to full geometry preservation" not in instruction
+    assert "starburst" not in instruction
+
+
+def test_suppression_exception_present_by_default():
+    """Default call (text_in_image=False) is the common suppression case - must include
+    the exception without the caller having to opt in."""
+    instruction = generate_image_prompt._edit_mode_instruction()
+    assert "The ONE exception to full geometry preservation" in instruction
+
+
+def test_suppression_exception_present_regardless_of_retheme_colours():
+    """Item 6c is independent of Item 5's toggle - the exception belongs to the
+    reproduce-faithfully instruction in BOTH its retheme_colours states."""
+    on = generate_image_prompt._edit_mode_instruction(text_in_image=False, retheme_colours=True)
+    off = generate_image_prompt._edit_mode_instruction(text_in_image=False, retheme_colours=False)
+    assert "The ONE exception to full geometry preservation" in on
+    assert "The ONE exception to full geometry preservation" in off
+
+
+def test_text_clause_removes_container_not_just_contents():
+    instruction = generate_image_prompt._edit_mode_instruction(text_in_image=False)
+    assert "the container shape itself does not survive" in instruction
+    assert "clean background continuous with its immediate surroundings" in instruction
+    assert "no empty outline, box, or shape left behind" in instruction
+
+
+def test_build_image_prompt_edit_mode_forwards_suppression_exception():
+    prompt = generate_image_prompt.build_image_prompt(_blueprint(), edit_mode=True)
+    assert "The ONE exception to full geometry preservation" in prompt
+    assert "the container shape itself does not survive" in prompt
+
+
+def test_build_image_prompt_edit_mode_text_shown_omits_suppression_exception():
+    prompt = generate_image_prompt.build_image_prompt(
+        _blueprint(), edit_mode=True, text_in_image=True, headline="Firmer Skin By Friday"
+    )
+    assert "The ONE exception to full geometry preservation" not in prompt
+
+
+def test_build_image_prompt_non_edit_mode_unaffected_by_suppression_exception():
+    """Item 6c is edit-mode-only (per the CLAUDE.md note: these four corrections all sit
+    on the image path where prompt-only guardrails are least reliable, specifically in
+    edit mode where a real photograph's containers exist to be removed) - generate mode
+    has no reference photo containers to remove, so it must be untouched."""
+    prompt = generate_image_prompt.build_image_prompt(_blueprint())
+    assert "The ONE exception to full geometry preservation" not in prompt
 
 
 def test_build_image_prompt_edit_mode_include_product_false_unaffected_by_reference_has_product():

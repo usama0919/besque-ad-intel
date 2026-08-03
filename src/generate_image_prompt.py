@@ -373,6 +373,23 @@ def _substance_recolour_clause(substance_colour=None):
     )
 
 
+# Item 6c (2026-08-04): stated as ONE partition of the reproduce-faithfully instruction,
+# same class as item 5's retheme_colours integration - "geometry carries over EXACTLY...
+# in any way" would directly contradict a later instruction to remove a container if the
+# two were left as separate, unrelated clauses. This is the exception clause folded into
+# the SAME opening paragraph that makes the full-preservation claim, naming it as the one
+# thing full preservation doesn't cover, rather than a competing statement appearing only
+# later in TEXT. Real failure this fixes: a draft rendered an empty green "Don't Miss
+# Out!" oval with no text in it, and six empty callout bubbles - the container survived
+# because nothing ever said it shouldn't.
+_SUPPRESSED_CONTAINER_EXCEPTION = (
+    "The ONE exception to full geometry preservation: any container holding text that's "
+    "being suppressed this run - badge, pill, oval, button, banner, ribbon, or starburst - "
+    "is removed entirely, not preserved empty; see TEXT below for exactly which elements "
+    "this covers and how the freed area is healed. "
+)
+
+
 def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, offer_text=None,
                             include_product=True, reference_has_product=True,
                             retheme_colours=True, palette=None, creative_format=None,
@@ -420,7 +437,17 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
     than living alongside it, since pointing at a colour is strictly weaker than naming it,
     not a complement to it. None (unset on the product) reproduces the exact old wording,
     including its own hardcoded "golden-amber oil" example - not a regression, since that
-    was always this function's only behaviour before this parameter existed."""
+    was always this function's only behaviour before this parameter existed.
+
+    Item 6c (2026-08-04): suppressing_text (derived below from text_in_image/headline, the
+    same condition TEXT already branches on) gates _SUPPRESSED_CONTAINER_EXCEPTION into
+    `opening` - the ONE exception to that same paragraph's "carries over EXACTLY... in any
+    way" claim, stated in the SAME place as that claim rather than as a separate TEXT-only
+    clause a reader could read as contradicting it. When text IS being shown (headline
+    given), there is no suppression and no exception - opening is unaffected, byte-for-byte
+    identical to before this item, the same additive-only pattern retheme_colours/
+    substance_colour already established."""
+    suppressing_text = not (text_in_image and headline)
     if retheme_colours:
         effective_palette = palette or "terracotta, maroon, gold, cream"
         opening = (
@@ -430,7 +457,9 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             "angle, spacing, lighting direction, contrast relationships, tonal "
             "hierarchy, and text placement all carry over EXACTLY as shot in the "
             "reference - do not change the framing, angle, spacing, or structure in any "
-            f"way. At the same time, every hue in the scene (background, props, "
+            "way. "
+            + (_SUPPRESSED_CONTAINER_EXCEPTION if suppressing_text else "") +
+            f"At the same time, every hue in the scene (background, props, "
             f"wardrobe, surfaces) re-maps to Besque's palette: {effective_palette} - "
             f"overriding the reference's own colours entirely. "
         )
@@ -439,6 +468,7 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             "EDIT MODE: the FIRST attached image is the competitor's own advertisement. "
             "Reproduce its composition, background, camera angle, lighting, colour "
             "palette, text placement, and overall layout as closely as possible. "
+            + (_SUPPRESSED_CONTAINER_EXCEPTION if suppressing_text else "")
         )
 
     if include_product and reference_has_product:
@@ -479,10 +509,14 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
         )
     else:
         base += (
-            "TEXT: leave the reference image's text zones as clean, empty space in the "
-            "SAME positions they occupy in the source image - do not render any text, "
-            "headline, or competitor wording there; that space will be filled later as a "
-            "separate HTML overlay. "
+            "TEXT: any container that held the suppressed text - badge, pill, oval, "
+            "button, banner, ribbon, or starburst - is removed ENTIRELY along with its "
+            "wording, not just emptied: the container shape itself does not survive. Fill "
+            "the freed area with clean background continuous with its immediate "
+            "surroundings (matching colour, texture, and lighting), in the SAME position "
+            "the container occupied in the source image - no empty outline, box, or shape "
+            "left behind, and no text, headline, or competitor wording rendered there "
+            "either. That space will be filled later as a separate HTML overlay. "
         )
     if offer_text:
         base += (
