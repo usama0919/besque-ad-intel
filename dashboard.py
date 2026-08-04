@@ -915,7 +915,13 @@ async def api_generate(request: Request):
     Body: ad_ids (required, non-empty list), angle_id/body_area/offer_text/
     instruction/product_id (the existing per-run inputs, reused as-is - Item 1),
     regenerate (bool, default False - the operator's explicit ask after seeing a
-    card marked already-generated, Item 3/7c).
+    card marked already-generated, Item 3/7c). text_in_image/include_product/
+    edit_mode/check_output/retheme_colours (Chunk 6.1, Item 1 - urgent live fix)
+    are the same run-strip toggles dashboard.html's /api/run already exposes,
+    same names and same defaults - a live run produced images with no baked-in
+    copy because pool.html had no control for text_in_image at all and this
+    endpoint silently fell back to generate_from_selection's/process_ad's
+    text_in_image=False default with no way to override it.
 
     should_stop is a DB-backed poll of this job's own stop_requested flag (Item 5)
     - forwarded into generate_from_selection, which checks it BETWEEN ads and
@@ -932,6 +938,11 @@ async def api_generate(request: Request):
     instruction = (body.get("instruction") or "").strip() or None
     product_id = body.get("product_id")
     regenerate = bool(body.get("regenerate", False))
+    text_in_image = bool(body.get("text_in_image", False))
+    include_product = bool(body.get("include_product", True))
+    edit_mode = bool(body.get("edit_mode", False))
+    check_output = bool(body.get("check_output", False))
+    retheme_colours = bool(body.get("retheme_colours", True))
 
     job_id = uuid.uuid4().hex
     dedupe.init_generate_jobs()
@@ -951,6 +962,8 @@ async def api_generate(request: Request):
             result = pipeline.generate_from_selection(
                 ad_ids, angle_id=angle_id, body_area=body_area, offer_text=offer_text,
                 instruction=instruction, product_id=product_id, regenerate=regenerate,
+                text_in_image=text_in_image, include_product=include_product, edit_mode=edit_mode,
+                check_output=check_output, retheme_colours=retheme_colours,
                 should_stop=_job_should_stop, on_ad_done=_on_ad_done,
             )
             dedupe.finish_generate_job(job_id, result=result)

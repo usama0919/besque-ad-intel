@@ -120,6 +120,8 @@ def test_api_generate_inputs_reach_generate_from_selection_intact(monkeypatch):
             "ad_ids": [ad_id], "angle_id": 7, "body_area": "  arms  ",
             "offer_text": "  20% off  ", "instruction": "  warmer tones  ",
             "product_id": 1, "regenerate": True,
+            "text_in_image": True, "include_product": False, "edit_mode": True,
+            "check_output": True, "retheme_colours": False,
         })
         assert r.status_code == 200
         _join_generate_thread()
@@ -130,8 +132,42 @@ def test_api_generate_inputs_reach_generate_from_selection_intact(monkeypatch):
         assert captured["instruction"] == "warmer tones"
         assert captured["product_id"] == 1
         assert captured["regenerate"] is True
+        # Chunk 6.1, Item 1 - every value flipped from its default here, to
+        # prove they actually reach through rather than just passing along
+        # whatever the default happens to be.
+        assert captured["text_in_image"] is True
+        assert captured["include_product"] is False
+        assert captured["edit_mode"] is True
+        assert captured["check_output"] is True
+        assert captured["retheme_colours"] is False
         assert callable(captured["should_stop"])
         assert callable(captured["on_ad_done"])
+    finally:
+        _cleanup(cid, [ad_id])
+
+
+def test_api_generate_toggle_defaults_match_dashboard_run_strip(monkeypatch):
+    """When omitted from the body, the five toggles must default EXACTLY like
+    dashboard.html's /api/run: text_in_image/edit_mode/check_output off,
+    include_product/retheme_colours on."""
+    cid = _make_competitor()
+    ad_id = _seed_scraped_ad(cid)
+    captured = {}
+
+    def fake_generate_from_selection(ad_ids, **kwargs):
+        captured.update(kwargs)
+        return {"processed": 0, "skipped": 0, "failed": 0, "already_generated": 0, "by_ad": {}}
+    monkeypatch.setattr(pipeline, "generate_from_selection", fake_generate_from_selection)
+    try:
+        client = TestClient(dashboard.app)
+        r = client.post("/api/generate", json={"ad_ids": [ad_id]})
+        assert r.status_code == 200
+        _join_generate_thread()
+        assert captured["text_in_image"] is False
+        assert captured["include_product"] is True
+        assert captured["edit_mode"] is False
+        assert captured["check_output"] is False
+        assert captured["retheme_colours"] is True
     finally:
         _cleanup(cid, [ad_id])
 

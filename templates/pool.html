@@ -115,6 +115,26 @@
     <label class="field-label" for="instructionInput">Extra direction (optional)</label>
     <textarea id="instructionInput" maxlength="500" placeholder="e.g. make the background warmer"></textarea>
   </div>
+  <!-- Chunk 6.1, Item 1 (urgent): the same five run-strip toggles
+       dashboard.html's /api/run already exposes - same ids/labels/defaults,
+       nothing invented. A live run produced images with no baked-in copy
+       because this page had none of these and Generate silently fell back to
+       text_in_image=False with no way to override it. -->
+  <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#555;">
+    <input type="checkbox" id="textInImageToggle" style="width:auto;"> Text in image
+  </label>
+  <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#555;">
+    <input type="checkbox" id="includeProductToggle" checked style="width:auto;"> Include product
+  </label>
+  <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#555;" title="Reproduce the competitor's ad, substituting only the product - off by default (generate from a text brief instead).">
+    <input type="checkbox" id="editModeToggle" style="width:auto;"> Edit mode (reproduce reference)
+  </label>
+  <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#555;" title="After generation, ask Claude what the draft actually violates (competitor logos, unauthorised offers, fabricated claims/testimonials, etc.) and flag it on the card - never auto-rejects or auto-regenerates.">
+    <input type="checkbox" id="checkOutputToggle" style="width:auto;"> Check output
+  </label>
+  <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#555;" title="Re-map the reference's colours to Besque's palette (edit mode only) - geometry is preserved, only colour is substituted. Turn off to clone the reference's own colours faithfully.">
+    <input type="checkbox" id="rethemeColoursToggle" checked style="width:auto;"> Re-theme colours
+  </label>
   <button class="run" id="generateBtn" onclick="generateSelection()" disabled>Generate</button>
   <button class="stop" id="generateStopBtn" onclick="stopGenerate()" disabled>Stop</button>
   <span class="status" id="generateStatus"></span>
@@ -407,6 +427,13 @@ async function generateSelection(){
   const instruction = document.getElementById('instructionInput').value.trim();
   try { localStorage.setItem('operatorInstruction', instruction); } catch(e) {}
   const regenerate = selectionIncludesAlreadyGenerated();
+  // Chunk 6.1, Item 1: same five toggles dashboard.html's run strip already
+  // sends to /api/run, read fresh at click time, same as every other field here.
+  const textInImage = document.getElementById('textInImageToggle').checked;
+  const includeProduct = document.getElementById('includeProductToggle').checked;
+  const editMode = document.getElementById('editModeToggle').checked;
+  const checkOutput = document.getElementById('checkOutputToggle').checked;
+  const rethemeColours = document.getElementById('rethemeColoursToggle').checked;
 
   _generateRunning = true;
   document.getElementById('generateBtn').disabled = true;
@@ -420,6 +447,8 @@ async function generateSelection(){
       ad_ids: [...selectedAdIds], angle_id: angleId, body_area: bodyArea || null,
       offer_text: offerText || null, instruction: instruction || null,
       product_id: selectedProductId, regenerate,
+      text_in_image: textInImage, include_product: includeProduct, edit_mode: editMode,
+      check_output: checkOutput, retheme_colours: rethemeColours,
     }),
   });
   const body = await r.json();

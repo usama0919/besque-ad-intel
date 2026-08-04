@@ -103,7 +103,9 @@ def fetch_pool(competitor_id, cap=50):
 
 def generate_from_selection(ad_ids, angle_id=None, body_area=None, offer_text=None,
                              instruction=None, product_id=None, should_stop=None,
-                             regenerate=False, on_ad_done=None):
+                             regenerate=False, on_ad_done=None,
+                             text_in_image=False, include_product=True, edit_mode=False,
+                             check_output=False, retheme_colours=True):
     """Generate drafts for an EXPLICIT list of already-fetched ads, rather than
     driving generation off scrape order. No Apify call - fetch_pool already
     stored the pool; this only reads scraped_ads and calls process_ad per
@@ -123,11 +125,13 @@ def generate_from_selection(ad_ids, angle_id=None, body_area=None, offer_text=No
     no matching scraped_ads row is recorded as "failed" and skipped, not raised -
     one bad id in a multi-ad selection must not abort the rest.
 
-    realism/text_in_image/include_product/edit_mode/check_output/retheme_colours
-    are still NOT threaded here (Chunk 5 wires angle/body_area/offer_text/
-    instruction/product - the operator-facing run-strip controls - but not these)
-    - process_ad runs with ITS OWN defaults for them (generate mode, no in-image
-    text, product included, no critic).
+    text_in_image/include_product/edit_mode/check_output/retheme_colours (Chunk
+    6.1, Item 1 - urgent live fix) are threaded straight through to process_ad,
+    same names and same defaults as process_ad/run_once already use - a live run
+    produced images with no baked-in copy because this function silently fell
+    back to process_ad's text_in_image=False default with no way for the
+    operator to override it (pool.html had no toggle for it at all). realism is
+    still NOT threaded - no pool.html control for it yet.
 
     should_stop, if given, is checked BETWEEN ads (same as run_once) AND is
     forwarded into process_ad, which checks it once more immediately before the
@@ -218,6 +222,8 @@ def generate_from_selection(ad_ids, angle_id=None, body_area=None, offer_text=No
         result = process_ad(
             ad, product=product, reference_images=reference_images, messaging_angle=messaging_angle,
             body_area=body_area, offer_text=offer_text, operator_instruction=instruction,
+            text_in_image=text_in_image, include_product=include_product, edit_mode=edit_mode,
+            check_output=check_output, retheme_colours=retheme_colours,
             should_stop=should_stop, explicit_selection=True, regenerate=regenerate,
         )
         dedupe.update_scraped_ad_status(ad_id, row["competitor_id"], result)

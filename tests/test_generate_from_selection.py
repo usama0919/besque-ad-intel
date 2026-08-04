@@ -48,6 +48,49 @@ def _mock_success(monkeypatch):
     monkeypatch.setattr(pipeline.slack_review, "post_review", lambda *a, **k: {"ts": "123"})
 
 
+# ---- Chunk 6.1, Item 1: the five run-strip toggles reach process_ad intact ----
+
+def test_generate_from_selection_forwards_the_five_toggles_to_process_ad(monkeypatch):
+    """A live run produced images with no baked-in copy because these were
+    never threaded through at all - process_ad silently ran with its own
+    text_in_image=False default. Every value below is flipped from process_ad's
+    own default to prove it actually arrives, not just that a default matches
+    by coincidence."""
+    cid = _make_competitor()
+    ad_id = _seed_scraped_ad(cid)
+    captured = {}
+
+    def fake_process_ad(ad, **kwargs):
+        captured.update(kwargs)
+        return "processed"
+    monkeypatch.setattr(pipeline, "process_ad", fake_process_ad)
+    try:
+        pipeline.generate_from_selection(
+            [ad_id], text_in_image=True, include_product=False, edit_mode=True,
+            check_output=True, retheme_colours=False,
+        )
+        assert captured["text_in_image"] is True
+        assert captured["include_product"] is False
+        assert captured["edit_mode"] is True
+        assert captured["check_output"] is True
+        assert captured["retheme_colours"] is False
+    finally:
+        _cleanup(cid, [ad_id])
+
+
+def test_generate_from_selection_toggle_defaults_match_process_ad():
+    """Omitted entirely, generate_from_selection's own defaults must match
+    process_ad's/run_once's exactly - same names, same defaults, nothing
+    invented."""
+    import inspect
+    sig = inspect.signature(pipeline.generate_from_selection)
+    assert sig.parameters["text_in_image"].default is False
+    assert sig.parameters["include_product"].default is True
+    assert sig.parameters["edit_mode"].default is False
+    assert sig.parameters["check_output"].default is False
+    assert sig.parameters["retheme_colours"].default is True
+
+
 # ---- Item 8: selection of one ad generates exactly one ----
 
 def test_generate_from_selection_one_ad_generates_exactly_one(monkeypatch):
