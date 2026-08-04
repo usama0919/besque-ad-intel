@@ -55,10 +55,24 @@ more prompt text is not the lever that has ever worked for this class of bug.
   `&&`/`||` (use `;` or `if ($?) { }`), `2>$null` not `2>/dev/null`.
 - Python lives in `./venv` — run tests as `./venv/Scripts/python.exe -m pytest tests/ -q`.
 - `assets/` is gitignored; add throwaway root scripts to `.gitignore` too.
-- `google-cloud-storage` and `Pillow` must be **installed in `./venv`**, not merely listed in
+- `google-cloud-storage` must be **installed in `./venv`**, not merely listed in
   `requirements.txt`. Bucket reads are wrapped in bare `except Exception: pass`
   (`backfill_classify.py`) or downgraded to `NotImplementedError` (`assets.py:60`), so a
   missing package looks exactly like missing data.
+- **`Pillow` was missing from `requirements.txt` entirely (not merely uninstalled) until
+  2026-08-04** — found live, the first deploy since 27 Jul. `generate_image_prompt.py`'s
+  `from PIL import Image` (`Image.open(...)`, used for the edit-mode aspect-ratio-inherits-
+  from-reference feature) was added 2026-08-03 (`8bf7a2b`), well after the 27 Jul build, so
+  there's no mystery about "how it worked before" - it didn't exist yet in anything ever
+  deployed. It sat latent and unexercised for a full day because nothing had redeployed to
+  actually run that import path in the dashboard *service* process (the Cloud Run *Job*
+  path, `job_runner.py`, imports `pipeline` unconditionally at module level too, so it was
+  equally broken - just never executed either). **The test suite could not have caught
+  this**: tests run against the local `./venv`, where Pillow *is* installed (this file's own
+  instruction above), so nothing anywhere verifies the deployed container's actual
+  dependency closure - a package present locally but missing from `requirements.txt` is
+  invisible to every test that's ever green. Fixed by pinning `Pillow==12.3.0` (matching the
+  local venv's installed version) in `requirements.txt`.
 
 ## Deploy — `ship.ps1` auto-commits
 It runs `git add -A src templates dashboard.py job_runner.py requirements.txt`, commits,
