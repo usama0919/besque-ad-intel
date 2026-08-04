@@ -123,7 +123,7 @@ def test_api_fetch_pool_starts_in_background_and_status_reports_done_result(monk
          {"ad_id": ad_id, "image_url": "http://x/1.jpg", "page_name": "brand"}, None),
         ({"ad_archive_id": "rejected"}, None, "wrong_page"),
     ]
-    monkeypatch.setattr(scrape, "scrape_ads_with_raw", lambda name, max_results=None, page_id=None: triples)
+    monkeypatch.setattr(scrape, "scrape_ads_with_raw", lambda name, max_results=None, page_id=None, **kwargs: triples)
     try:
         client = TestClient(dashboard.app)
         r = client.post("/api/fetch", json={"competitor_id": cid, "cap": 10})
@@ -152,7 +152,7 @@ def test_api_fetch_pool_default_cap_is_50(monkeypatch):
     cid = _make_competitor()
     captured = {}
 
-    def fake_scrape(name, max_results=None, page_id=None):
+    def fake_scrape(name, max_results=None, page_id=None, **kwargs):
         captured["max_results"] = max_results
         return []
 
@@ -201,7 +201,7 @@ def test_api_fetch_pool_never_touches_seen_ads_or_artifacts(monkeypatch):
     cid = _make_competitor()
     ad_id = f"POOL_{uuid.uuid4().hex[:8]}"
     triples = [({"ad_archive_id": ad_id}, {"ad_id": ad_id, "image_url": "http://x/1.jpg", "page_name": "brand"}, None)]
-    monkeypatch.setattr(scrape, "scrape_ads_with_raw", lambda name, max_results=None, page_id=None: triples)
+    monkeypatch.setattr(scrape, "scrape_ads_with_raw", lambda name, max_results=None, page_id=None, **kwargs: triples)
     try:
         client = TestClient(dashboard.app)
         client.post("/api/fetch", json={"competitor_id": cid, "cap": 10})
@@ -221,7 +221,7 @@ def test_api_fetch_pool_rejects_concurrent_fetch_for_same_competitor(monkeypatch
     cid = _make_competitor()
     release = threading.Event()
 
-    def slow_scrape(name, max_results=None, page_id=None):
+    def slow_scrape(name, max_results=None, page_id=None, **kwargs):
         release.wait(timeout=5)
         return []
 
@@ -255,7 +255,7 @@ def test_api_fetch_status_reports_error_when_background_thread_raises(monkeypatc
     never a row stuck on 'running' forever."""
     cid = _make_competitor()
 
-    def failing_scrape(name, max_results=None, page_id=None):
+    def failing_scrape(name, max_results=None, page_id=None, **kwargs):
         raise RuntimeError("apify blew up")
 
     monkeypatch.setattr(scrape, "scrape_ads_with_raw", failing_scrape)
@@ -273,7 +273,7 @@ def test_api_fetch_status_reports_error_when_background_thread_raises(monkeypatc
 
         # the failed job must not stay claimed - a later fetch for the same
         # competitor must be allowed to start, not permanently rejected
-        monkeypatch.setattr(scrape, "scrape_ads_with_raw", lambda name, max_results=None, page_id=None: [])
+        monkeypatch.setattr(scrape, "scrape_ads_with_raw", lambda name, max_results=None, page_id=None, **kwargs: [])
         r2 = client.post("/api/fetch", json={"competitor_id": cid, "cap": 10})
         assert r2.status_code == 200
         _join_fetch_thread()
@@ -287,3 +287,53 @@ def test_api_fetch_status_none_when_no_job_has_ever_run():
     r = client.get("/api/fetch/status?competitor_id=-999")
     assert r.status_code == 200
     assert r.json() == {"status": "none", "result": None, "error": None}
+
+
+# ---- Chunk 6.2: start_date_min/start_date_max/active_status reach
+# pipeline.fetch_pool intact via POST /api/fetch ----
+
+def test_api_fetch_pool_forwards_date_window_and_active_status(monkeypatch):
+    cid = _make_competitor()
+    captured = {}
+
+    def fake_fetch_pool(competitor_id, cap=50, **kwargs):
+        captured.update(kwargs)
+        return {"fetched": 0, "stored": 0, "skipped": {"not_image": 0, "wrong_page": 0,
+                                                          "no_image_url": 0, "duplicate": 0}}
+    import src.pipeline as pipeline_module
+    monkeypatch.setattr(pipeline_module, "fetch_pool", fake_fetch_pool)
+    try:
+        client = TestClient(dashboard.app)
+        r = client.post("/api/fetch", json={
+            "competitor_id": cid, "cap": 10,
+            "start_date_min": "2026-01-01", "start_date_max": "2026-02-01", "active_status": "inactive",
+        })
+        assert r.status_code == 200
+        _join_fetch_thread()
+        assert captured["start_date_min"] == "2026-01-01"
+        assert captured["start_date_max"] == "2026-02-01"
+        assert captured["active_status"] == "inactive"
+    finally:
+        _cleanup(cid)
+
+
+def test_api_fetch_pool_active_status_defaults_to_active(monkeypatch):
+    cid = _make_competitor()
+    monkeypatch.setattr(scrape, "scrape_ads_with_raw", lambda name, max_results=None, page_id=None, **kwargs: [])
+    try:
+        client = TestClient(dashboard.app)
+        r = client.post("/api/fetch", json={"competitor_id": cid, "cap": 10})
+        assert r.status_code == 200
+        _join_fetch_thread()
+    finally:
+        _cleanup(cid)
+
+
+def test_api_fetch_pool_rejects_invalid_active_status():
+    cid = _make_competitor()
+    try:
+        client = TestClient(dashboard.app)
+        r = client.post("/api/fetch", json={"competitor_id": cid, "cap": 10, "active_status": "nonsense"})
+        assert r.status_code == 400
+    finally:
+        _cleanup(cid)

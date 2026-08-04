@@ -152,3 +152,59 @@ def test_scrape_ads_also_surfaces_dco_and_carousel_survivors(monkeypatch):
     _patch_client(monkeypatch, RAW_ITEMS_WIDENED_FILTER)
     ads = scrape.scrape_ads("Bangn Body")
     assert {a["ad_id"] for a in ads} == {"D1", "C1"}
+
+
+# ---- Chunk 6.2: start_date_min/start_date_max/active_status reach the actor,
+# and active_status also lands in the constructed view_all_page_id URL (not
+# just as a top-level field) - that URL hardcoded active_status=active before
+# this change, which is the actual mechanism of the "1,200 ads, 0 returned"
+# bug (all paused). mediaType handling is untouched by any of this. ----
+
+def test_scrape_ads_with_raw_sends_date_window_and_active_status_to_actor(monkeypatch):
+    capture = _patch_client(monkeypatch, [])
+    scrape.scrape_ads_with_raw("Bangn Body", start_date_min="2026-01-01",
+                                start_date_max="2026-02-01", active_status="inactive")
+    run_input = capture[0]
+    assert run_input["startDateMin"] == "2026-01-01"
+    assert run_input["startDateMax"] == "2026-02-01"
+    assert run_input["activeStatus"] == "inactive"
+    assert run_input["mediaType"] == "image"  # untouched
+
+
+def test_scrape_ads_with_raw_omits_date_window_when_not_given(monkeypatch):
+    capture = _patch_client(monkeypatch, [])
+    scrape.scrape_ads_with_raw("Bangn Body")
+    run_input = capture[0]
+    assert "startDateMin" not in run_input
+    assert "startDateMax" not in run_input
+    assert run_input["activeStatus"] == "active"  # default matches today's behaviour
+
+
+def test_scrape_ads_with_raw_active_status_reaches_the_page_url_not_just_the_top_level_field(monkeypatch):
+    """The view_all_page_id URL hardcoded active_status=active before this fix -
+    a top-level activeStatus field alone would not have overridden it. This is
+    the actual mechanism of the bug (a page with ~1,200 paused ads returning
+    zero), so the URL itself must carry the requested value."""
+    capture = _patch_client(monkeypatch, [])
+    scrape.scrape_ads_with_raw("Brand", page_id="123456789", active_status="all")
+    run_input = capture[0]
+    assert run_input["activeStatus"] == "all"
+    assert "active_status=all" in run_input["urls"][0]["url"]
+    assert "active_status=active" not in run_input["urls"][0]["url"]
+
+
+def test_scrape_ads_with_raw_active_status_default_preserves_existing_url(monkeypatch):
+    capture = _patch_client(monkeypatch, [])
+    scrape.scrape_ads_with_raw("Brand", page_id="123456789")
+    run_input = capture[0]
+    assert "active_status=active" in run_input["urls"][0]["url"]
+
+
+def test_scrape_ads_threads_date_window_and_active_status_too(monkeypatch):
+    """scrape_ads (run_once's own path) must accept and forward the same
+    params, not just scrape_ads_with_raw."""
+    capture = _patch_client(monkeypatch, [])
+    scrape.scrape_ads("Bangn Body", start_date_min="2026-01-01", active_status="all")
+    run_input = capture[0]
+    assert run_input["startDateMin"] == "2026-01-01"
+    assert run_input["activeStatus"] == "all"

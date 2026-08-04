@@ -59,7 +59,7 @@ def fetch_reference_images(product):
     return images, None
 
 
-def fetch_pool(competitor_id, cap=50):
+def fetch_pool(competitor_id, cap=50, start_date_min=None, start_date_max=None, active_status="active"):
     """Fetch a pool of candidate ads for one competitor and store them, unprocessed,
     in scraped_ads. Fetch-and-store ONLY - does not call deconstruct, generate_image,
     or touch seen_ads/artifacts in any way. This populates the pool that run_once's
@@ -70,6 +70,19 @@ def fetch_pool(competitor_id, cap=50):
     the two filters can never drift apart), then upserts every survivor via
     dedupe.upsert_scraped_ad - a direct upsert on scraped_ads' own unique index, not
     a read-modify-write pass-through like update_competitor.
+
+    start_date_min/start_date_max (Chunk 6.2): an actual date WINDOW passed straight
+    to the actor (see scrape.py's own docstring) - better than a sort parameter (the
+    actor doesn't have one) since it lets the pool request exactly the range that
+    matters instead of paging through relevance-ordered results and truncating.
+    Both None (the default) omits them entirely - today's behaviour, unchanged.
+
+    active_status (Chunk 6.2): "active" (the default) matches today's behaviour,
+    but that default is the reason a page with ~1,200 ads returned zero live - all
+    of them paused. "inactive" or "all" surfaces those. mediaType handling is NOT
+    touched here or in scrape.py - client-side image filtering stays as the only
+    real gate, since the actor's own mediaType enum has no equivalent to Meta's
+    image_and_meme and doesn't reliably honour what's passed anyway.
 
     Returns {"fetched": n_raw, "stored": n_stored, "skipped": {reason: n, ...}}.
     n_raw is every record Apify's dataset returned before the image/page filter;
@@ -82,7 +95,9 @@ def fetch_pool(competitor_id, cap=50):
     if not competitor:
         raise ValueError(f"competitor {competitor_id} not found")
     dedupe.init_scraped_ads()
-    triples = scrape.scrape_ads_with_raw(competitor["name"], max_results=cap, page_id=competitor.get("page_id"))
+    triples = scrape.scrape_ads_with_raw(competitor["name"], max_results=cap, page_id=competitor.get("page_id"),
+                                          start_date_min=start_date_min, start_date_max=start_date_max,
+                                          active_status=active_status)
     skipped = {"not_image": 0, "wrong_page": 0, "no_image_url": 0, "duplicate": 0}
     seen_ad_ids = set()
     stored = 0

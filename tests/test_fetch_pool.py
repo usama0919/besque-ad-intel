@@ -30,7 +30,7 @@ def test_fetch_pool_stores_survivors_and_reports_per_reason_skipped(monkeypatch)
         ({"ad_archive_id": "rejected2"}, None, "not_image"),
         ({"ad_archive_id": ad_id_2}, {"ad_id": ad_id_2, "image_url": "http://x/2.jpg", "page_name": "brand"}, None),
     ]
-    monkeypatch.setattr(scrape, "scrape_ads_with_raw", lambda name, max_results=None, page_id=None: triples)
+    monkeypatch.setattr(scrape, "scrape_ads_with_raw", lambda name, max_results=None, page_id=None, **kwargs: triples)
     try:
         result = pipeline.fetch_pool(cid, cap=10)
         assert result == {
@@ -58,7 +58,7 @@ def test_fetch_pool_counts_and_skips_a_within_pull_duplicate(monkeypatch):
         ({"ad_archive_id": ad_id, "impressions": {"lower_bound": "999"}},
          {"ad_id": ad_id, "image_url": "http://x/1.jpg", "page_name": "brand"}, None),
     ]
-    monkeypatch.setattr(scrape, "scrape_ads_with_raw", lambda name, max_results=None, page_id=None: triples)
+    monkeypatch.setattr(scrape, "scrape_ads_with_raw", lambda name, max_results=None, page_id=None, **kwargs: triples)
     try:
         result = pipeline.fetch_pool(cid, cap=10)
         assert result == {
@@ -79,9 +79,9 @@ def test_fetch_pool_upsert_refreshes_raw_meta_without_duplicating_row(monkeypatc
     second_triples = [({"ad_archive_id": ad_id, "impressions": {"lower_bound": "200"}},
                         {"ad_id": ad_id, "image_url": "http://x/1.jpg", "page_name": "brand"}, None)]
     try:
-        monkeypatch.setattr(scrape, "scrape_ads_with_raw", lambda name, max_results=None, page_id=None: first_triples)
+        monkeypatch.setattr(scrape, "scrape_ads_with_raw", lambda name, max_results=None, page_id=None, **kwargs: first_triples)
         pipeline.fetch_pool(cid, cap=10)
-        monkeypatch.setattr(scrape, "scrape_ads_with_raw", lambda name, max_results=None, page_id=None: second_triples)
+        monkeypatch.setattr(scrape, "scrape_ads_with_raw", lambda name, max_results=None, page_id=None, **kwargs: second_triples)
         pipeline.fetch_pool(cid, cap=10)
         rows = dedupe.get_scraped_ads(competitor_id=cid)
         assert len(rows) == 1
@@ -102,7 +102,7 @@ def test_fetch_pool_preserves_real_media_type_and_stores_one_row_per_multi_image
            "images": ["http://x/first.jpg", "http://x/second.jpg"]}
     mapped = {"ad_id": ad_id, "image_url": "http://x/first.jpg", "page_name": "brand", "media_type": "DCO"}
     triples = [(raw, mapped, None)]
-    monkeypatch.setattr(scrape, "scrape_ads_with_raw", lambda name, max_results=None, page_id=None: triples)
+    monkeypatch.setattr(scrape, "scrape_ads_with_raw", lambda name, max_results=None, page_id=None, **kwargs: triples)
     try:
         result = pipeline.fetch_pool(cid, cap=10)
         assert result["stored"] == 1
@@ -132,9 +132,47 @@ def test_fetch_pool_never_touches_seen_ads(monkeypatch):
     cid = _make_competitor()
     ad_id = f"FP_{uuid.uuid4().hex[:8]}"
     triples = [({"ad_archive_id": ad_id}, {"ad_id": ad_id, "image_url": "http://x/1.jpg", "page_name": "brand"}, None)]
-    monkeypatch.setattr(scrape, "scrape_ads_with_raw", lambda name, max_results=None, page_id=None: triples)
+    monkeypatch.setattr(scrape, "scrape_ads_with_raw", lambda name, max_results=None, page_id=None, **kwargs: triples)
     try:
         pipeline.fetch_pool(cid, cap=10)
         assert dedupe.is_new(ad_id) is True
+    finally:
+        _cleanup(cid)
+
+
+# ---- Chunk 6.2: start_date_min/start_date_max/active_status reach
+# scrape.scrape_ads_with_raw intact ----
+
+def test_fetch_pool_forwards_date_window_and_active_status_to_scrape(monkeypatch):
+    cid = _make_competitor()
+    captured = {}
+
+    def fake_scrape(name, max_results=None, page_id=None, **kwargs):
+        captured.update(kwargs)
+        return []
+    monkeypatch.setattr(scrape, "scrape_ads_with_raw", fake_scrape)
+    try:
+        pipeline.fetch_pool(cid, cap=10, start_date_min="2026-01-01",
+                             start_date_max="2026-02-01", active_status="inactive")
+        assert captured["start_date_min"] == "2026-01-01"
+        assert captured["start_date_max"] == "2026-02-01"
+        assert captured["active_status"] == "inactive"
+    finally:
+        _cleanup(cid)
+
+
+def test_fetch_pool_active_status_defaults_to_active(monkeypatch):
+    cid = _make_competitor()
+    captured = {}
+
+    def fake_scrape(name, max_results=None, page_id=None, **kwargs):
+        captured.update(kwargs)
+        return []
+    monkeypatch.setattr(scrape, "scrape_ads_with_raw", fake_scrape)
+    try:
+        pipeline.fetch_pool(cid, cap=10)
+        assert captured["active_status"] == "active"
+        assert captured["start_date_min"] is None
+        assert captured["start_date_max"] is None
     finally:
         _cleanup(cid)

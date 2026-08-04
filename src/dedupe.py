@@ -931,6 +931,14 @@ def request_generate_job_stop(job_id):
 
 
 def get_generate_job(job_id):
+    """Return one generation job's state, or None if job_id is unrecognised.
+    Self-heals a stale 'running' row (older than GENERATE_JOB_STALE_SECONDS) the
+    moment anyone polls it - unlike fetch_jobs, a dead generate_jobs thread can't
+    block a FUTURE call (each POST /api/generate always claims a brand-new
+    job_id), but the poller watching THIS job_id would otherwise see 'running'
+    forever with no terminal state if the thread died - same self-recovery
+    principle as get_fetch_job, applied here for visibility rather than
+    unblocking a collision."""
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT id, status, ad_ids, progress, result, error, stop_requested, started_at, finished_at "
@@ -940,8 +948,13 @@ def get_generate_job(job_id):
         r = cur.fetchone()
         if r is None:
             return None
-        return {"id": r[0], "status": r[1], "ad_ids": r[2], "progress": r[3], "result": r[4],
-                "error": r[5], "stop_requested": r[6], "started_at": r[7], "finished_at": r[8]}
+        job = {"id": r[0], "status": r[1], "ad_ids": r[2], "progress": r[3], "result": r[4],
+               "error": r[5], "stop_requested": r[6], "started_at": r[7], "finished_at": r[8]}
+    if job["status"] == "running" and _is_stale(job["started_at"], GENERATE_JOB_STALE_SECONDS):
+        message = f"stale: claimed but never finished within {GENERATE_JOB_STALE_SECONDS}s, treated as failed"
+        finish_generate_job(job_id, error=message)
+        job["status"], job["error"], job["result"] = "error", message, None
+    return job
 
 
 # ---- Fetch jobs (Chunk 2C) - backgrounds POST /api/fetch so a browser request
@@ -954,6 +967,24 @@ def get_generate_job(job_id):
 # run_progress are (CLAUDE.md): ship.ps1 runs besque-dashboard with
 # --min-instances 1 --max-instances 5, so an in-memory dict on one container
 # wouldn't be visible to a status poll that lands on another. ----
+
+# A 'running' row this old is treated as failed rather than blocking (fetch_jobs)
+# or silently hanging forever in the poller's eyes (generate_jobs) - a background
+# thread that dies (a killed process, an OOM, the missing-Pillow crash that
+# prompted this fix) never reaches finish_fetch_job/finish_generate_job, and
+# without this, try_start_fetch_job's own WHERE guard blocks that competitor's
+# fetches forever, exactly what happened live on 2026-08-04 for competitor 1.
+# fetch_pool is Apify-only (no deconstruct/Gemini) - real calls observed
+# completing in seconds to low minutes, with one actor run as long as ~5 min
+# noted elsewhere in this codebase - 15 minutes gives real runs generous
+# headroom while still self-recovering same-session.
+FETCH_JOB_STALE_SECONDS = 900
+# generate_from_selection is sequential, ~2 min/ad (CLAUDE.md's own measured
+# sweep timing) - a several-ad grid selection can legitimately run well past
+# fetch's own timeout, so this gets a longer one: generous for realistic
+# selection sizes, still short enough to recover same-session.
+GENERATE_JOB_STALE_SECONDS = 1800
+
 
 def init_fetch_jobs():
     with get_conn() as conn, conn.cursor() as cur:
@@ -972,13 +1003,15 @@ def init_fetch_jobs():
 
 def try_start_fetch_job(competitor_id):
     """Atomically claim the 'running' slot for one competitor's fetch job. Returns
-    True if this call won the claim (fresh row, or an existing row that was NOT
-    'running' - a prior done/error job for this competitor gets overwritten, same
-    as a fresh start). Returns False if a job for this competitor is already
-    'running' - the caller must reject the request, not start a second Apify call.
+    True if this call won the claim: a fresh row, an existing row that was NOT
+    'running' (a prior done/error job for this competitor gets overwritten, same
+    as a fresh start), OR a 'running' row stale beyond FETCH_JOB_STALE_SECONDS -
+    self-recovery for a thread that claimed the slot and then died before ever
+    calling finish_fetch_job, so it can't block that competitor's fetches
+    forever. Returns False only for a job that's still 'running' AND fresh.
     The WHERE clause on the DO UPDATE is what makes this safe under a race: only
-    one of two concurrent callers can ever see their own write take effect against
-    a row that was already 'running'."""
+    one of two concurrent callers can ever see their own write take effect
+    against a row that was already 'running' (and not yet stale)."""
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
             """INSERT INTO fetch_jobs (competitor_id, status, result, error, started_at, finished_at)
@@ -987,8 +1020,9 @@ def try_start_fetch_job(competitor_id):
                SET status = 'running', result = NULL, error = NULL,
                    started_at = now(), finished_at = NULL
                WHERE fetch_jobs.status != 'running'
+                  OR fetch_jobs.started_at < now() - (%s * interval '1 second')
                RETURNING competitor_id""",
-            (competitor_id,),
+            (competitor_id, FETCH_JOB_STALE_SECONDS),
         )
         won = cur.fetchone() is not None
         conn.commit()
@@ -1000,8 +1034,8 @@ def finish_fetch_job(competitor_id, result=None, error=None):
     result dict, or 'error' with the exception message. Must be called from
     inside the background thread's own try/except (both branches, success and
     failure) - a thread that dies without reaching this leaves the row stuck on
-    'running' forever, which would permanently block every future fetch for that
-    competitor via try_start_fetch_job's WHERE guard above."""
+    'running' until it's either reclaimed (try_start_fetch_job, once stale) or
+    read (get_fetch_job self-heals it directly)."""
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
             "UPDATE fetch_jobs SET status=%s, result=%s, error=%s, finished_at=now() WHERE competitor_id=%s",
@@ -1013,7 +1047,12 @@ def finish_fetch_job(competitor_id, result=None, error=None):
 
 
 def get_fetch_job(competitor_id):
-    """Return one competitor's fetch job state, or None if none has ever run."""
+    """Return one competitor's fetch job state, or None if none has ever run.
+    Self-heals a stale 'running' row (older than FETCH_JOB_STALE_SECONDS) the
+    moment anyone reads it - a poller must eventually see a real terminal state
+    rather than 'running' forever if the background thread died, even before
+    anyone retries the fetch (which is try_start_fetch_job's own, separate
+    self-recovery path)."""
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT competitor_id, status, result, error, started_at, finished_at "
@@ -1023,5 +1062,21 @@ def get_fetch_job(competitor_id):
         r = cur.fetchone()
         if r is None:
             return None
-        return {"competitor_id": r[0], "status": r[1], "result": r[2], "error": r[3],
-                "started_at": r[4], "finished_at": r[5]}
+        job = {"competitor_id": r[0], "status": r[1], "result": r[2], "error": r[3],
+               "started_at": r[4], "finished_at": r[5]}
+    if job["status"] == "running" and _is_stale(job["started_at"], FETCH_JOB_STALE_SECONDS):
+        message = f"stale: claimed but never finished within {FETCH_JOB_STALE_SECONDS}s, treated as failed"
+        finish_fetch_job(competitor_id, error=message)
+        job["status"], job["error"], job["result"] = "error", message, None
+    return job
+
+
+def _is_stale(started_at, timeout_seconds):
+    """True if started_at is more than timeout_seconds in the past. Shared by
+    fetch_jobs and generate_jobs' staleness checks so there's one definition of
+    "how old is too old", not two that could drift."""
+    if started_at is None:
+        return False
+    import datetime as _dt
+    now = _dt.datetime.now(started_at.tzinfo) if started_at.tzinfo else _dt.datetime.utcnow()
+    return (now - started_at).total_seconds() > timeout_seconds

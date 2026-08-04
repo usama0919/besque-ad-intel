@@ -83,6 +83,22 @@
   <span id="selectedCompName" style="font-size:13px;font-weight:600;">None selected</span>
   <span style="font-size:13px;color:#888;margin-left:12px;">Cap</span>
   <input type="number" id="capInput" value="50" min="1" max="500">
+  <!-- Chunk 6.2: a real date WINDOW (the actor's own startDateMin/startDateMax
+       fields - there's no sort parameter to request recency any other way),
+       and activeStatus - default "active" matches today's behaviour, but that
+       default is why a page with ~1,200 ads returned zero live: all paused.
+       mediaType is deliberately not exposed here or anywhere - client-side
+       filtering stays the only real gate. Both default to no filter. -->
+  <span style="font-size:13px;color:#888;margin-left:12px;">From</span>
+  <input type="date" id="startDateMinInput">
+  <span style="font-size:13px;color:#888;">to</span>
+  <input type="date" id="startDateMaxInput">
+  <span style="font-size:13px;color:#888;margin-left:12px;">Status</span>
+  <select id="activeStatusSelect">
+    <option value="active" selected>Active</option>
+    <option value="inactive">Inactive</option>
+    <option value="all">All</option>
+  </select>
   <button class="run" id="fetchBtn" onclick="fetchPool()" disabled>Fetch</button>
   <span class="status" id="fetchStatus">Select a competitor to begin.</span>
 </div>
@@ -260,11 +276,17 @@ async function fetchPool(){
   const btn = document.getElementById('fetchBtn');
   const status = document.getElementById('fetchStatus');
   const cap = parseInt(document.getElementById('capInput').value, 10) || 50;
+  const startDateMin = document.getElementById('startDateMinInput').value || null;
+  const startDateMax = document.getElementById('startDateMaxInput').value || null;
+  const activeStatus = document.getElementById('activeStatusSelect').value;
   btn.disabled = true;
   status.textContent = 'Starting fetch…';
   const r = await fetch('/api/fetch', {
     method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({competitor_id: selectedCompetitorId, cap}),
+    body: JSON.stringify({
+      competitor_id: selectedCompetitorId, cap,
+      start_date_min: startDateMin, start_date_max: startDateMax, active_status: activeStatus,
+    }),
   });
   const body = await r.json();
   if(!r.ok){

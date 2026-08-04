@@ -843,7 +843,13 @@ async def api_fetch_pool(request: Request):
     is a single atomic statement, not read-then-write, so this holds under a race
     between two near-simultaneous clicks. Competitor existence is checked here,
     BEFORE claiming the job slot, so an unknown competitor_id never creates a
-    fetch_jobs row at all."""
+    fetch_jobs row at all.
+
+    start_date_min/start_date_max/active_status (Chunk 6.2): the same three
+    fields threaded through to pipeline.fetch_pool - see its own docstring.
+    active_status defaults to "active" (today's behaviour); "inactive"/"all" are
+    what actually surfaces a page whose ads are all paused. mediaType handling
+    is untouched."""
     body = await request.json()
     competitor_id = body.get("competitor_id")
     if competitor_id is None:
@@ -859,6 +865,11 @@ async def api_fetch_pool(request: Request):
         return JSONResponse({"ok": False, "error": "cap must be an integer"}, status_code=400)
     if cap <= 0:
         return JSONResponse({"ok": False, "error": "cap must be a positive integer"}, status_code=400)
+    start_date_min = (body.get("start_date_min") or "").strip() or None
+    start_date_max = (body.get("start_date_max") or "").strip() or None
+    active_status = (body.get("active_status") or "active").strip().lower()
+    if active_status not in ("active", "inactive", "all"):
+        return JSONResponse({"ok": False, "error": "active_status must be 'active', 'inactive', or 'all'"}, status_code=400)
 
     dedupe.init_competitors()
     competitor = next((c for c in dedupe.get_competitors() if c["id"] == competitor_id), None)
@@ -876,7 +887,8 @@ async def api_fetch_pool(request: Request):
 
     def _run_fetch_pool():
         try:
-            result = pipeline.fetch_pool(competitor_id, cap=cap)
+            result = pipeline.fetch_pool(competitor_id, cap=cap, start_date_min=start_date_min,
+                                          start_date_max=start_date_max, active_status=active_status)
             dedupe.finish_fetch_job(competitor_id, result=result)
         except Exception as e:
             # Must always reach finish_fetch_job - an uncaught exception here would

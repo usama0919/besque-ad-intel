@@ -110,7 +110,8 @@ REJECT_WRONG_PAGE = "wrong_page"
 REJECT_NO_IMAGE_URL = "no_image_url"
 
 
-def _scrape_raw(search_term, max_results=None, image_only=True, page_id=None):
+def _scrape_raw(search_term, max_results=None, image_only=True, page_id=None,
+                 start_date_min=None, start_date_max=None, active_status="active"):
     """Shared core: call the Apify actor and iterate the dataset, applying the same
     image-only / page-match filter every caller must use. Returns a list of
     (raw, mapped, reason) triples for EVERY record Apify returned - mapped is None
@@ -133,11 +134,32 @@ def _scrape_raw(search_term, max_results=None, image_only=True, page_id=None):
     VIDEO with no images array, or a DCO/CAROUSEL that happens to carry none).
     REJECT_NOT_IMAGE keeps its name for continuity with the existing per-reason
     breakdown, but now means "no usable image", not "wrong media_type" literally.
+    mediaType handling itself is UNCHANGED here (Chunk 6.2) - the actor's own
+    mediaType enum (all/image/video/meme/none, confirmed 2026-08-04 against its
+    real input schema) doesn't offer Meta's own image_and_meme value, and the
+    actor doesn't honour it reliably anyway (CLAUDE.md), so client-side filtering
+    stays the only real gate.
 
     A record missing ad_id is folded into REJECT_NO_IMAGE_URL - the caller-facing
     reason vocabulary has no separate bucket for it (it's a defensive branch, never
     observed in practice), and "this record can't produce a usable mapped ad" is
-    the accurate characterization either way."""
+    the accurate characterization either way.
+
+    start_date_min/start_date_max (Chunk 6.2) map straight to the actor's own
+    startDateMin/startDateMax input fields (confirmed present in its real input
+    schema) - a date WINDOW, not a sort, so the pool can request the range that
+    actually matters instead of paging through relevance-ordered results the
+    actor gives no way to sort by recency. Both None (the default) omits them
+    entirely, matching today's behaviour exactly.
+
+    active_status (Chunk 6.2) defaults to "active", matching today's behaviour -
+    but that default is exactly why a page with ~1,200 ads returned zero live:
+    ads paused (inactive) are invisible under an active-only filter. Threaded to
+    BOTH surfaces that can carry it: the actor's own top-level activeStatus
+    field, AND the view_all_page_id URL's active_status query param when using
+    the urls input path - that URL hardcoded active_status=active before this
+    change, which is the actual mechanism of the bug (a top-level activeStatus
+    field alone would not have overridden it)."""
     token = os.getenv("APIFY_TOKEN")
     if not token:
         raise ValueError("APIFY_TOKEN must be set")
@@ -148,10 +170,16 @@ def _scrape_raw(search_term, max_results=None, image_only=True, page_id=None):
     if use_page:
         pid = str(page_id).strip()
         if "facebook.com" not in pid:
-            pid = f"https://www.facebook.com/ads/library/?active_status=active&ad_type=all&country=ALL&view_all_page_id={pid}"
+            pid = (f"https://www.facebook.com/ads/library/?active_status={active_status}"
+                   f"&ad_type=all&country=ALL&view_all_page_id={pid}")
         run_input = {"urls": [{"url": pid}], "maxAds": fetch_cap, "mediaType": "image"}
     else:
         run_input = {"searchTerms": [search_term], "maxResults": fetch_cap, "maxAds": fetch_cap, "mediaType": "image"}
+    run_input["activeStatus"] = active_status
+    if start_date_min:
+        run_input["startDateMin"] = start_date_min
+    if start_date_max:
+        run_input["startDateMax"] = start_date_max
     run = _call_actor_with_heartbeat(client, APIFY_ACTOR, run_input)
 
     results = []
@@ -179,7 +207,8 @@ def _scrape_raw(search_term, max_results=None, image_only=True, page_id=None):
     return results
 
 
-def scrape_ads(search_term, max_results=None, image_only=True, page_id=None):
+def scrape_ads(search_term, max_results=None, image_only=True, page_id=None,
+                start_date_min=None, start_date_max=None, active_status="active"):
     """Run the Apify actor. Returns mapped ad dicts, filtered to image ads
     that have both an ad_id and a downloadable image URL.
 
@@ -190,15 +219,24 @@ def scrape_ads(search_term, max_results=None, image_only=True, page_id=None):
     many *new* ads get processed after the seen_ads gate, while this caps the
     candidate pool fetched before it. Scraping wide and processing narrow is the
     point - do not couple them again.
+
+    start_date_min/start_date_max/active_status (Chunk 6.2): see _scrape_raw's
+    own docstring - active_status defaults to "active", matching today's
+    behaviour exactly.
     """
-    return [mapped for raw, mapped, reason in _scrape_raw(search_term, max_results, image_only, page_id) if mapped]
+    return [mapped for raw, mapped, reason in _scrape_raw(
+        search_term, max_results, image_only, page_id,
+        start_date_min=start_date_min, start_date_max=start_date_max, active_status=active_status,
+    ) if mapped]
 
 
-def scrape_ads_with_raw(search_term, max_results=None, image_only=True, page_id=None):
+def scrape_ads_with_raw(search_term, max_results=None, image_only=True, page_id=None,
+                         start_date_min=None, start_date_max=None, active_status="active"):
     """Like _scrape_raw, but named for external callers: returns (raw, mapped, reason)
     triples for EVERY record Apify returned (mapped=None and reason set to one of
     the REJECT_* constants for anything the filter rejected). Used by
     pipeline.fetch_pool, which needs the full unmodified Apify record to persist as
     raw_meta and needs the per-reason skipped breakdown - scrape_ads alone only
     exposes survivors with no reason at all."""
-    return _scrape_raw(search_term, max_results, image_only, page_id)
+    return _scrape_raw(search_term, max_results, image_only, page_id,
+                        start_date_min=start_date_min, start_date_max=start_date_max, active_status=active_status)
