@@ -258,9 +258,134 @@ blueprint reused). Final failure is recorded via
   pages share one steering history rather than drifting into two — but that also means
   this gap now applies to both pages identically, not just `dashboard.html`. Left as-is
   per instruction (2026-08-04); noting it here so it isn't lost, not fixing it now.
-- Nothing deployed since 27 Jul 2026 — everything below (all of Prompt B, edit mode, and
-  Prompt 4 items 1-5) is committed and pushed to `main`, but Cloud Run is still running
-  the 27 Jul build; none of it is live.
+- ~~Nothing deployed since 27 Jul 2026~~ — **deployed 2026-08-04**, live at
+  `besque-dashboard-00041-2md`. See the dated section below for what shipped and what
+  broke on the way.
+
+## 2026-08-04 — first deploy since 27 Jul, plus a live-use session (handover record)
+
+### Deploy
+- Live revision: **`besque-dashboard-00041-2md`**. `besque-pipeline` Job updated to the
+  same image. This is everything through Prompt B, edit mode, Prompt 4, and Chunks 1-6.2
+  (the ad pool: fetch/browse/generate) going live for the first time.
+- **Pillow was missing from `requirements.txt` entirely — not merely uninstalled.**
+  `generate_image_prompt.py`'s `from PIL import Image` (added 2026-08-03, commit `8bf7a2b`,
+  for the edit-mode aspect-ratio feature — genuinely used, `Image.open(...)`, not dead code)
+  predates any deploy since 27 Jul, so it sat latent for a day. Every path that imports
+  `pipeline.py` broke in the container on the first deploy that actually exercised it:
+  `POST /api/fetch`/`POST /api/generate` (new), **and** `job_runner.py` — the existing,
+  already-relied-upon Run Pipeline button's Cloud Run Job entrypoint, which imports
+  `pipeline` unconditionally at module level. Fixed by pinning `Pillow==12.3.0` (matching
+  the local venv) and redeploying (`besque-dashboard-00041-2md`).
+  **The test suite cannot catch this class of bug**: tests run against the local
+  `./venv`, where Pillow *is* installed, so nothing anywhere verifies the deployed
+  container's actual dependency closure. A package present locally but missing from
+  `requirements.txt` is invisible to every test that's ever green. No fix in place for
+  this gap yet — worth a CI step that builds the container and smoke-imports `pipeline`
+  before trusting a green local suite pre-deploy.
+- **Several columns exist in prod but aren't reproducible from code against a fresh
+  database**: `seen_ads.angle_id`, `artifacts.angle_id`, `artifacts.text_in_image`,
+  `competitors.category`, `products.category`/`image_key`/`image_keys`/`visual_description`
+  are all baked directly into their table's `CREATE TABLE IF NOT EXISTS` column list, with
+  no corresponding `ALTER TABLE ADD COLUMN`. Since those tables predate these columns, that
+  statement is a no-op against the already-existing production tables — confirmed live via
+  `information_schema` that all of them already exist in prod (via `migrate_angles.sql` for
+  the angle ones, undocumented for the category/product ones), so this deploy was safe, but
+  a fresh database built from this code alone would be missing every one of them. Not fixed
+  - recorded so a future migration effort knows the full list.
+- `try_start_fetch_job`/`get_fetch_job`/`get_generate_job` now self-recover a `'running'`
+  row whose background thread died before calling `finish_*_job` (a killed process, the
+  Pillow crash above) - previously permanent (competitor 1's `fetch_jobs` row got stuck this
+  exact way live and was cleared with a targeted `UPDATE`). See `dedupe.py`'s
+  `FETCH_JOB_STALE_SECONDS`/`GENERATE_JOB_STALE_SECONDS`.
+
+### Open bugs found in live use (not fixed - reported for tomorrow)
+- **`edit_mode` logs `False` on every ad despite the pool checkbox being ticked.** Traced
+  the full chain and every hop is correct in the source as of `7e04451`:
+  `pool.html`'s `editModeToggle.checked` → sent as `edit_mode` in the `POST /api/generate`
+  body → `dashboard.py`'s `api_generate` reads it (`body.get("edit_mode", False)`) and
+  forwards it into `pipeline.generate_from_selection(edit_mode=edit_mode)` →
+  `generate_from_selection` forwards it into `process_ad(edit_mode=edit_mode)` → the log
+  line itself (`"image generation starting (edit_mode=%s)"`) prints that exact parameter,
+  with nothing between receiving it and printing it. No line silently overwrites it -
+  ruled out a downstream fallback (e.g. missing reference bytes) as the explanation for
+  what the *source* does. Leading hypothesis: a stale running process - this codebase
+  already has one confirmed incident of exactly this shape ("Restart uvicorn after any
+  commit touching `src/`" above), and the toggle-wiring commit (`60d7200`) postdates when
+  the operator's local uvicorn was last known to be started. Unconfirmed - would need that
+  process restarted to check, which wasn't done this session. If it was hit against the
+  deployed revision instead, that's less likely (verified fresh post-fix) but not ruled out.
+- **`body_area` is applied uniformly to every ad in a batch, with no awareness of what the
+  reference actually shows.** Concrete failure: a product-only reference (no human subject)
+  generated with `body_area="legs"` produced illustrated legs draped over the bottle. This
+  is now the evidence for a real fix direction: derive body area from the reference image
+  itself, with the operator's per-run input as an override rather than an unconditional
+  value - not something to build speculatively, there's now a live failure to point at.
+- **`artifacts.page_name` is stored with a trailing space**, so `export_drafts.py`'s
+  `--competitor-id` (an `ILIKE` match against the competitor's tracked name) never matches
+  in practice. Two things to fix: the comparison itself (trim both sides), and - more
+  important - find where the trailing space is actually written (`process_ad`'s
+  `save_artifact` call passes `page_name=ad.get("page_name", "")` straight through from the
+  scraped ad dict; worth checking `scrape.py`'s `_map_ad` and Apify's own raw `page_name`
+  field for where the space originates before just trimming it out downstream).
+- **Compliance false positive**: `"blend of 7 cold-pressed oils that"` flagged as a verbatim
+  competitor phrase reused. It's Besque's own product description, stored in `products`,
+  not competitor language. Worth checking once `edit_mode` is resolved (per instruction,
+  not investigated further this session).
+- **Slack posting fails with `invalid_auth`** after every save - same as the existing Known
+  gaps note above, reconfirmed live, still non-fatal to the pipeline.
+- **Unexplained cleanup, now explained**: a `"Deleted: 0 review_decisions, 2 artifacts"`
+  line appeared during the session. Traced to an untracked root script,
+  `cleanup_testbrand.py` (not written or run by Claude this session, not in git) - a
+  dry-run-by-default utility that deletes rows matching a `page_name` (default
+  `"TestBrand"`) from `artifacts` + `review_decisions`, gated behind `--confirm`. Someone
+  ran it with `--confirm` against the exact `TestBrand` leak this file's Known gaps section
+  already documents. Not a mystery once found - just untracked, so worth `git add`-ing if
+  it's going to be a standing tool.
+
+### Apify findings
+- **The Ad Library page id is not the profile page id.** Competitor 52's profile URL gives
+  `61575713267532`, which returns zero ads; the actual Ad Library page id is
+  `691427450714766`. Anyone adding a competitor from a profile link will hit this silently
+  - `scrape.py` has no validation that would catch a valid-but-wrong numeric id (see the
+  existing "A numeric `page_id` bypasses the name gate" note above - same root shape, worse
+  because the wrong id here still looks completely plausible).
+- The actor's real input schema (confirmed by reading it directly, not documentation) has
+  **no sort/recency parameter and no `image_and_meme` media type**, but does have
+  `startDateMin`/`startDateMax`/`activeStatus` - all three now wired through `fetch_pool`
+  as of Chunk 6.2. `mediaType` handling is deliberately untouched (client-side filtering
+  stays the only real gate, per the existing note on this above).
+- **Apify is intermittent independent of anything in this codebase**: identical page and
+  parameters returned 50 ads at 11:24 and 0 at 13:27 the same day, with the actor's own log
+  reading `"Extracted 0 initial ads from HTML"`. Not a caching or param bug on our side -
+  worth remembering before assuming a zero-ad result means something's broken here.
+
+### Team decisions (from Sayali, 2026-08-04) - for a not-yet-built testimonial/review feature
+- Quotes may be lightly reworded to fit, but the customer's name must be real.
+- Both result phrases and blunt problem phrases are usable on images.
+- Image direction may show either the problem or the result depending on whether the ad is
+  problem-aware or solution-aware - a **new per-run creative input we do not currently
+  have** anywhere in the pipeline.
+- Operator picks body area freely; a single review may serve more than one angle.
+- Testimonial is default-on with a per-run override; match on angle plus length.
+- Show quote plus first name and initial only - no age, no timeframe.
+- Reviews get a reuse cooldown; skip incentivized and unverified rows; Magic Body Oil only
+  for now.
+- **Do NOT state the shower-oil absorption mechanism as fact.** This directly contradicts
+  the product doc's own Step 4, which instructs mechanistic explanatory subtext - the
+  team's answer overrides the doc: mechanism may inform which customer language gets
+  chosen, but must never appear as an assertion outside a real quote.
+- Still unanswered: emotional register for loose skin, crepey skin, bruising, and
+  menopause; and a separate, still-open bottle-description dispute.
+
+### Also as of today
+- `export_drafts.py` exists at repo root - a standalone, read-only export utility (drafts +
+  optional reference images + `manifest.csv`, zipped). Not committed yet - it's currently
+  untracked, same as the ad-hoc root scripts. Never imports `dashboard.py`/`pipeline.py`.
+- Chunk 6.1 added the five existing run-strip toggles (`text_in_image`/`include_product`/
+  `edit_mode`/`check_output`/`retheme_colours`) to `pool.html`, threaded through
+  `POST /api/generate` into `generate_from_selection` - same names/defaults as
+  `dashboard.html`'s own run strip, nothing invented.
 
 ## Prompt B — messaging angles + Claude prompt-writer pass (COMPLETE as of 2026-07-30)
 
