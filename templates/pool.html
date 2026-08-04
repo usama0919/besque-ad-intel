@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Besque Ad Intelligence - Pool</title>
+<style>
+  /* Same look-and-feel as dashboard.html (shared colour palette/typography) -
+     duplicated rather than shared, since this codebase has no shared-CSS
+     mechanism and every template here is self-contained. */
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; background:#f4f1ec; color:#2a2a2a; }
+  header { background:#1a1a1a; color:#fff; padding:22px 40px; display:flex; align-items:center; justify-content:space-between; position:sticky; top:0; z-index:100; }
+  header h1 { font-size:20px; font-weight:600; letter-spacing:0.5px; }
+  header .sub { font-size:13px; color:#b8b8b8; margin-top:2px; }
+  header a { color:#b8b8b8; font-size:13px; text-decoration:none; }
+  .bar { padding:20px 40px; display:flex; flex-wrap:wrap; gap:16px; align-items:center; background:#fff; border-bottom:1px solid #e5e0d8; position:sticky; top:66px; z-index:90; }
+  button.run { background:#1a1a1a; color:#fff; border:none; padding:11px 22px; border-radius:8px; font-size:14px; font-weight:600; cursor:pointer; }
+  button.run:hover { background:#333; }
+  button.run:disabled { background:#999; cursor:not-allowed; }
+  .status { font-size:13px; color:#666; }
+  input[type=number] { padding:9px; border:1px solid #ccc; border-radius:7px; font-size:13px; width:80px; }
+  .layout { display:grid; grid-template-columns:1fr 280px; gap:24px; padding:24px 40px; align-items:start; }
+  h2 { font-size:15px; text-transform:uppercase; letter-spacing:1px; color:#888; margin-bottom:14px; }
+  .empty { color:#bbb; font-size:13px; padding:30px 0; text-align:center; }
+  .pool-empty-reason { color:#888; padding:24px; text-align:left; background:#fff; border:1px solid #e5e0d8; border-radius:12px; }
+  .pool-empty-hint { margin-top:10px; font-size:12px; color:#8a5a12; background:#fdf3e0; border:1px solid #f0dcb4; border-radius:6px; padding:8px 12px; }
+  .pool-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(220px, 1fr)); gap:16px; }
+  .pool-card { background:#fff; border:2px solid #e5e0d8; border-radius:12px; overflow:hidden; cursor:pointer; box-shadow:0 1px 3px rgba(0,0,0,0.04); transition:border-color 0.1s; }
+  .pool-card:hover { border-color:#c9c2b4; }
+  .pool-card.selected { border-color:#1a7f42; box-shadow:0 0 0 2px rgba(26,127,66,0.25); }
+  .pool-card img { width:100%; height:160px; object-fit:cover; background:#f0ece4; display:block; }
+  .pool-card-body { padding:10px 12px; }
+  .pool-card-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; }
+  .media-type-badge { font-size:10px; font-weight:700; letter-spacing:0.5px; text-transform:uppercase; color:#666; background:#f0ece4; padding:2px 8px; border-radius:20px; }
+  .badge { font-size:10px; padding:2px 8px; border-radius:20px; font-weight:600; }
+  .badge.approve { background:#e3f5e9; color:#1a7f42; }
+  .badge.pending { background:#f0ece4; color:#999; }
+  .pool-days { font-size:12px; font-weight:600; color:#333; margin-bottom:4px; }
+  .pool-title { font-size:12px; font-weight:600; margin-bottom:4px; line-height:1.3; }
+  .pool-snippet { font-size:11px; color:#777; line-height:1.4; margin-bottom:6px; max-height:44px; overflow:hidden; }
+  .pool-cta { font-size:11px; font-weight:600; color:#1a1a1a; margin-bottom:4px; }
+  .pool-meta { font-size:10px; color:#aaa; }
+  .check-mark { position:absolute; top:8px; right:8px; width:22px; height:22px; border-radius:50%; background:#1a7f42; color:#fff; display:none; align-items:center; justify-content:center; font-size:13px; font-weight:700; }
+  .pool-card-thumb { position:relative; }
+  .pool-card.selected .check-mark { display:flex; }
+  .comp-panel { background:#fff; border:1px solid #e5e0d8; border-radius:12px; padding:14px 18px; margin-bottom:20px; }
+  .comp-row { padding:8px 0; border-bottom:1px solid #f4f1ec; cursor:pointer; }
+  .comp-row:last-child { border:none; }
+  .comp-row.selected { background:#f0ece4; border-radius:8px; }
+  .comp-row.selected .comp-name { color:#1a7f42; }
+  .comp-name { font-size:13px; font-weight:600; }
+  #competitors { max-height:400px; overflow-y:auto; }
+  .layout > div:last-child { position:sticky; top:170px; align-self:start; }
+  .selection-panel { font-size:13px; }
+  #selectionCount { font-weight:700; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>Besque Ad Intelligence</h1>
+    <div class="sub">Browse &amp; pick pool</div>
+  </div>
+  <a href="/">&larr; Back to Review</a>
+</header>
+<div class="bar">
+  <span style="font-size:13px;color:#888;">Competitor:</span>
+  <span id="selectedCompName" style="font-size:13px;font-weight:600;">None selected</span>
+  <span style="font-size:13px;color:#888;margin-left:12px;">Cap</span>
+  <input type="number" id="capInput" value="50" min="1" max="500">
+  <button class="run" id="fetchBtn" onclick="fetchPool()" disabled>Fetch</button>
+  <span class="status" id="fetchStatus">Select a competitor to begin.</span>
+</div>
+<div class="layout">
+  <div>
+    <h2>Pool</h2>
+    <div id="grid"><div class="empty">Select a competitor to browse its pool.</div></div>
+  </div>
+  <div>
+    <div class="comp-panel selection-panel">
+      <div><span id="selectionCount">0 selected</span></div>
+      <div style="font-size:11px;color:#999;margin-top:4px;">Selection is not saved yet - nothing is generated from it in this view.</div>
+    </div>
+    <div class="comp-panel">
+      <h2 style="margin-bottom:10px;">Competitors</h2>
+      <div id="competitors"><div class="empty">Loading…</div></div>
+    </div>
+  </div>
+</div>
+<script>
+function esc(s){return (s||"").toString().replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+
+let selectedCompetitorId = null;
+let selectedAdIds = new Set();
+
+async function loadCompetitors(){
+  const r = await fetch('/api/competitors');
+  const data = await r.json();
+  const el = document.getElementById('competitors');
+  if(!data.length){ el.innerHTML = '<div class="empty">No competitors yet</div>'; return; }
+  el.innerHTML = data.map(c => `
+    <div class="comp-row${c.id===selectedCompetitorId?' selected':''}" data-id="${c.id}" onclick="selectCompetitor(${c.id},'${esc(c.name).replace(/'/g,"\\'")}')">
+      <span class="comp-name">${esc(c.name)}</span>
+    </div>`).join('');
+}
+
+function selectCompetitor(id, name){
+  if(selectedCompetitorId === id){ selectedCompetitorId = null; }
+  else { selectedCompetitorId = id; }
+  document.getElementById('selectedCompName').textContent = selectedCompetitorId === null ? 'None selected' : name;
+  document.getElementById('fetchBtn').disabled = selectedCompetitorId === null;
+  document.getElementById('fetchStatus').textContent = selectedCompetitorId === null ? 'Select a competitor to begin.' : 'Ready.';
+  selectedAdIds = new Set();
+  updateSelectionCount();
+  loadCompetitors();
+  loadGrid();
+}
+
+let _fetchPoll = null;
+async function fetchPool(){
+  if(selectedCompetitorId === null){ return; }
+  const btn = document.getElementById('fetchBtn');
+  const status = document.getElementById('fetchStatus');
+  const cap = parseInt(document.getElementById('capInput').value, 10) || 50;
+  btn.disabled = true;
+  status.textContent = 'Starting fetch…';
+  const r = await fetch('/api/fetch', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({competitor_id: selectedCompetitorId, cap}),
+  });
+  const body = await r.json();
+  if(!r.ok){
+    status.textContent = 'Could not start fetch: ' + (body.error || r.status);
+    btn.disabled = false;
+    return;
+  }
+  status.textContent = 'Fetching…';
+  if(_fetchPoll){ clearInterval(_fetchPoll); }
+  _fetchPoll = setInterval(async () => {
+    const sr = await fetch('/api/fetch/status?competitor_id=' + selectedCompetitorId);
+    const s = await sr.json();
+    if(s.status === 'running' || s.status === 'none'){ return; }
+    clearInterval(_fetchPoll); _fetchPoll = null;
+    btn.disabled = false;
+    if(s.status === 'error'){
+      status.textContent = 'Fetch failed: ' + (s.error || 'unknown error');
+    } else {
+      const res = s.result || {};
+      const skippedTotal = Object.values(res.skipped || {}).reduce((a,b)=>a+b, 0);
+      status.textContent = `Fetch complete: ${res.stored||0} stored, ${skippedTotal} skipped (of ${res.fetched||0} fetched).`;
+      loadGrid();
+    }
+  }, 2000);
+}
+
+async function loadGrid(){
+  const el = document.getElementById('grid');
+  if(selectedCompetitorId === null){
+    el.innerHTML = '<div class="empty">Select a competitor to browse its pool.</div>';
+    return;
+  }
+  el.innerHTML = '<div class="empty">Loading…</div>';
+  const r = await fetch('/api/pool/cards?competitor_id=' + selectedCompetitorId + '&limit=200');
+  const data = await r.json();
+  const cards = data.cards || [];
+  if(!cards.length){ await renderEmptyExplanation(el); return; }
+  el.innerHTML = '<div class="pool-grid">' + cards.map(cardHtml).join('') + '</div>';
+  updateSelectionCount();
+}
+
+function daysLabel(days){
+  if(days === null || days === undefined){ return 'unknown age'; }
+  return days + (days === 1 ? ' day' : ' days') + ' running';
+}
+
+function cardHtml(c){
+  const sel = selectedAdIds.has(c.ad_id) ? ' selected' : '';
+  const active = c.is_active ? '<span class="badge approve">Active</span>' : '<span class="badge pending">Inactive</span>';
+  const title = (c.ad_creative_link_titles || [])[0] || '';
+  const body = (c.ad_creative_bodies || [])[0] || '';
+  return `<div class="pool-card${sel}" data-ad-id="${esc(c.ad_id)}" onclick="toggleSelect(this,'${esc(c.ad_id)}')">
+    <div class="pool-card-thumb">
+      <img loading="lazy" onerror="this.style.display='none'" src="${esc(c.image_url || '')}">
+      <span class="check-mark">&check;</span>
+    </div>
+    <div class="pool-card-body">
+      <div class="pool-card-head"><span class="media-type-badge">${esc(c.media_type)}</span>${active}</div>
+      <div class="pool-days">${daysLabel(c.days_running)}</div>
+      ${title ? `<div class="pool-title">${esc(title)}</div>` : ''}
+      ${body ? `<div class="pool-snippet">${esc(body)}</div>` : ''}
+      ${c.cta_text ? `<div class="pool-cta">${esc(c.cta_text)}</div>` : ''}
+      <div class="pool-meta">${esc(c.page_name)} &middot; fetched ${esc(c.fetched_at)}</div>
+    </div>
+  </div>`;
+}
+
+function toggleSelect(el, adId){
+  if(selectedAdIds.has(adId)){ selectedAdIds.delete(adId); el.classList.remove('selected'); }
+  else { selectedAdIds.add(adId); el.classList.add('selected'); }
+  updateSelectionCount();
+}
+
+function updateSelectionCount(){
+  document.getElementById('selectionCount').textContent = selectedAdIds.size + ' selected';
+}
+
+// The pool being empty is never rendered as a blank grid - it must say WHY,
+// using the last fetch job's per-reason skipped breakdown (Chunk 2A/3a), since a
+// silent blank reads as "broken" rather than "nothing survived the filter."
+async function renderEmptyExplanation(el){
+  let info = null;
+  try {
+    const sr = await fetch('/api/fetch/status?competitor_id=' + selectedCompetitorId);
+    info = await sr.json();
+  } catch(e) { /* fall through to the generic message below */ }
+
+  if(!info || info.status === 'none'){
+    el.innerHTML = '<div class="empty">No ads fetched yet for this competitor. Click Fetch to pull a pool.</div>';
+    return;
+  }
+  if(info.status === 'running'){
+    el.innerHTML = '<div class="empty">A fetch is currently running for this competitor…</div>';
+    return;
+  }
+  if(info.status === 'error'){
+    el.innerHTML = `<div class="pool-empty-reason">The last fetch for this competitor failed: ${esc(info.error || 'unknown error')}</div>`;
+    return;
+  }
+
+  // status === 'done' but the pool has zero rows under this filter
+  const result = info.result || {};
+  const skipped = result.skipped || {};
+  const skippedTotal = Object.values(skipped).reduce((a,b)=>a+b, 0);
+  if(!skippedTotal && !(result.stored || 0)){
+    el.innerHTML = '<div class="empty">The last fetch returned no ads at all - Apify may have found nothing for this page.</div>';
+    return;
+  }
+  const parts = Object.entries(skipped).filter(([k,v]) => v > 0).map(([k,v]) => `${v} ${k}`).join(', ');
+  // ~40 competitor rows currently hold a page NAME in the page_id column instead
+  // of a numeric Facebook page ID - that misconfiguration shows up as a wrong_page
+  // rejection dominating the breakdown, and it must be legible here, not a mystery.
+  let hint = '';
+  if((skipped.wrong_page || 0) > 0 && skippedTotal > 0 && skipped.wrong_page >= skippedTotal * 0.5){
+    hint = `<div class="pool-empty-hint">Most rejections were wrong_page. This usually means this competitor's page_id field holds a page NAME rather than a numeric Facebook page ID - check its Settings entry.</div>`;
+  }
+  el.innerHTML = `<div class="pool-empty-reason">Last fetch found ${result.fetched || 0} ad(s), ${result.stored || 0} usable and stored. Rejected: ${esc(parts) || 'none'}.${hint}</div>`;
+}
+
+loadCompetitors();
+</script>
+</body>
+</html>

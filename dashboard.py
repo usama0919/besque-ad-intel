@@ -3,6 +3,7 @@ Read-only view + approve/reject + run trigger. Uses existing pipeline/db.
 """
 import os
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
@@ -53,6 +54,15 @@ def home(request: Request):
             "production_styles": validator.production_styles(),
         }
     )
+
+
+@app.get("/pool", response_class=HTMLResponse)
+def pool_page(request: Request):
+    """Chunk 3: the browse-and-pick grid, on its own route/template rather than
+    folded into dashboard.html - a separate page keeps the existing review
+    workflow untouched while this one gets its own competitor selector, Fetch
+    trigger, and grid, all reading GET /api/pool/cards and POST+GET /api/fetch."""
+    return templates.TemplateResponse(request, "pool.html", {})
 
 
 @app.get("/api/artifacts")
@@ -676,9 +686,10 @@ def api_delete_competitor(competitor_id: int):
 @app.get("/api/pool")
 def api_pool(competitor_id: int = None, status: str = "pool", limit: int = 100, offset: int = 0):
     """Dumb passthrough onto scraped_ads - deliberately does NOT derive/flatten/select
-    "card fields" out of raw_meta, that decision is chunk 3's and is blocked on an open
-    question. limit defaults to 100 (explicit, not the get_artifacts_full-style 50) and
-    is a real SQL LIMIT/OFFSET via dedupe.get_scraped_ads, not a fetch-all-then-slice."""
+    "card fields" out of raw_meta. The Chunk 3 grid gets that from the SEPARATE
+    GET /api/pool/cards below, so this endpoint's own contract (raw_meta in full,
+    real SQL LIMIT/OFFSET) never changes underneath an existing caller. limit
+    defaults to 100 (explicit, not the get_artifacts_full-style 50)."""
     dedupe.init_scraped_ads()
     rows = dedupe.get_scraped_ads(competitor_id=competitor_id, status=status, limit=limit, offset=offset)
     total = dedupe.count_scraped_ads(competitor_id=competitor_id, status=status)
@@ -701,6 +712,80 @@ def api_pool(competitor_id: int = None, status: str = "pool", limit: int = 100, 
             for r in rows
         ],
     })
+
+
+def _parse_apify_date(value):
+    """Parse one of Apify's ad_delivery_*_time strings into a datetime, or None if
+    missing/unparseable. Callers must treat None as "unknown", never coerce it to
+    a fake 0 - a missing start_time means "we can't judge this ad's age", not
+    "just started"."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+
+
+def _days_running(start_raw, stop_raw):
+    """(min(now, stop_time) if stop_time else now) - start_time, in whole days.
+    The min() against now is deliberate: a scheduled FUTURE stop_time (an ad
+    scheduled to keep running) must never inflate the figure by counting days
+    that haven't happened yet. Returns None if start_time is missing/unparseable -
+    the caller sorts these last, never treats None as 0 days. Negative results
+    (a malformed/future start_time) are clamped to 0 rather than shown as
+    negative, which would misread as "not running yet" rather than "bad data"."""
+    start = _parse_apify_date(start_raw)
+    if start is None:
+        return None
+    now = datetime.now(timezone.utc) if start.tzinfo is not None else datetime.utcnow()
+    stop = _parse_apify_date(stop_raw)
+    if stop is not None and (stop.tzinfo is None) != (start.tzinfo is None):
+        # Mixed aware/naive inputs (shouldn't happen from one source, but Apify's
+        # exact format isn't guaranteed) - normalise stop to start's awareness
+        # rather than letting the subtraction below raise.
+        stop = stop.replace(tzinfo=timezone.utc) if start.tzinfo is not None else stop.replace(tzinfo=None)
+    end = min(now, stop) if stop is not None else now
+    return max((end - start).days, 0)
+
+
+@app.get("/api/pool/cards")
+def api_pool_cards(competitor_id: int = None, status: str = "pool", limit: int = 200):
+    """Flattened, judgeable-fields-only view of the pool for the Chunk 3
+    browse-and-pick grid - deliberately a SEPARATE endpoint from GET /api/pool
+    above (which stays a dumb raw_meta-in-full passthrough) rather than a query
+    flag on it, so /api/pool's existing callers can never silently get a
+    different response shape from the same URL. This one derives exactly the
+    fields the team judges an ad by from raw_meta SERVER-SIDE and ships only
+    those to the browser - never the whole jsonb blob.
+
+    Sorted by days_running descending; ads with no parseable start_time sort
+    last (never treated as 0 days - see _days_running). limit is explicit
+    (default 200, no hardcoded 50) and applied AFTER sorting: the pool for this
+    filter is fetched and sorted in full first (dedupe.get_scraped_ads with no
+    SQL limit), so limiting here never truncates by database row order instead
+    of by days_running."""
+    dedupe.init_scraped_ads()
+    rows = dedupe.get_scraped_ads(competitor_id=competitor_id, status=status, limit=None)
+    cards = []
+    for r in rows:
+        meta = r.get("raw_meta") or {}
+        cards.append({
+            "ad_id": r["ad_id"],
+            "image_url": r["image_url"],
+            "media_type": r.get("media_type") or "",
+            "is_active": meta.get("is_active"),
+            "days_running": _days_running(meta.get("ad_delivery_start_time"), meta.get("ad_delivery_stop_time")),
+            "ad_delivery_start_time": meta.get("ad_delivery_start_time"),
+            "ad_delivery_stop_time": meta.get("ad_delivery_stop_time"),
+            "ad_creative_bodies": meta.get("ad_creative_bodies") or [],
+            "ad_creative_link_titles": meta.get("ad_creative_link_titles") or [],
+            "cta_text": meta.get("cta_text"),
+            "page_name": meta.get("page_name") or "",
+            "fetched_at": r["fetched_at"].strftime("%Y-%m-%d %H:%M:%S") if r.get("fetched_at") else "",
+        })
+    cards.sort(key=lambda c: (c["days_running"] is None, -(c["days_running"] or 0)))
+    return JSONResponse({"total": len(cards), "limit": limit, "cards": cards[:limit]})
 
 
 @app.post("/api/fetch")
