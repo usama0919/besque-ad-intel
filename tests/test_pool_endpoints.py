@@ -95,21 +95,30 @@ def test_api_pool_empty_for_unknown_competitor():
 
 # ---- POST /api/fetch ----
 
-def test_api_fetch_pool_stores_rows_and_returns_dict_verbatim(monkeypatch):
+def test_api_fetch_pool_stores_rows_and_wraps_result_in_ok_envelope(monkeypatch):
+    """Supersedes the earlier "verbatim" contract: success now uses the dashboard's
+    normal {"ok": True, ...} envelope, with fetch_pool's dict nested under "result" -
+    including its per-reason skipped breakdown, passed through unchanged."""
     cid = _make_competitor()
     ad_id = f"POOL_{uuid.uuid4().hex[:8]}"
-    pairs = [
-        ({"ad_archive_id": ad_id, "impressions": None}, {"ad_id": ad_id, "image_url": "http://x/1.jpg", "page_name": "brand"}),
-        ({"ad_archive_id": "rejected"}, None),
+    triples = [
+        ({"ad_archive_id": ad_id, "impressions": None},
+         {"ad_id": ad_id, "image_url": "http://x/1.jpg", "page_name": "brand"}, None),
+        ({"ad_archive_id": "rejected"}, None, "wrong_page"),
     ]
-    monkeypatch.setattr(scrape, "scrape_ads_with_raw", lambda name, max_results=None, page_id=None: pairs)
+    monkeypatch.setattr(scrape, "scrape_ads_with_raw", lambda name, max_results=None, page_id=None: triples)
     try:
         client = TestClient(dashboard.app)
         r = client.post("/api/fetch", json={"competitor_id": cid, "cap": 10})
         assert r.status_code == 200
         body = r.json()
-        # verbatim fetch_pool dict - no {"ok": ...} wrapper on success
-        assert body == {"fetched": 2, "stored": 1, "skipped": 1}
+        assert body == {
+            "ok": True,
+            "result": {
+                "fetched": 2, "stored": 1,
+                "skipped": {"not_image": 0, "wrong_page": 1, "no_image_url": 0, "duplicate": 0},
+            },
+        }
         pool_rows = dedupe.get_scraped_ads(competitor_id=cid)
         assert len(pool_rows) == 1
         assert pool_rows[0]["ad_id"] == ad_id
@@ -166,8 +175,8 @@ def test_api_fetch_pool_never_touches_seen_ads_or_artifacts(monkeypatch):
     dedupe.init_db()
     cid = _make_competitor()
     ad_id = f"POOL_{uuid.uuid4().hex[:8]}"
-    pairs = [({"ad_archive_id": ad_id}, {"ad_id": ad_id, "image_url": "http://x/1.jpg", "page_name": "brand"})]
-    monkeypatch.setattr(scrape, "scrape_ads_with_raw", lambda name, max_results=None, page_id=None: pairs)
+    triples = [({"ad_archive_id": ad_id}, {"ad_id": ad_id, "image_url": "http://x/1.jpg", "page_name": "brand"}, None)]
+    monkeypatch.setattr(scrape, "scrape_ads_with_raw", lambda name, max_results=None, page_id=None: triples)
     try:
         client = TestClient(dashboard.app)
         client.post("/api/fetch", json={"competitor_id": cid, "cap": 10})

@@ -71,20 +71,33 @@ def fetch_pool(competitor_id, cap=50):
     dedupe.upsert_scraped_ad - a direct upsert on scraped_ads' own unique index, not
     a read-modify-write pass-through like update_competitor.
 
-    Returns {"fetched": n_raw, "stored": n_stored, "skipped": n_filtered}: n_raw is
-    every record Apify's dataset returned before the image/page filter, n_filtered is
-    how many of those the filter rejected, n_stored is how many survivors were
-    upserted into the pool."""
+    Returns {"fetched": n_raw, "stored": n_stored, "skipped": {reason: n, ...}}.
+    n_raw is every record Apify's dataset returned before the image/page filter;
+    skipped breaks down by scrape.py's REJECT_* reason (not_image/wrong_page/
+    no_image_url) plus "duplicate" - the same ad_id appearing twice in ONE pull,
+    which only fetch_pool can detect (scrape.py classifies one record at a time,
+    with no visibility into the rest of the batch) - counted here, never upserted
+    twice."""
     competitor = next((c for c in dedupe.get_competitors() if c["id"] == competitor_id), None)
     if not competitor:
         raise ValueError(f"competitor {competitor_id} not found")
     dedupe.init_scraped_ads()
-    pairs = scrape.scrape_ads_with_raw(competitor["name"], max_results=cap, page_id=competitor.get("page_id"))
-    survivors = [(mapped, raw) for raw, mapped in pairs if mapped]
-    for mapped, raw in survivors:
+    triples = scrape.scrape_ads_with_raw(competitor["name"], max_results=cap, page_id=competitor.get("page_id"))
+    skipped = {"not_image": 0, "wrong_page": 0, "no_image_url": 0, "duplicate": 0}
+    seen_ad_ids = set()
+    stored = 0
+    for raw, mapped, reason in triples:
+        if mapped is None:
+            skipped[reason] = skipped.get(reason, 0) + 1
+            continue
+        if mapped["ad_id"] in seen_ad_ids:
+            skipped["duplicate"] += 1
+            continue
+        seen_ad_ids.add(mapped["ad_id"])
         dedupe.upsert_scraped_ad(ad_id=mapped["ad_id"], competitor_id=competitor_id,
                                   image_url=mapped["image_url"], raw_meta=raw)
-    return {"fetched": len(pairs), "stored": len(survivors), "skipped": len(pairs) - len(survivors)}
+        stored += 1
+    return {"fetched": len(triples), "stored": stored, "skipped": skipped}
 
 
 def process_ad(ad, product=None, reference_images=None, messaging_angle=None,

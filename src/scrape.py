@@ -100,14 +100,30 @@ def _page_matches(page_name, search_term):
     return overlap >= 0.6
 
 
+# Reason keys a rejected record can carry - shared vocabulary between scrape.py's
+# classification and pipeline.fetch_pool's per-reason skipped breakdown (Chunk 2,
+# Part A/3a). "duplicate" is never produced here - it's a pool-level concept (same
+# ad_id twice in one pull) that only fetch_pool can detect, since a single record's
+# classification has no visibility into the rest of the batch.
+REJECT_NOT_IMAGE = "not_image"
+REJECT_WRONG_PAGE = "wrong_page"
+REJECT_NO_IMAGE_URL = "no_image_url"
+
+
 def _scrape_raw(search_term, max_results=None, image_only=True, page_id=None):
     """Shared core: call the Apify actor and iterate the dataset, applying the same
     image-only / page-match filter every caller must use. Returns a list of
-    (raw, mapped) pairs for EVERY record Apify returned - mapped is None for
-    anything filtered out (video ad, missing ad_id, page mismatch). scrape_ads and
-    pipeline.fetch_pool (via scrape_ads_with_raw) both sit on top of this single
-    pass rather than each re-implementing the filter, so the two can never drift
-    apart the way update_competitor's read-modify-write once did for page_ids."""
+    (raw, mapped, reason) triples for EVERY record Apify returned - mapped is None
+    for anything filtered out, and reason is one of the REJECT_* constants above
+    (None for survivors). scrape_ads and pipeline.fetch_pool (via
+    scrape_ads_with_raw) both sit on top of this single pass rather than each
+    re-implementing the filter, so the two can never drift apart the way
+    update_competitor's read-modify-write once did for page_ids.
+
+    A record missing ad_id is folded into REJECT_NO_IMAGE_URL - the caller-facing
+    reason vocabulary has no separate bucket for it (it's a defensive branch, never
+    observed in practice), and "this record can't produce a usable mapped ad" is
+    the accurate characterization either way."""
     token = os.getenv("APIFY_TOKEN")
     if not token:
         raise ValueError("APIFY_TOKEN must be set")
@@ -127,15 +143,25 @@ def _scrape_raw(search_term, max_results=None, image_only=True, page_id=None):
     results = []
     for raw in client.dataset(run.default_dataset_id).iterate_items():
         if image_only and raw.get("media_type") != "IMAGE":
-            results.append((raw, None))
+            # Previously silent (a bare `continue`, no print) - this is the single
+            # biggest rejection bucket in practice (DCO/VIDEO/CAROUSEL ads), and it
+            # was invisible in every log until now.
+            print(f"[scrape] rejected ad {raw.get('ad_archive_id','?')}: not an IMAGE "
+                  f"(media_type={raw.get('media_type')!r})")
+            results.append((raw, None, REJECT_NOT_IMAGE))
             continue
         mapped = _map_ad(raw)
         if mapped["ad_id"] and mapped["image_url"] and (use_page or _page_matches(mapped.get("page_name", ""), search_term)):
-            results.append((raw, mapped))
+            results.append((raw, mapped, None))
         else:
-            reason = "no ad_id" if not mapped["ad_id"] else ("no image (video ad?)" if not mapped["image_url"] else f"page mismatch: got page_name={mapped.get('page_name','')!r} vs search={search_term!r}")
-            print(f"[scrape] rejected ad {mapped.get('ad_id','?')}: {reason}")
-            results.append((raw, None))
+            if not mapped["ad_id"] or not mapped["image_url"]:
+                reason_key = REJECT_NO_IMAGE_URL
+                reason_text = "no ad_id" if not mapped["ad_id"] else "no image (video ad?)"
+            else:
+                reason_key = REJECT_WRONG_PAGE
+                reason_text = f"page mismatch: got page_name={mapped.get('page_name','')!r} vs search={search_term!r}"
+            print(f"[scrape] rejected ad {mapped.get('ad_id','?')}: {reason_text}")
+            results.append((raw, None, reason_key))
     return results
 
 
@@ -151,13 +177,14 @@ def scrape_ads(search_term, max_results=None, image_only=True, page_id=None):
     candidate pool fetched before it. Scraping wide and processing narrow is the
     point - do not couple them again.
     """
-    return [mapped for raw, mapped in _scrape_raw(search_term, max_results, image_only, page_id) if mapped]
+    return [mapped for raw, mapped, reason in _scrape_raw(search_term, max_results, image_only, page_id) if mapped]
 
 
 def scrape_ads_with_raw(search_term, max_results=None, image_only=True, page_id=None):
-    """Like _scrape_raw, but named for external callers: returns (raw, mapped) pairs
-    for EVERY record Apify returned (mapped=None for anything the filter rejected).
-    Used by pipeline.fetch_pool, which needs the full unmodified Apify record to
-    persist as raw_meta and needs accurate fetched/skipped counts - scrape_ads alone
-    only exposes survivors."""
+    """Like _scrape_raw, but named for external callers: returns (raw, mapped, reason)
+    triples for EVERY record Apify returned (mapped=None and reason set to one of
+    the REJECT_* constants for anything the filter rejected). Used by
+    pipeline.fetch_pool, which needs the full unmodified Apify record to persist as
+    raw_meta and needs the per-reason skipped breakdown - scrape_ads alone only
+    exposes survivors with no reason at all."""
     return _scrape_raw(search_term, max_results, image_only, page_id)

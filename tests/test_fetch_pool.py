@@ -19,20 +19,24 @@ def _cleanup(competitor_id):
     dedupe.delete_competitor(competitor_id)
 
 
-def test_fetch_pool_stores_survivors_and_reports_counts(monkeypatch):
+def test_fetch_pool_stores_survivors_and_reports_per_reason_skipped(monkeypatch):
     cid = _make_competitor()
     ad_id_1 = f"FP_{uuid.uuid4().hex[:8]}"
     ad_id_2 = f"FP_{uuid.uuid4().hex[:8]}"
-    pairs = [
+    triples = [
         ({"ad_archive_id": ad_id_1, "impressions": {"lower_bound": "100"}},
-         {"ad_id": ad_id_1, "image_url": "http://x/1.jpg", "page_name": "brand"}),
-        ({"ad_archive_id": "rejected"}, None),  # filtered out (e.g. page mismatch)
-        ({"ad_archive_id": ad_id_2}, {"ad_id": ad_id_2, "image_url": "http://x/2.jpg", "page_name": "brand"}),
+         {"ad_id": ad_id_1, "image_url": "http://x/1.jpg", "page_name": "brand"}, None),
+        ({"ad_archive_id": "rejected1"}, None, "wrong_page"),
+        ({"ad_archive_id": "rejected2"}, None, "not_image"),
+        ({"ad_archive_id": ad_id_2}, {"ad_id": ad_id_2, "image_url": "http://x/2.jpg", "page_name": "brand"}, None),
     ]
-    monkeypatch.setattr(scrape, "scrape_ads_with_raw", lambda name, max_results=None, page_id=None: pairs)
+    monkeypatch.setattr(scrape, "scrape_ads_with_raw", lambda name, max_results=None, page_id=None: triples)
     try:
         result = pipeline.fetch_pool(cid, cap=10)
-        assert result == {"fetched": 3, "stored": 2, "skipped": 1}
+        assert result == {
+            "fetched": 4, "stored": 2,
+            "skipped": {"not_image": 1, "wrong_page": 1, "no_image_url": 0, "duplicate": 0},
+        }
         rows = {r["ad_id"]: r for r in dedupe.get_scraped_ads(competitor_id=cid)}
         assert set(rows) == {ad_id_1, ad_id_2}
         assert rows[ad_id_1]["image_url"] == "http://x/1.jpg"
@@ -43,17 +47,41 @@ def test_fetch_pool_stores_survivors_and_reports_counts(monkeypatch):
         _cleanup(cid)
 
 
+def test_fetch_pool_counts_and_skips_a_within_pull_duplicate(monkeypatch):
+    """The same ad_id appearing twice in one Apify pull (e.g. pagination overlap)
+    must be counted under skipped.duplicate and stored exactly once, never twice."""
+    cid = _make_competitor()
+    ad_id = f"FP_{uuid.uuid4().hex[:8]}"
+    triples = [
+        ({"ad_archive_id": ad_id, "impressions": {"lower_bound": "100"}},
+         {"ad_id": ad_id, "image_url": "http://x/1.jpg", "page_name": "brand"}, None),
+        ({"ad_archive_id": ad_id, "impressions": {"lower_bound": "999"}},
+         {"ad_id": ad_id, "image_url": "http://x/1.jpg", "page_name": "brand"}, None),
+    ]
+    monkeypatch.setattr(scrape, "scrape_ads_with_raw", lambda name, max_results=None, page_id=None: triples)
+    try:
+        result = pipeline.fetch_pool(cid, cap=10)
+        assert result == {
+            "fetched": 2, "stored": 1,
+            "skipped": {"not_image": 0, "wrong_page": 0, "no_image_url": 0, "duplicate": 1},
+        }
+        rows = dedupe.get_scraped_ads(competitor_id=cid)
+        assert len(rows) == 1
+    finally:
+        _cleanup(cid)
+
+
 def test_fetch_pool_upsert_refreshes_raw_meta_without_duplicating_row(monkeypatch):
     cid = _make_competitor()
     ad_id = f"FP_{uuid.uuid4().hex[:8]}"
-    first_pairs = [({"ad_archive_id": ad_id, "impressions": {"lower_bound": "100"}},
-                    {"ad_id": ad_id, "image_url": "http://x/1.jpg", "page_name": "brand"})]
-    second_pairs = [({"ad_archive_id": ad_id, "impressions": {"lower_bound": "200"}},
-                     {"ad_id": ad_id, "image_url": "http://x/1.jpg", "page_name": "brand"})]
+    first_triples = [({"ad_archive_id": ad_id, "impressions": {"lower_bound": "100"}},
+                       {"ad_id": ad_id, "image_url": "http://x/1.jpg", "page_name": "brand"}, None)]
+    second_triples = [({"ad_archive_id": ad_id, "impressions": {"lower_bound": "200"}},
+                        {"ad_id": ad_id, "image_url": "http://x/1.jpg", "page_name": "brand"}, None)]
     try:
-        monkeypatch.setattr(scrape, "scrape_ads_with_raw", lambda name, max_results=None, page_id=None: first_pairs)
+        monkeypatch.setattr(scrape, "scrape_ads_with_raw", lambda name, max_results=None, page_id=None: first_triples)
         pipeline.fetch_pool(cid, cap=10)
-        monkeypatch.setattr(scrape, "scrape_ads_with_raw", lambda name, max_results=None, page_id=None: second_pairs)
+        monkeypatch.setattr(scrape, "scrape_ads_with_raw", lambda name, max_results=None, page_id=None: second_triples)
         pipeline.fetch_pool(cid, cap=10)
         rows = dedupe.get_scraped_ads(competitor_id=cid)
         assert len(rows) == 1
@@ -77,8 +105,8 @@ def test_fetch_pool_never_touches_seen_ads(monkeypatch):
     dedupe.init_db()
     cid = _make_competitor()
     ad_id = f"FP_{uuid.uuid4().hex[:8]}"
-    pairs = [({"ad_archive_id": ad_id}, {"ad_id": ad_id, "image_url": "http://x/1.jpg", "page_name": "brand"})]
-    monkeypatch.setattr(scrape, "scrape_ads_with_raw", lambda name, max_results=None, page_id=None: pairs)
+    triples = [({"ad_archive_id": ad_id}, {"ad_id": ad_id, "image_url": "http://x/1.jpg", "page_name": "brand"}, None)]
+    monkeypatch.setattr(scrape, "scrape_ads_with_raw", lambda name, max_results=None, page_id=None: triples)
     try:
         pipeline.fetch_pool(cid, cap=10)
         assert dedupe.is_new(ad_id) is True

@@ -704,11 +704,13 @@ def api_pool(competitor_id: int = None, status: str = "pool", limit: int = 100, 
 async def api_fetch_pool(request: Request):
     """Trigger pipeline.fetch_pool for one competitor - fetch-and-store only, same
     caveats as fetch_pool itself (no deconstruct/generation, no seen_ads/artifacts
-    writes). Success response is the fetch_pool dict RETURNED VERBATIM (not wrapped
-    in the usual {"ok": ...} shape) - deliberate, so the caller sees exactly what
-    fetch_pool produced, including its skipped breakdown, with nothing reshaped in
-    between. Errors still use the dashboard's normal {"ok": False, "error": ...}
-    convention, since fetch_pool itself never returns an error shape of its own.
+    writes). Success response uses the dashboard's normal {"ok": True, ...}
+    envelope, with the fetch_pool dict nested under "result" - supersedes this
+    endpoint's original "return fetch_pool's dict verbatim" shape, since the
+    Chunk 3 grid needs a consistent envelope across every /api/ endpoint it
+    consumes more than it needs this one endpoint to be unwrapped. skipped is now
+    a per-reason breakdown dict (not_image/wrong_page/no_image_url/duplicate) -
+    fetch_pool's own change, passed through here unchanged.
 
     Runs pipeline.fetch_pool SYNCHRONOUSLY - it blocks on a live Apify call (observed
     ~4.5 minutes), so this request does not return until that finishes. See the
@@ -735,7 +737,7 @@ async def api_fetch_pool(request: Request):
         result = pipeline.fetch_pool(competitor_id, cap=cap)
     except ValueError as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=404)
-    return JSONResponse(result)
+    return JSONResponse({"ok": True, "result": result})
 
 
 @app.get("/api/stats")
