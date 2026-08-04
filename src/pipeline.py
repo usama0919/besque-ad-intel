@@ -101,11 +101,117 @@ def fetch_pool(competitor_id, cap=50):
     return {"fetched": len(triples), "stored": stored, "skipped": skipped}
 
 
+def generate_from_selection(ad_ids, angle_id=None, body_area=None, offer_text=None,
+                             instruction=None, product_id=None, should_stop=None):
+    """Generate drafts for an EXPLICIT list of already-fetched ads, rather than
+    driving generation off scrape order. No Apify call - fetch_pool already
+    stored the pool; this only reads scraped_ads and calls process_ad per
+    selected ad, reusing it rather than duplicating its body (run_once's own
+    inner loop and this one both just call process_ad).
+
+    Deconstruct (a paid vision call) runs HERE, per selected ad, AFTER the
+    operator's selection - never over the whole pool. That separation is the
+    entire point of splitting fetch (Chunk 2) from generate (this chunk): the
+    pool can be browsed for free, and only the ads actually picked cost anything.
+
+    ad_ids refer to scraped_ads.ad_id (the Apify ad_archive_id) - matching what
+    the Chunk 3 grid surfaces per card and what Chunk 5 will pass through, NOT
+    scraped_ads.id. Each row's `ad` dict is reconstructed via scrape._map_ad on
+    its stored raw_meta - the exact same mapping scrape_ads itself produces, so
+    process_ad behaves identically regardless of which path fed it. An ad_id with
+    no matching scraped_ads row is recorded as "failed" and skipped, not raised -
+    one bad id in a multi-ad selection must not abort the rest.
+
+    realism/text_in_image/include_product/edit_mode/check_output/retheme_colours
+    are NOT threaded here (no UI in this chunk to set them) - process_ad runs
+    with ITS OWN defaults (generate mode, no in-image text, product included, no
+    critic). Chunk 5 (wiring the grid) is where these would need to reach this
+    function if the operator is meant to control them per selection.
+
+    should_stop, if given, is checked BETWEEN ads (same as run_once) AND is
+    forwarded into process_ad, which checks it once more immediately before the
+    paid Gemini call (see process_ad's own should_stop docstring) - the same
+    responsiveness guarantee run_once provides on its own path, verified
+    reachable here by test.
+
+    Explicit selection deliberately overrides the seen_ads skip
+    (process_ad(explicit_selection=True)) - the operator picked this ad on
+    purpose, so "already seen" must never silently no-op it. mark_seen still
+    runs at the end exactly as normal, so a LATER non-explicit run (run_once)
+    still treats it as seen.
+
+    THIS DOES NOT, and cannot from here, override save_artifact's own SEPARATE
+    gate in dedupe.py: save_artifact checks artifacts for an existing
+    (ad_id, angle_id) row and silently no-ops if one exists, UNLESS the
+    module-level FORCE_REPROCESS env var is set - a flag read once at import
+    time (see dedupe.py's own top-of-file note), not a per-call parameter this
+    function can pass through. Re-selecting an ad that already has a saved
+    artifact for this angle will still silently produce no new row unless
+    FORCE_REPROCESS=1 is ALSO set for the process. This is a genuine conflict
+    between "explicit selection overrides seen_ads" and "the artifacts gate is
+    separate and untouched" - reported here (and in CLAUDE.md) rather than
+    worked around, since forcing FORCE_REPROCESS behavior from inside this
+    function would mean silently replacing an existing draft with no backup
+    (dedupe.py's own documented risk for that flag), a much bigger decision than
+    this chunk's scope.
+
+    Each selected row's scraped_ads.status moves off 'pool' as it progresses:
+    'generating' immediately before process_ad runs, then the ad's own result
+    string ('processed'/'skipped'/'failed') once it returns - so the grid can
+    show what's already been generated from without a separate join.
+
+    Returns {"processed": n, "skipped": n, "failed": n, "by_ad": {ad_id: result}}."""
+    from src.config_check import validate_config
+    validate_config()
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    dedupe.init_scraped_ads()
+    dedupe.init_angles()
+    dedupe.init_products()
+
+    product = dedupe.get_product(product_id) if product_id else None
+    messaging_angle = dedupe.get_angle(angle_id) if angle_id else None
+    reference_images = []
+    if product:
+        reference_images, reference_warning = fetch_reference_images(product)
+        if reference_warning:
+            kind, detail = reference_warning
+            log.warning("%s: %s", kind, detail)
+            dedupe.init_pipeline_warnings()
+            dedupe.record_warning(kind, detail)
+    _stop = should_stop or (lambda: False)
+
+    rows_by_ad_id = dedupe.get_scraped_ads_by_ad_ids(ad_ids)
+    summary = {"processed": 0, "skipped": 0, "failed": 0, "by_ad": {}}
+    for ad_id in ad_ids:
+        if _stop():
+            log.info("Stop requested, halting selection run.")
+            break
+        row = rows_by_ad_id.get(ad_id)
+        if row is None:
+            log.warning("Selected ad %s not found in scraped_ads, marking failed.", ad_id)
+            summary["failed"] += 1
+            summary["by_ad"][ad_id] = "failed"
+            continue
+        ad = scrape._map_ad(row.get("raw_meta") or {})
+        dedupe.update_scraped_ad_status(ad_id, row["competitor_id"], "generating")
+        result = process_ad(
+            ad, product=product, reference_images=reference_images, messaging_angle=messaging_angle,
+            body_area=body_area, offer_text=offer_text, operator_instruction=instruction,
+            should_stop=should_stop, explicit_selection=True,
+        )
+        dedupe.update_scraped_ad_status(ad_id, row["competitor_id"], result)
+        summary[result] += 1
+        summary["by_ad"][ad_id] = result
+    log.info("generate_from_selection complete: %s", summary)
+    return summary
+
+
 def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
                 realism=None, text_in_image=False, include_product=True,
                 body_area=None, offer_text=None, edit_mode=False, operator_instruction=None,
                 check_output=False, retheme_colours=True, ad_index=None, total_ads=None,
-                should_stop=None):
+                should_stop=None, explicit_selection=False):
     """Run one ad through the full pipeline. Returns processed/skipped/failed.
     messaging_angle, if given, is a resolved angle dict (dedupe.get_angle's shape) - it
     changes the dedup identity of this ad to (ad_id, angle_id) instead of ad_id alone, so
@@ -173,7 +279,17 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
     Forwarded here and checked once more, immediately before generate_image, so a stop
     request can't be missed for the cost of one full image generation. None (the default,
     e.g. a test or the writer calling process_ad directly) behaves as "never stop," same
-    fallback run_once itself already uses for its own should_stop."""
+    fallback run_once itself already uses for its own should_stop.
+
+    explicit_selection (Chunk 4, generate_from_selection): the operator picked THIS ad
+    on purpose from the pool grid, so the seen_ads skip below must not silently no-op it -
+    True bypasses that check regardless of FORCE_REPROCESS. mark_seen still runs at the
+    end exactly as normal (unchanged), so a LATER non-explicit run (run_once) still treats
+    it as seen. This does NOT bypass save_artifact's own SEPARATE artifacts-table gate
+    (dedupe.py's FORCE_REPROCESS-only check) - re-selecting an ad that already has a
+    saved artifact for this angle still silently no-ops at the save step unless
+    FORCE_REPROCESS=1 is ALSO set. That's a real, reported (not patched) gap between the
+    two gates - see CLAUDE.md and generate_from_selection's own docstring."""
     ad_id = ad.get("ad_id")
     if not ad_id:
         return "failed"
@@ -186,7 +302,7 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
         # angle-tagged run against an already-processed ad is EXPECTED to add a second
         # row alongside the existing NULL-angle one, not replace it - that will look like
         # duplication the first time it's seen; it is correct, not a bug to "fix".
-        if not FORCE_REPROCESS and not dedupe.is_new(ad_id, angle_id):
+        if not explicit_selection and not FORCE_REPROCESS and not dedupe.is_new(ad_id, angle_id):
             log.info("Ad %s already seen for angle_id=%s, skipping", ad_id, angle_id)
             return "skipped"
 
@@ -430,6 +546,14 @@ def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product
     should_stop is an optional zero-arg callable checked between ads/competitors
     to cooperatively halt the run early.
 
+    max_per_competitor caps ATTEMPTS per competitor, not successes (Chunk 4 fix,
+    2026-08-06) - every ad that clears the cheap already-seen check is a real paid
+    deconstruct call and counts against the cap whether it ends up processed,
+    hard-blocked, or failed. The old success-only count let the loop keep trying
+    ad after ad past the requested cap until enough succeeded (observed live as a
+    1-ad request processing nine) - this matters more now that the widened
+    scrape.py filter has roughly doubled the candidate pool per competitor.
+
     angle_id, if given, resolves to a messaging angle applied to every ad in this run -
     it changes dedup identity to (ad_id, angle_id), so an ad already processed with no
     angle (or a different angle) will be processed again under this one, producing an
@@ -525,14 +649,28 @@ def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product
             comp_summary["error"] = str(e)
             summary["by_competitor"][name] = comp_summary
             continue
-        processed_this_comp = 0
+        attempts_this_comp = 0
         for ad_index, ad in enumerate(ads, 1):
             if should_stop():
                 log.info("Stop requested, halting run.")
                 break
-            if processed_this_comp >= max_per_competitor:
-                log.info("Reached cap of %s new ads for %s, stopping.", max_per_competitor, name)
+            if attempts_this_comp >= max_per_competitor:
+                log.info("Reached cap of %s attempted ads for %s, stopping.", max_per_competitor, name)
                 break
+            # Attempt-counting, not success-counting (2026-08-06 fix): a cheap
+            # already-seen skip costs nothing and must not consume the budget, but
+            # ANY ad that reaches deconstruct - whether it ends up processed,
+            # hard-blocked, or failed - is a real PAID attempt and must count against
+            # the cap. Counting only "processed" (the old check) let the loop keep
+            # burning paid calls on ad after ad past the requested cap until enough
+            # of them happened to succeed - observed live as a 1-ad request
+            # processing nine. This mirrors process_ad's own seen_ads check exactly
+            # (read-only, not a second gating decision - process_ad still makes the
+            # real call) purely to know whether the upcoming call is free or paid.
+            ad_id = ad.get("ad_id")
+            already_seen = bool(ad_id) and not FORCE_REPROCESS and not dedupe.is_new(ad_id, angle_id)
+            if not already_seen:
+                attempts_this_comp += 1
             result = process_ad(ad, product=product, reference_images=reference_images, messaging_angle=messaging_angle,
                                 realism=realism, text_in_image=text_in_image, include_product=include_product,
                                 body_area=body_area, offer_text=offer_text, edit_mode=edit_mode,
@@ -541,8 +679,6 @@ def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product
                                 should_stop=should_stop)
             summary[result] += 1
             comp_summary[result] += 1
-            if result == "processed":
-                processed_this_comp += 1
         summary["by_competitor"][name] = comp_summary
 
     dedupe.set_run_progress("", 0, 0)  # clear - a finished run must not leave a stale entry

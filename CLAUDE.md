@@ -191,6 +191,25 @@ blueprint reused). Final failure is recorded via
 - No destructive DB or filesystem commands without asking; dry-run and show counts first.
 
 ## Known gaps (as of 2026-08-04)
+- **`DATABASE_URL` in `.env` pointing at a raw IP is correct, not a misconfiguration** —
+  that's the documented local-dev route to Cloud SQL; Cloud Run itself connects via the
+  socket path instead. `.env.example`'s `localhost` value is the thing that's out of date,
+  not `.env`. Do not "fix" `.env` or the connection logic to point at localhost.
+- **Real-DB tests run against that same Cloud SQL instance, not an isolated test DB** — the
+  only safety net is try/finally cleanup in each test, not connection-level isolation. A
+  leak found 2026-08-04: `test_dashboard.py` has at least one passing test (inserts an
+  artifact with `page_name="TestBrand"`, `ad_id` prefixed `ART_`) whose insert isn't
+  wrapped in the same try/finally the equivalent `test_core.py` tests use — it recurred on
+  every full-suite run that day, one orphaned row per run, manually deleted each time.
+  Scale check the same day found `seen_ads` carrying **1,497 non-numeric (test-shaped)
+  rows out of 1,670 total** — `TEST_`/`PIPE_`/`RUN3_`-prefixed, accumulated across many
+  past sessions (real Facebook `ad_archive_id`s are pure numeric, so none of this is
+  mistaken real data), never cleaned up because nothing in the suite deletes from
+  `seen_ads` after a `mark_seen` call. Left untouched given the size — deliberately NOT
+  bulk-deleted without a decision on it. Scheduled for Chunk 7 alongside the `TEST_MODE`
+  guard — not fixed yet. If you're hunting for orphaned rows in the meantime: real rows
+  never have `__test_` in a name, `TestBrand` as a page_name, or an `ad_id` prefixed
+  `TEST_`/`PIPE_`/`ART_`/`POOL_`/`FP_`/`CARD_`/`SEL_`/`RUN3_`.
 - `brand_voice`, `approved_claims`, `approved_testimonials` are empty at every real call
   site — still owed by Harry — compliance mechanical checks are correspondingly
   strict-by-default until real approved material is wired through.

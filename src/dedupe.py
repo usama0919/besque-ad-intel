@@ -787,6 +787,43 @@ def count_scraped_ads(competitor_id=None, status=None):
         return cur.fetchone()[0]
 
 
+def get_scraped_ads_by_ad_ids(ad_ids):
+    """Batch-fetch scraped_ads rows for an explicit list of ad_ids (Chunk 4's
+    pipeline.generate_from_selection) in one query. Returns {ad_id: row}. If the
+    same ad_id exists under more than one competitor (a rare but legitimate
+    reshare/cross-post case - scraped_ads is unique on (ad_id, competitor_id), not
+    ad_id alone), the most recently fetched row wins - callers get exactly one row
+    per requested ad_id, never a list to disambiguate themselves."""
+    if not ad_ids:
+        return {}
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """SELECT id, ad_id, competitor_id, image_url, gcs_path, raw_meta, fetched_at, status, media_type
+               FROM scraped_ads WHERE ad_id = ANY(%s) ORDER BY fetched_at ASC""",
+            (list(ad_ids),),
+        )
+        cols = ["id", "ad_id", "competitor_id", "image_url", "gcs_path", "raw_meta", "fetched_at", "status", "media_type"]
+        result = {}
+        for row in cur.fetchall():
+            d = dict(zip(cols, row))
+            result[d["ad_id"]] = d  # ASC order - later (more recent) row overwrites earlier
+        return result
+
+
+def update_scraped_ad_status(ad_id, competitor_id, status):
+    """Move one scraped_ads row's status - e.g. off 'pool' as
+    pipeline.generate_from_selection progresses it (Chunk 4), so the grid can show
+    what's already been generated from without a separate join against artifacts.
+    Scoped by (ad_id, competitor_id), the table's own unique key - never ad_id
+    alone, which isn't guaranteed unique across competitors."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "UPDATE scraped_ads SET status=%s WHERE ad_id=%s AND competitor_id=%s",
+            (status, ad_id, competitor_id),
+        )
+        conn.commit()
+
+
 # ---- Fetch jobs (Chunk 2C) - backgrounds POST /api/fetch so a browser request
 # doesn't block on the ~minutes-long live Apify call. Keyed by competitor_id (one
 # in-flight fetch per competitor, not a job history) - a real second click while one

@@ -1220,6 +1220,68 @@ def test_run_once_updates_and_clears_run_progress(monkeypatch):
     assert calls[-1] == ("", 0, 0)  # cleared at the end
 
 
+# ---- Chunk 4, Item 4: max_per_competitor must cap ATTEMPTS, not successes ----
+
+def test_run_once_attempt_counting_guard_stops_after_cap_even_when_ads_fail(monkeypatch):
+    """The old success-only counter let the loop keep trying ad after ad past the
+    requested cap until enough of them succeeded - observed live as a 1-ad
+    request processing nine. Every ad that reaches deconstruct is a real paid
+    attempt and must count against the cap whether it ends up processed,
+    hard-blocked, or failed - proven here by an ad that ALWAYS fails compliance,
+    so it never once returns "processed": with max_per_competitor=1, only ONE of
+    the 3 available ads must ever reach deconstruct."""
+    monkeypatch.setattr(pipeline.dedupe, "get_competitors",
+                        lambda: [{"id": 1, "name": "Brand", "page_id": "1"}])
+    ad_ids = [f"PIPE_{uuid.uuid4().hex[:8]}" for _ in range(3)]
+    ads = [{"ad_id": aid, "page_name": "Brand", "image_url": "http://x/img.jpg",
+            "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+           for aid in ad_ids]
+    monkeypatch.setattr(pipeline.scrape, "scrape_ads", lambda *a, **k: ads)
+    monkeypatch.setattr(pipeline.assets, "download_image", lambda url, aid: "fake.jpg")
+    monkeypatch.setattr(pipeline.assets, "download_image_bytes", lambda url: b"fake-bytes")
+    deconstruct_calls = []
+    monkeypatch.setattr(pipeline.deconstruct, "deconstruct_image",
+                        lambda **k: deconstruct_calls.append(k.get("ad_id")) or {"format": "hero", "angle": "a"})
+    monkeypatch.setattr(pipeline.generate_copy, "generate_copy_live",
+                        lambda bp, product=None, **k: {"headline": "H", "primary_text": "P",
+                                                         "image_subtext": "S", "cta": "C"})
+    # Always fails - process_ad returns "failed" for every ad, never "processed".
+    monkeypatch.setattr(pipeline.compliance, "check_compliance", lambda copy, name, text, **k: (False, ["x"]))
+    monkeypatch.setattr(pipeline.dedupe, "init_pipeline_warnings", lambda: None)
+    monkeypatch.setattr(pipeline.dedupe, "record_warning", lambda *a, **k: None)
+
+    summary = pipeline.run_once(max_per_competitor=1, competitor_id=1)
+
+    assert len(deconstruct_calls) == 1, \
+        "only the first ad's attempt should count against the cap - the loop must stop there, not try all 3"
+    assert summary["failed"] == 1
+    assert summary["processed"] == 0
+
+
+def test_run_once_parity_normal_run_unaffected_by_the_attempt_counting_fix(monkeypatch):
+    """Chunk 4 parity: for the ordinary case (nothing fails), the attempt-counting
+    fix must behave identically to the old success-counting check - process
+    exactly max_per_competitor ads and stop. The existing Run Pipeline button's
+    everyday behaviour must be unchanged."""
+    monkeypatch.setattr(pipeline.dedupe, "get_competitors",
+                        lambda: [{"id": 1, "name": "Brand", "page_id": "1"}])
+    ad_ids = [f"PIPE_{uuid.uuid4().hex[:8]}" for _ in range(3)]
+    ads = [{"ad_id": aid, "page_name": "Brand", "image_url": "http://x/img.jpg",
+            "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+           for aid in ad_ids]
+    monkeypatch.setattr(pipeline.scrape, "scrape_ads", lambda *a, **k: ads)
+    _mock_all_stages(monkeypatch)
+    try:
+        summary = pipeline.run_once(max_per_competitor=2, competitor_id=1)
+        assert summary["processed"] == 2
+        assert summary["skipped"] == 0
+        assert summary["failed"] == 0
+    finally:
+        with dedupe.get_conn() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM seen_ads WHERE ad_id = ANY(%s)", (ad_ids,))
+            conn.commit()
+
+
 def test_process_ad_failure_isolated(monkeypatch):
     dedupe.init_db()
     ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
