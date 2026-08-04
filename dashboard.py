@@ -752,6 +752,25 @@ def _days_running(start_raw, stop_raw):
     return max((end - start).days, 0)
 
 
+def _has_unrendered_template_token(value):
+    """True if value is a string carrying a literal Meta template token like
+    {{product.name}} - DCO ads store the UNRENDERED template, not the resolved
+    copy, so raw {{...}} placeholders can leak straight into
+    ad_creative_bodies/ad_creative_link_titles/cta_text (Chunk 6, Part A, Item 1).
+    The resolved copy isn't anywhere in the data, so this is purely a detector for
+    "suppress this slot" - never an attempt to fill the token in."""
+    return isinstance(value, str) and "{{" in value and "}}" in value
+
+
+def _suppress_templated(value):
+    """Drop a templated string to None; for a list, drop just the templated
+    entries and keep any real ones - a DCO record can carry both {{...}} bodies
+    and one real one across its variants."""
+    if isinstance(value, list):
+        return [v for v in value if not _has_unrendered_template_token(v)]
+    return None if _has_unrendered_template_token(value) else value
+
+
 @app.get("/api/pool/cards")
 def api_pool_cards(competitor_id: int = None, status: str = "pool", limit: int = 200, angle_id: int = None):
     """Flattened, judgeable-fields-only view of the pool for the Chunk 3
@@ -776,7 +795,13 @@ def api_pool_cards(competitor_id: int = None, status: str = "pool", limit: int =
     generated for another, and the grid must show the CURRENTLY SELECTED angle's
     truth, not a single per-row flag that can't distinguish the two. angle_id
     omitted/None checks the "no angle" identity, same as everywhere else angle_id
-    is used as a dedup key."""
+    is used as a dedup key.
+
+    ad_creative_bodies/ad_creative_link_titles/cta_text are suppressed (never
+    printed as-is) when they carry a literal {{...}} Meta template token (Chunk
+    6, Part A, Item 1) - DCO ads store Meta's UNRENDERED template, not the
+    resolved copy, and the resolved text isn't in the data anywhere to recover.
+    Suppressing the slot, not attempting to resolve the token."""
     dedupe.init_scraped_ads()
     dedupe.init_artifacts()
     rows = dedupe.get_scraped_ads(competitor_id=competitor_id, status=status, limit=None)
@@ -792,9 +817,9 @@ def api_pool_cards(competitor_id: int = None, status: str = "pool", limit: int =
             "days_running": _days_running(meta.get("ad_delivery_start_time"), meta.get("ad_delivery_stop_time")),
             "ad_delivery_start_time": meta.get("ad_delivery_start_time"),
             "ad_delivery_stop_time": meta.get("ad_delivery_stop_time"),
-            "ad_creative_bodies": meta.get("ad_creative_bodies") or [],
-            "ad_creative_link_titles": meta.get("ad_creative_link_titles") or [],
-            "cta_text": meta.get("cta_text"),
+            "ad_creative_bodies": _suppress_templated(meta.get("ad_creative_bodies") or []),
+            "ad_creative_link_titles": _suppress_templated(meta.get("ad_creative_link_titles") or []),
+            "cta_text": _suppress_templated(meta.get("cta_text")),
             "page_name": meta.get("page_name") or "",
             "fetched_at": r["fetched_at"].strftime("%Y-%m-%d %H:%M:%S") if r.get("fetched_at") else "",
             "already_generated": r["ad_id"] in generated_ad_ids,

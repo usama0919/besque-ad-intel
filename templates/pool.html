@@ -59,6 +59,7 @@
   .comp-row.selected { background:#f0ece4; border-radius:8px; }
   .comp-row.selected .comp-name { color:#1a7f42; }
   .comp-name { font-size:13px; font-weight:600; }
+  .badge.invalid-page-id { background:#fbe6e6; color:#c0392b; margin-left:6px; }
   #competitors, #products { max-height:280px; overflow-y:auto; }
   .layout > div:last-child { position:sticky; top:170px; align-self:start; }
   .selection-panel { font-size:13px; }
@@ -150,15 +151,28 @@ let selectedProductId = null;
 let _anglesCache = [];
 let _lastCards = [];
 
+// A real Facebook page_id is purely numeric. ~40 competitor rows currently hold
+// a page NAME in this column instead - display only (Chunk 6, Part A, Item 2):
+// this never touches the data, it only marks a row that can never return ads.
+function isValidPageId(pageId){
+  return /^\d+$/.test(String(pageId || '').trim());
+}
+
 async function loadCompetitors(){
   const r = await fetch('/api/competitors');
   const data = await r.json();
   const el = document.getElementById('competitors');
   if(!data.length){ el.innerHTML = '<div class="empty">No competitors yet</div>'; return; }
-  el.innerHTML = data.map(c => `
+  el.innerHTML = data.map(c => {
+    const invalid = !isValidPageId(c.page_id);
+    const badge = invalid
+      ? `<span class="badge invalid-page-id" title="page_id is &quot;${esc(c.page_id)}&quot; - not numeric, so this competitor can never return ads until it's corrected">invalid page_id</span>`
+      : '';
+    return `
     <div class="comp-row${c.id===selectedCompetitorId?' selected':''}" data-id="${c.id}" onclick="selectCompetitor(${c.id},'${esc(c.name).replace(/'/g,"\\'")}')">
-      <span class="comp-name">${esc(c.name)}</span>
-    </div>`).join('');
+      <span class="comp-name">${esc(c.name)}</span>${badge}
+    </div>`;
+  }).join('');
 }
 
 // Product is a real selection, not a constant - populated from /api/products
