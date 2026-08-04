@@ -102,3 +102,53 @@ def test_scrape_ads_and_scrape_ads_with_raw_agree_on_survivors(monkeypatch):
     with_raw = scrape.scrape_ads_with_raw("Bangn Body")
     survivors_from_raw = [mapped["ad_id"] for raw, mapped, reason in with_raw if mapped]
     assert [a["ad_id"] for a in plain] == survivors_from_raw
+
+
+# ---- Chunk 2C: image_only widened to "has a usable static image", not literally
+# "media_type == IMAGE" - a live L'Occitane investigation found real, fetchable
+# static images on DCO and CAROUSEL records that were being rejected purely for
+# their media_type. ----
+
+RAW_ITEMS_WIDENED_FILTER = [
+    {"ad_archive_id": "D1", "page_name": "Bangn Body", "media_type": "DCO",
+     "images": ["http://x/d1a.jpg", "http://x/d1b.jpg"]},  # DCO WITH a usable image
+    {"ad_archive_id": "D2", "page_name": "Bangn Body", "media_type": "DCO",
+     "images": [], "videos": ["http://x/d2.mp4", "http://x/d2b.mp4"]},  # DCO, no image at all
+    {"ad_archive_id": "C1", "page_name": "Bangn Body", "media_type": "CAROUSEL",
+     "images": ["http://x/c1a.jpg", "http://x/c1b.jpg", "http://x/c1c.jpg"]},  # CAROUSEL with images
+    {"ad_archive_id": "V1", "page_name": "Bangn Body", "media_type": "VIDEO",
+     "images": [], "videos": ["http://x/v1.mp4"]},  # pure video, still rejected
+]
+
+
+def test_scrape_ads_with_raw_accepts_dco_and_carousel_with_a_usable_image(monkeypatch):
+    _patch_client(monkeypatch, RAW_ITEMS_WIDENED_FILTER)
+    triples = scrape.scrape_ads_with_raw("Bangn Body")
+    by_ad_id = {raw.get("ad_archive_id"): (mapped, reason) for raw, mapped, reason in triples}
+
+    d1_mapped, d1_reason = by_ad_id["D1"]
+    assert d1_reason is None
+    assert d1_mapped["media_type"] == "DCO"
+    assert d1_mapped["image_url"] == "http://x/d1a.jpg"  # first image, not all of them
+
+    c1_mapped, c1_reason = by_ad_id["C1"]
+    assert c1_reason is None
+    assert c1_mapped["media_type"] == "CAROUSEL"
+    assert c1_mapped["image_url"] == "http://x/c1a.jpg"
+
+    d2_mapped, d2_reason = by_ad_id["D2"]
+    assert d2_mapped is None
+    assert d2_reason == scrape.REJECT_NOT_IMAGE  # DCO with genuinely no image
+
+    v1_mapped, v1_reason = by_ad_id["V1"]
+    assert v1_mapped is None
+    assert v1_reason == scrape.REJECT_NOT_IMAGE  # pure video, unchanged behaviour
+
+
+def test_scrape_ads_also_surfaces_dco_and_carousel_survivors(monkeypatch):
+    """scrape_ads (run_once's own path) shares _scrape_raw with scrape_ads_with_raw
+    - the widened filter necessarily widens what run_once ever sees too, not just
+    fetch_pool, since they're the same code path by design."""
+    _patch_client(monkeypatch, RAW_ITEMS_WIDENED_FILTER)
+    ads = scrape.scrape_ads("Bangn Body")
+    assert {a["ad_id"] for a in ads} == {"D1", "C1"}

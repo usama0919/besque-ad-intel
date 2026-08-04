@@ -90,6 +90,32 @@ def test_fetch_pool_upsert_refreshes_raw_meta_without_duplicating_row(monkeypatc
         _cleanup(cid)
 
 
+def test_fetch_pool_preserves_real_media_type_and_stores_one_row_per_multi_image_ad(monkeypatch):
+    """Chunk 2C: the grid needs the REAL media_type on the row (not normalised to
+    IMAGE), and a DCO/CAROUSEL record with several images must still produce
+    exactly one scraped_ads row - first image as image_url, the rest untouched in
+    raw_meta - never a row per variant (the unique index is (ad_id,
+    competitor_id), changing it is out of scope)."""
+    cid = _make_competitor()
+    ad_id = f"FP_{uuid.uuid4().hex[:8]}"
+    raw = {"ad_archive_id": ad_id, "media_type": "DCO",
+           "images": ["http://x/first.jpg", "http://x/second.jpg"]}
+    mapped = {"ad_id": ad_id, "image_url": "http://x/first.jpg", "page_name": "brand", "media_type": "DCO"}
+    triples = [(raw, mapped, None)]
+    monkeypatch.setattr(scrape, "scrape_ads_with_raw", lambda name, max_results=None, page_id=None: triples)
+    try:
+        result = pipeline.fetch_pool(cid, cap=10)
+        assert result["stored"] == 1
+        rows = dedupe.get_scraped_ads(competitor_id=cid)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["media_type"] == "DCO"
+        assert row["image_url"] == "http://x/first.jpg"
+        assert row["raw_meta"]["images"] == ["http://x/first.jpg", "http://x/second.jpg"]
+    finally:
+        _cleanup(cid)
+
+
 def test_fetch_pool_unknown_competitor_raises():
     try:
         pipeline.fetch_pool(-1, cap=10)

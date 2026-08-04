@@ -715,22 +715,33 @@ def init_scraped_ads():
             CREATE UNIQUE INDEX IF NOT EXISTS scraped_ads_ad_competitor_uq
             ON scraped_ads (ad_id, competitor_id)
         """)
+        # Self-migrating (Chunk 2C): the filter now accepts DCO/CAROUSEL records
+        # alongside plain IMAGE ones (scrape.py's REJECT_NOT_IMAGE became "no usable
+        # static image", not "wrong media_type") - the grid needs the REAL media_type
+        # on the row to display it, not a normalised "IMAGE" for everything.
+        cur.execute("ALTER TABLE scraped_ads ADD COLUMN IF NOT EXISTS media_type TEXT DEFAULT ''")
         conn.commit()
 
 
-def upsert_scraped_ad(ad_id, competitor_id, image_url, raw_meta):
-    """Insert one scraped ad into the pool, or refresh raw_meta/fetched_at if this
-    exact (ad_id, competitor_id) pair is already stored. A direct upsert on the
-    pool's own unique index - NOT update_competitor's read-modify-write shape, which
-    wiped six verified page_ids once already (see CLAUDE.md); there is no
-    partial-field update path here to get wrong."""
+def upsert_scraped_ad(ad_id, competitor_id, image_url, raw_meta, media_type=""):
+    """Insert one scraped ad into the pool, or refresh raw_meta/media_type/fetched_at
+    if this exact (ad_id, competitor_id) pair is already stored. A direct upsert on
+    the pool's own unique index - NOT update_competitor's read-modify-write shape,
+    which wiped six verified page_ids once already (see CLAUDE.md); there is no
+    partial-field update path here to get wrong.
+
+    Stores exactly ONE row per (ad_id, competitor_id) even when the source record
+    carries multiple images (a DCO/CAROUSEL variant set) - image_url is always the
+    caller's chosen first image, the rest live in raw_meta untouched. The unique
+    index is (ad_id, competitor_id), not (ad_id, competitor_id, image_index) - a
+    row-per-variant shape is explicitly out of scope."""
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
-            """INSERT INTO scraped_ads (ad_id, competitor_id, image_url, raw_meta)
-               VALUES (%s, %s, %s, %s)
+            """INSERT INTO scraped_ads (ad_id, competitor_id, image_url, raw_meta, media_type)
+               VALUES (%s, %s, %s, %s, %s)
                ON CONFLICT (ad_id, competitor_id) DO UPDATE
-               SET raw_meta = EXCLUDED.raw_meta, fetched_at = now()""",
-            (ad_id, competitor_id, image_url, _json.dumps(raw_meta)),
+               SET raw_meta = EXCLUDED.raw_meta, media_type = EXCLUDED.media_type, fetched_at = now()""",
+            (ad_id, competitor_id, image_url, _json.dumps(raw_meta), media_type or ""),
         )
         conn.commit()
 
@@ -742,7 +753,7 @@ def get_scraped_ads(competitor_id=None, status=None, limit=None, offset=0):
     original callers; dashboard.py's GET /api/pool passes an explicit limit/offset
     so pagination is real SQL LIMIT/OFFSET, not a fetch-everything-then-slice."""
     with get_conn() as conn, conn.cursor() as cur:
-        query = "SELECT id, ad_id, competitor_id, image_url, gcs_path, raw_meta, fetched_at, status FROM scraped_ads WHERE 1=1"
+        query = "SELECT id, ad_id, competitor_id, image_url, gcs_path, raw_meta, fetched_at, status, media_type FROM scraped_ads WHERE 1=1"
         params = []
         if competitor_id is not None:
             query += " AND competitor_id = %s"
@@ -755,7 +766,7 @@ def get_scraped_ads(competitor_id=None, status=None, limit=None, offset=0):
             query += " LIMIT %s OFFSET %s"
             params += [limit, offset]
         cur.execute(query, params)
-        cols = ["id", "ad_id", "competitor_id", "image_url", "gcs_path", "raw_meta", "fetched_at", "status"]
+        cols = ["id", "ad_id", "competitor_id", "image_url", "gcs_path", "raw_meta", "fetched_at", "status", "media_type"]
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
@@ -774,3 +785,86 @@ def count_scraped_ads(competitor_id=None, status=None):
             params.append(status)
         cur.execute(query, params)
         return cur.fetchone()[0]
+
+
+# ---- Fetch jobs (Chunk 2C) - backgrounds POST /api/fetch so a browser request
+# doesn't block on the ~minutes-long live Apify call. Keyed by competitor_id (one
+# in-flight fetch per competitor, not a job history) - a real second click while one
+# is already running must be rejected, not queued or silently duplicated, so
+# try_start_fetch_job is a single atomic INSERT..ON CONFLICT..WHERE statement, not
+# read-then-write: two concurrent POSTs for the same competitor_id must not both
+# believe they started it. DB-backed for the same reason pipeline_warnings/
+# run_progress are (CLAUDE.md): ship.ps1 runs besque-dashboard with
+# --min-instances 1 --max-instances 5, so an in-memory dict on one container
+# wouldn't be visible to a status poll that lands on another. ----
+
+def init_fetch_jobs():
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS fetch_jobs (
+                competitor_id INTEGER PRIMARY KEY,
+                status        TEXT NOT NULL DEFAULT 'done',
+                result        JSONB,
+                error         TEXT,
+                started_at    TIMESTAMPTZ,
+                finished_at   TIMESTAMPTZ
+            )
+        """)
+        conn.commit()
+
+
+def try_start_fetch_job(competitor_id):
+    """Atomically claim the 'running' slot for one competitor's fetch job. Returns
+    True if this call won the claim (fresh row, or an existing row that was NOT
+    'running' - a prior done/error job for this competitor gets overwritten, same
+    as a fresh start). Returns False if a job for this competitor is already
+    'running' - the caller must reject the request, not start a second Apify call.
+    The WHERE clause on the DO UPDATE is what makes this safe under a race: only
+    one of two concurrent callers can ever see their own write take effect against
+    a row that was already 'running'."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO fetch_jobs (competitor_id, status, result, error, started_at, finished_at)
+               VALUES (%s, 'running', NULL, NULL, now(), NULL)
+               ON CONFLICT (competitor_id) DO UPDATE
+               SET status = 'running', result = NULL, error = NULL,
+                   started_at = now(), finished_at = NULL
+               WHERE fetch_jobs.status != 'running'
+               RETURNING competitor_id""",
+            (competitor_id,),
+        )
+        won = cur.fetchone() is not None
+        conn.commit()
+        return won
+
+
+def finish_fetch_job(competitor_id, result=None, error=None):
+    """Record the terminal state of one fetch job - 'done' with the fetch_pool
+    result dict, or 'error' with the exception message. Must be called from
+    inside the background thread's own try/except (both branches, success and
+    failure) - a thread that dies without reaching this leaves the row stuck on
+    'running' forever, which would permanently block every future fetch for that
+    competitor via try_start_fetch_job's WHERE guard above."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "UPDATE fetch_jobs SET status=%s, result=%s, error=%s, finished_at=now() WHERE competitor_id=%s",
+            ("error" if error else "done",
+             _json.dumps(result) if result is not None else None,
+             error, competitor_id),
+        )
+        conn.commit()
+
+
+def get_fetch_job(competitor_id):
+    """Return one competitor's fetch job state, or None if none has ever run."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT competitor_id, status, result, error, started_at, finished_at "
+            "FROM fetch_jobs WHERE competitor_id=%s",
+            (competitor_id,),
+        )
+        r = cur.fetchone()
+        if r is None:
+            return None
+        return {"competitor_id": r[0], "status": r[1], "result": r[2], "error": r[3],
+                "started_at": r[4], "finished_at": r[5]}

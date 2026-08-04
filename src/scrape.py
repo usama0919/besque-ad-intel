@@ -118,7 +118,21 @@ def _scrape_raw(search_term, max_results=None, image_only=True, page_id=None):
     (None for survivors). scrape_ads and pipeline.fetch_pool (via
     scrape_ads_with_raw) both sit on top of this single pass rather than each
     re-implementing the filter, so the two can never drift apart the way
-    update_competitor's read-modify-write once did for page_ids.
+    update_competitor's read-modify-write once did for page_ids. Because scrape_ads
+    shares this core, widening the filter here (Chunk 2C, below) also widens what
+    run_once/process_ad ever see as candidate ads, not just fetch_pool - the same
+    single-filter guarantee that motivated sharing this core in the first place.
+
+    image_only, despite the name, no longer means "media_type == IMAGE" - a
+    2026-08-04 investigation against real L'Occitane data found DCO and CAROUSEL
+    records that carry a perfectly usable static image (verified live: real JPEGs,
+    200/image-jpeg/real content-length) but were being rejected purely for having
+    the "wrong" media_type. It now means "has a usable static image": accept any
+    record whose first `images` entry is non-empty, regardless of media_type
+    (IMAGE/DCO/CAROUSEL alike); reject only when that's genuinely absent (pure
+    VIDEO with no images array, or a DCO/CAROUSEL that happens to carry none).
+    REJECT_NOT_IMAGE keeps its name for continuity with the existing per-reason
+    breakdown, but now means "no usable image", not "wrong media_type" literally.
 
     A record missing ad_id is folded into REJECT_NO_IMAGE_URL - the caller-facing
     reason vocabulary has no separate bucket for it (it's a defensive branch, never
@@ -142,15 +156,15 @@ def _scrape_raw(search_term, max_results=None, image_only=True, page_id=None):
 
     results = []
     for raw in client.dataset(run.default_dataset_id).iterate_items():
-        if image_only and raw.get("media_type") != "IMAGE":
+        mapped = _map_ad(raw)
+        if image_only and not mapped["image_url"]:
             # Previously silent (a bare `continue`, no print) - this is the single
-            # biggest rejection bucket in practice (DCO/VIDEO/CAROUSEL ads), and it
-            # was invisible in every log until now.
-            print(f"[scrape] rejected ad {raw.get('ad_archive_id','?')}: not an IMAGE "
+            # biggest rejection bucket in practice (pure-video ads with no images
+            # array at all), and it was invisible in every log until now.
+            print(f"[scrape] rejected ad {mapped.get('ad_id','?')}: no usable static image "
                   f"(media_type={raw.get('media_type')!r})")
             results.append((raw, None, REJECT_NOT_IMAGE))
             continue
-        mapped = _map_ad(raw)
         if mapped["ad_id"] and mapped["image_url"] and (use_page or _page_matches(mapped.get("page_name", ""), search_term)):
             results.append((raw, mapped, None))
         else:

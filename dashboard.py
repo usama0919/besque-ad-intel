@@ -39,6 +39,8 @@ _run_status = {"running": False, "last_summary": None, "stop_requested": False, 
                "mode": None}
 # Set only so tests can join() deterministically instead of sleep-polling for completion.
 _run_thread = None
+# Same reasoning as _run_thread above, for api_fetch_pool's background thread.
+_fetch_thread = None
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -694,6 +696,7 @@ def api_pool(competitor_id: int = None, status: str = "pool", limit: int = 100, 
                 "raw_meta": r["raw_meta"],
                 "fetched_at": r["fetched_at"].strftime("%Y-%m-%d %H:%M:%S") if r.get("fetched_at") else "",
                 "status": r["status"],
+                "media_type": r.get("media_type") or "",
             }
             for r in rows
         ],
@@ -702,21 +705,20 @@ def api_pool(competitor_id: int = None, status: str = "pool", limit: int = 100, 
 
 @app.post("/api/fetch")
 async def api_fetch_pool(request: Request):
-    """Trigger pipeline.fetch_pool for one competitor - fetch-and-store only, same
-    caveats as fetch_pool itself (no deconstruct/generation, no seen_ads/artifacts
-    writes). Success response uses the dashboard's normal {"ok": True, ...}
-    envelope, with the fetch_pool dict nested under "result" - supersedes this
-    endpoint's original "return fetch_pool's dict verbatim" shape, since the
-    Chunk 3 grid needs a consistent envelope across every /api/ endpoint it
-    consumes more than it needs this one endpoint to be unwrapped. skipped is now
-    a per-reason breakdown dict (not_image/wrong_page/no_image_url/duplicate) -
-    fetch_pool's own change, passed through here unchanged.
+    """Start pipeline.fetch_pool for one competitor on a background thread and
+    return immediately - fetch-and-store only, same caveats as fetch_pool itself
+    (no deconstruct/generation, no seen_ads/artifacts writes). Poll GET
+    /api/fetch/status?competitor_id=... for progress/result, same pattern as
+    /api/run + /api/run/status (a separate status endpoint, not folded into
+    GET /api/pool - "is a fetch in flight" and "what's stored" are different
+    questions, same as /api/run keeps them separate).
 
-    Runs pipeline.fetch_pool SYNCHRONOUSLY - it blocks on a live Apify call (observed
-    ~4.5 minutes), so this request does not return until that finishes. See the
-    blocking-behaviour note shipped alongside this endpoint for what that means for a
-    browser caller and Cloud Run's request timeout; nothing here makes it async or
-    backgrounds it."""
+    Rejects a second concurrent fetch for a competitor already 'running'
+    (409) rather than starting a duplicate Apify call - dedupe.try_start_fetch_job
+    is a single atomic statement, not read-then-write, so this holds under a race
+    between two near-simultaneous clicks. Competitor existence is checked here,
+    BEFORE claiming the job slot, so an unknown competitor_id never creates a
+    fetch_jobs row at all."""
     body = await request.json()
     competitor_id = body.get("competitor_id")
     if competitor_id is None:
@@ -732,12 +734,49 @@ async def api_fetch_pool(request: Request):
         return JSONResponse({"ok": False, "error": "cap must be an integer"}, status_code=400)
     if cap <= 0:
         return JSONResponse({"ok": False, "error": "cap must be a positive integer"}, status_code=400)
+
+    dedupe.init_competitors()
+    competitor = next((c for c in dedupe.get_competitors() if c["id"] == competitor_id), None)
+    if not competitor:
+        return JSONResponse({"ok": False, "error": f"competitor {competitor_id} not found"}, status_code=404)
+
+    dedupe.init_fetch_jobs()
+    if not dedupe.try_start_fetch_job(competitor_id):
+        return JSONResponse(
+            {"ok": False, "error": f"a fetch is already running for competitor {competitor_id}"},
+            status_code=409,
+        )
+
     from src import pipeline
-    try:
-        result = pipeline.fetch_pool(competitor_id, cap=cap)
-    except ValueError as e:
-        return JSONResponse({"ok": False, "error": str(e)}, status_code=404)
-    return JSONResponse({"ok": True, "result": result})
+
+    def _run_fetch_pool():
+        try:
+            result = pipeline.fetch_pool(competitor_id, cap=cap)
+            dedupe.finish_fetch_job(competitor_id, result=result)
+        except Exception as e:
+            # Must always reach finish_fetch_job - an uncaught exception here would
+            # leave the row stuck on 'running' forever (try_start_fetch_job's WHERE
+            # guard would then permanently refuse every future fetch for this
+            # competitor).
+            dedupe.finish_fetch_job(competitor_id, error=str(e))
+
+    global _fetch_thread
+    _fetch_thread = threading.Thread(target=_run_fetch_pool, daemon=True)
+    _fetch_thread.start()
+    return JSONResponse({"ok": True, "started": True, "competitor_id": competitor_id})
+
+
+@app.get("/api/fetch/status")
+def api_fetch_status(competitor_id: int):
+    """Poll one competitor's fetch job - 'running'/'done'/'error', or 'none' if no
+    fetch has ever run for it. result is fetch_pool's dict once status is 'done';
+    error is the exception message once status is 'error'. Both are None
+    otherwise."""
+    dedupe.init_fetch_jobs()
+    job = dedupe.get_fetch_job(competitor_id)
+    if job is None:
+        return JSONResponse({"status": "none", "result": None, "error": None})
+    return JSONResponse({"status": job["status"], "result": job["result"], "error": job["error"]})
 
 
 @app.get("/api/stats")

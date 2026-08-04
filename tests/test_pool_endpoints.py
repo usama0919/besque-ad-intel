@@ -1,6 +1,12 @@
-"""Tests for GET /api/pool and POST /api/fetch (Chunk 2, Part B). Real DB rows
-(uuid-suffixed, cleaned up in finally) - only src.scrape is mocked, since these
-endpoints must never hit Apify for real. No deconstruct/generation involved."""
+"""Tests for GET /api/pool and POST /api/fetch + GET /api/fetch/status
+(Chunk 2, Parts B/C). Real DB rows (uuid-suffixed, cleaned up in finally) - only
+src.scrape is mocked, since these endpoints must never hit Apify for real. No
+deconstruct/generation involved.
+
+POST /api/fetch backgrounds pipeline.fetch_pool on a thread (Chunk 2C) - tests
+join dashboard._fetch_thread (set right before .start(), same pattern as
+dashboard._run_thread for /api/run) instead of sleep-polling for completion."""
+import threading
 import uuid
 import dashboard
 from fastapi.testclient import TestClient
@@ -14,10 +20,18 @@ def _make_competitor():
 
 
 def _cleanup(competitor_id):
+    dedupe.init_fetch_jobs()  # some tests never hit an endpoint that creates the table
     with dedupe.get_conn() as conn, conn.cursor() as cur:
         cur.execute("DELETE FROM scraped_ads WHERE competitor_id=%s", (competitor_id,))
+        cur.execute("DELETE FROM fetch_jobs WHERE competitor_id=%s", (competitor_id,))
         conn.commit()
     dedupe.delete_competitor(competitor_id)
+
+
+def _join_fetch_thread(timeout=5):
+    assert dashboard._fetch_thread is not None, "no background fetch thread was started"
+    dashboard._fetch_thread.join(timeout=timeout)
+    assert not dashboard._fetch_thread.is_alive(), "background fetch thread did not finish in time"
 
 
 # ---- GET /api/pool ----
@@ -27,7 +41,8 @@ def test_api_pool_returns_rows_as_stored_with_total_count():
     cid = _make_competitor()
     ad_id = f"POOL_{uuid.uuid4().hex[:8]}"
     raw = {"ad_archive_id": ad_id, "impressions": {"lower_bound": "500"}, "spend": None}
-    dedupe.upsert_scraped_ad(ad_id=ad_id, competitor_id=cid, image_url="http://x/1.jpg", raw_meta=raw)
+    dedupe.upsert_scraped_ad(ad_id=ad_id, competitor_id=cid, image_url="http://x/1.jpg", raw_meta=raw,
+                              media_type="DCO")
     try:
         client = TestClient(dashboard.app)
         r = client.get(f"/api/pool?competitor_id={cid}")
@@ -43,6 +58,8 @@ def test_api_pool_returns_rows_as_stored_with_total_count():
         # derived subset of "card fields"
         assert row["raw_meta"] == raw
         assert row["status"] == "pool"
+        # Chunk 2C: real media_type on the row, not normalised to IMAGE
+        assert row["media_type"] == "DCO"
         assert isinstance(row["fetched_at"], str) and row["fetched_at"]
     finally:
         _cleanup(cid)
@@ -93,12 +110,12 @@ def test_api_pool_empty_for_unknown_competitor():
     assert r.json() == {"total": 0, "limit": 100, "offset": 0, "rows": []}
 
 
-# ---- POST /api/fetch ----
+# ---- POST /api/fetch + GET /api/fetch/status ----
 
-def test_api_fetch_pool_stores_rows_and_wraps_result_in_ok_envelope(monkeypatch):
-    """Supersedes the earlier "verbatim" contract: success now uses the dashboard's
-    normal {"ok": True, ...} envelope, with fetch_pool's dict nested under "result" -
-    including its per-reason skipped breakdown, passed through unchanged."""
+def test_api_fetch_pool_starts_in_background_and_status_reports_done_result(monkeypatch):
+    """Chunk 2C: POST /api/fetch returns immediately (started, not the result);
+    the eventual result - including fetch_pool's per-reason skipped breakdown - is
+    only visible via GET /api/fetch/status once the background thread finishes."""
     cid = _make_competitor()
     ad_id = f"POOL_{uuid.uuid4().hex[:8]}"
     triples = [
@@ -111,13 +128,18 @@ def test_api_fetch_pool_stores_rows_and_wraps_result_in_ok_envelope(monkeypatch)
         client = TestClient(dashboard.app)
         r = client.post("/api/fetch", json={"competitor_id": cid, "cap": 10})
         assert r.status_code == 200
-        body = r.json()
-        assert body == {
-            "ok": True,
-            "result": {
-                "fetched": 2, "stored": 1,
-                "skipped": {"not_image": 0, "wrong_page": 1, "no_image_url": 0, "duplicate": 0},
-            },
+        assert r.json() == {"ok": True, "started": True, "competitor_id": cid}
+
+        _join_fetch_thread()
+
+        status_r = client.get(f"/api/fetch/status?competitor_id={cid}")
+        assert status_r.status_code == 200
+        body = status_r.json()
+        assert body["status"] == "done"
+        assert body["error"] is None
+        assert body["result"] == {
+            "fetched": 2, "stored": 1,
+            "skipped": {"not_image": 0, "wrong_page": 1, "no_image_url": 0, "duplicate": 0},
         }
         pool_rows = dedupe.get_scraped_ads(competitor_id=cid)
         assert len(pool_rows) == 1
@@ -139,6 +161,7 @@ def test_api_fetch_pool_default_cap_is_50(monkeypatch):
         client = TestClient(dashboard.app)
         r = client.post("/api/fetch", json={"competitor_id": cid})
         assert r.status_code == 200
+        _join_fetch_thread()
         assert captured["max_results"] == 50
     finally:
         _cleanup(cid)
@@ -151,6 +174,8 @@ def test_api_fetch_pool_404_for_unknown_competitor(monkeypatch):
     assert r.status_code == 404
     assert r.json()["ok"] is False
     assert "not found" in r.json()["error"]
+    # unknown competitor must never even claim a fetch_jobs row
+    assert dedupe.get_fetch_job(-999) is None
 
 
 def test_api_fetch_pool_missing_competitor_id_is_400():
@@ -180,8 +205,85 @@ def test_api_fetch_pool_never_touches_seen_ads_or_artifacts(monkeypatch):
     try:
         client = TestClient(dashboard.app)
         client.post("/api/fetch", json={"competitor_id": cid, "cap": 10})
+        _join_fetch_thread()
         assert dedupe.is_new(ad_id) is True
         rows = dedupe.get_artifacts_full(limit=500)
         assert not any(r["ad_id"] == ad_id for r in rows)
     finally:
         _cleanup(cid)
+
+
+def test_api_fetch_pool_rejects_concurrent_fetch_for_same_competitor(monkeypatch):
+    """A second POST for a competitor whose job is still 'running' must be
+    rejected (409), never start a duplicate Apify call - dedupe.try_start_fetch_job
+    is a single atomic statement precisely so this holds under a real race, not
+    just a read-then-write check with a gap in the middle."""
+    cid = _make_competitor()
+    release = threading.Event()
+
+    def slow_scrape(name, max_results=None, page_id=None):
+        release.wait(timeout=5)
+        return []
+
+    monkeypatch.setattr(scrape, "scrape_ads_with_raw", slow_scrape)
+    try:
+        client = TestClient(dashboard.app)
+        r1 = client.post("/api/fetch", json={"competitor_id": cid, "cap": 10})
+        assert r1.status_code == 200
+        assert r1.json()["started"] is True
+
+        # try_start_fetch_job runs synchronously in the request handler (before the
+        # background thread is even spawned), so by the time r1 has returned the
+        # DB row is already 'running' - no race in the test itself.
+        r2 = client.post("/api/fetch", json={"competitor_id": cid, "cap": 10})
+        assert r2.status_code == 409
+        assert r2.json()["ok"] is False
+        assert "already running" in r2.json()["error"]
+
+        release.set()
+        _join_fetch_thread()
+        assert dedupe.get_fetch_job(cid)["status"] == "done"
+    finally:
+        release.set()
+        if dashboard._fetch_thread is not None:
+            dashboard._fetch_thread.join(timeout=5)
+        _cleanup(cid)
+
+
+def test_api_fetch_status_reports_error_when_background_thread_raises(monkeypatch):
+    """A thread that dies must leave status 'error' with the message recorded,
+    never a row stuck on 'running' forever."""
+    cid = _make_competitor()
+
+    def failing_scrape(name, max_results=None, page_id=None):
+        raise RuntimeError("apify blew up")
+
+    monkeypatch.setattr(scrape, "scrape_ads_with_raw", failing_scrape)
+    try:
+        client = TestClient(dashboard.app)
+        r = client.post("/api/fetch", json={"competitor_id": cid, "cap": 10})
+        assert r.status_code == 200
+        _join_fetch_thread()
+
+        status_r = client.get(f"/api/fetch/status?competitor_id={cid}")
+        body = status_r.json()
+        assert body["status"] == "error"
+        assert "apify blew up" in body["error"]
+        assert body["result"] is None
+
+        # the failed job must not stay claimed - a later fetch for the same
+        # competitor must be allowed to start, not permanently rejected
+        monkeypatch.setattr(scrape, "scrape_ads_with_raw", lambda name, max_results=None, page_id=None: [])
+        r2 = client.post("/api/fetch", json={"competitor_id": cid, "cap": 10})
+        assert r2.status_code == 200
+        _join_fetch_thread()
+        assert dedupe.get_fetch_job(cid)["status"] == "done"
+    finally:
+        _cleanup(cid)
+
+
+def test_api_fetch_status_none_when_no_job_has_ever_run():
+    client = TestClient(dashboard.app)
+    r = client.get("/api/fetch/status?competitor_id=-999")
+    assert r.status_code == 200
+    assert r.json() == {"status": "none", "result": None, "error": None}

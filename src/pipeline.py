@@ -95,6 +95,7 @@ def fetch_pool(competitor_id, cap=50):
             continue
         seen_ad_ids.add(mapped["ad_id"])
         dedupe.upsert_scraped_ad(ad_id=mapped["ad_id"], competitor_id=competitor_id,
+                                  media_type=mapped.get("media_type", ""),
                                   image_url=mapped["image_url"], raw_meta=raw)
         stored += 1
     return {"fetched": len(triples), "stored": stored, "skipped": skipped}
