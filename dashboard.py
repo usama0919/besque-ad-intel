@@ -669,6 +669,75 @@ def api_update_competitor(competitor_id: int, name: str, page_id: str = None, ca
 def api_delete_competitor(competitor_id: int):
     dedupe.delete_competitor(competitor_id)
     return JSONResponse({"ok": True, "id": competitor_id})
+
+
+@app.get("/api/pool")
+def api_pool(competitor_id: int = None, status: str = "pool", limit: int = 100, offset: int = 0):
+    """Dumb passthrough onto scraped_ads - deliberately does NOT derive/flatten/select
+    "card fields" out of raw_meta, that decision is chunk 3's and is blocked on an open
+    question. limit defaults to 100 (explicit, not the get_artifacts_full-style 50) and
+    is a real SQL LIMIT/OFFSET via dedupe.get_scraped_ads, not a fetch-all-then-slice."""
+    dedupe.init_scraped_ads()
+    rows = dedupe.get_scraped_ads(competitor_id=competitor_id, status=status, limit=limit, offset=offset)
+    total = dedupe.count_scraped_ads(competitor_id=competitor_id, status=status)
+    return JSONResponse({
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "rows": [
+            {
+                "id": r["id"],
+                "ad_id": r["ad_id"],
+                "competitor_id": r["competitor_id"],
+                "image_url": r["image_url"],
+                "gcs_path": r["gcs_path"],
+                "raw_meta": r["raw_meta"],
+                "fetched_at": r["fetched_at"].strftime("%Y-%m-%d %H:%M:%S") if r.get("fetched_at") else "",
+                "status": r["status"],
+            }
+            for r in rows
+        ],
+    })
+
+
+@app.post("/api/fetch")
+async def api_fetch_pool(request: Request):
+    """Trigger pipeline.fetch_pool for one competitor - fetch-and-store only, same
+    caveats as fetch_pool itself (no deconstruct/generation, no seen_ads/artifacts
+    writes). Success response is the fetch_pool dict RETURNED VERBATIM (not wrapped
+    in the usual {"ok": ...} shape) - deliberate, so the caller sees exactly what
+    fetch_pool produced, including its skipped breakdown, with nothing reshaped in
+    between. Errors still use the dashboard's normal {"ok": False, "error": ...}
+    convention, since fetch_pool itself never returns an error shape of its own.
+
+    Runs pipeline.fetch_pool SYNCHRONOUSLY - it blocks on a live Apify call (observed
+    ~4.5 minutes), so this request does not return until that finishes. See the
+    blocking-behaviour note shipped alongside this endpoint for what that means for a
+    browser caller and Cloud Run's request timeout; nothing here makes it async or
+    backgrounds it."""
+    body = await request.json()
+    competitor_id = body.get("competitor_id")
+    if competitor_id is None:
+        return JSONResponse({"ok": False, "error": "competitor_id required"}, status_code=400)
+    try:
+        competitor_id = int(competitor_id)
+    except (TypeError, ValueError):
+        return JSONResponse({"ok": False, "error": "competitor_id must be an integer"}, status_code=400)
+    cap = body.get("cap", 50)
+    try:
+        cap = int(cap)
+    except (TypeError, ValueError):
+        return JSONResponse({"ok": False, "error": "cap must be an integer"}, status_code=400)
+    if cap <= 0:
+        return JSONResponse({"ok": False, "error": "cap must be a positive integer"}, status_code=400)
+    from src import pipeline
+    try:
+        result = pipeline.fetch_pool(competitor_id, cap=cap)
+    except ValueError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=404)
+    return JSONResponse(result)
+
+
 @app.get("/api/stats")
 def api_stats():
     dedupe.init_artifacts()

@@ -735,9 +735,12 @@ def upsert_scraped_ad(ad_id, competitor_id, image_url, raw_meta):
         conn.commit()
 
 
-def get_scraped_ads(competitor_id=None, status=None):
-    """Return pool rows, newest first. Optional filters by competitor_id and/or
-    status (default 'pool' for everything fetch_pool has stored)."""
+def get_scraped_ads(competitor_id=None, status=None, limit=None, offset=0):
+    """Return pool rows, newest first, AS STORED - callers get raw_meta back exactly
+    as it was upserted, no derivation. Optional filters by competitor_id and/or
+    status. limit=None (the default) returns everything, matching this function's
+    original callers; dashboard.py's GET /api/pool passes an explicit limit/offset
+    so pagination is real SQL LIMIT/OFFSET, not a fetch-everything-then-slice."""
     with get_conn() as conn, conn.cursor() as cur:
         query = "SELECT id, ad_id, competitor_id, image_url, gcs_path, raw_meta, fetched_at, status FROM scraped_ads WHERE 1=1"
         params = []
@@ -748,6 +751,26 @@ def get_scraped_ads(competitor_id=None, status=None):
             query += " AND status = %s"
             params.append(status)
         query += " ORDER BY fetched_at DESC"
+        if limit is not None:
+            query += " LIMIT %s OFFSET %s"
+            params += [limit, offset]
         cur.execute(query, params)
         cols = ["id", "ad_id", "competitor_id", "image_url", "gcs_path", "raw_meta", "fetched_at", "status"]
         return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def count_scraped_ads(competitor_id=None, status=None):
+    """Total row count for the same filters get_scraped_ads accepts - lets a paginated
+    caller (dashboard.py's GET /api/pool) know if there's more without fetching
+    everything just to len() it."""
+    with get_conn() as conn, conn.cursor() as cur:
+        query = "SELECT COUNT(*) FROM scraped_ads WHERE 1=1"
+        params = []
+        if competitor_id is not None:
+            query += " AND competitor_id = %s"
+            params.append(competitor_id)
+        if status is not None:
+            query += " AND status = %s"
+            params.append(status)
+        cur.execute(query, params)
+        return cur.fetchone()[0]
