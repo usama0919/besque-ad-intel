@@ -14,12 +14,17 @@
   header h1 { font-size:20px; font-weight:600; letter-spacing:0.5px; }
   header .sub { font-size:13px; color:#b8b8b8; margin-top:2px; }
   header a { color:#b8b8b8; font-size:13px; text-decoration:none; }
-  .bar { padding:20px 40px; display:flex; flex-wrap:wrap; gap:16px; align-items:center; background:#fff; border-bottom:1px solid #e5e0d8; position:sticky; top:66px; z-index:90; }
+  .sticky-controls { position:sticky; top:66px; z-index:90; background:#fff; }
+  .bar { padding:16px 40px; display:flex; flex-wrap:wrap; gap:14px; align-items:center; background:#fff; border-bottom:1px solid #e5e0d8; }
   button.run { background:#1a1a1a; color:#fff; border:none; padding:11px 22px; border-radius:8px; font-size:14px; font-weight:600; cursor:pointer; }
   button.run:hover { background:#333; }
   button.run:disabled { background:#999; cursor:not-allowed; }
+  button.stop { background:#c0392b; color:#fff; border:none; padding:11px 22px; border-radius:8px; font-size:14px; font-weight:600; cursor:pointer; }
+  button.stop:hover { background:#a32e22; }
+  button.stop:disabled { background:#e5c6c2; cursor:not-allowed; }
   .status { font-size:13px; color:#666; }
   input[type=number] { padding:9px; border:1px solid #ccc; border-radius:7px; font-size:13px; width:80px; }
+  input[type=text], select, textarea { padding:9px; border:1px solid #ccc; border-radius:7px; font-size:13px; font-family:inherit; }
   .layout { display:grid; grid-template-columns:1fr 280px; gap:24px; padding:24px 40px; align-items:start; }
   h2 { font-size:15px; text-transform:uppercase; letter-spacing:1px; color:#888; margin-bottom:14px; }
   .empty { color:#bbb; font-size:13px; padding:30px 0; text-align:center; }
@@ -29,18 +34,22 @@
   .pool-card { background:#fff; border:2px solid #e5e0d8; border-radius:12px; overflow:hidden; cursor:pointer; box-shadow:0 1px 3px rgba(0,0,0,0.04); transition:border-color 0.1s; }
   .pool-card:hover { border-color:#c9c2b4; }
   .pool-card.selected { border-color:#1a7f42; box-shadow:0 0 0 2px rgba(26,127,66,0.25); }
+  .pool-card.already-generated { border-color:#8a5a12; }
+  .pool-card.already-generated.selected { border-color:#1a7f42; }
   .pool-card img { width:100%; height:160px; object-fit:cover; background:#f0ece4; display:block; }
   .pool-card-body { padding:10px 12px; }
-  .pool-card-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; }
+  .pool-card-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; gap:4px; }
   .media-type-badge { font-size:10px; font-weight:700; letter-spacing:0.5px; text-transform:uppercase; color:#666; background:#f0ece4; padding:2px 8px; border-radius:20px; }
   .badge { font-size:10px; padding:2px 8px; border-radius:20px; font-weight:600; }
   .badge.approve { background:#e3f5e9; color:#1a7f42; }
   .badge.pending { background:#f0ece4; color:#999; }
+  .badge.already-gen { background:#fdf3e0; color:#8a5a12; }
   .pool-days { font-size:12px; font-weight:600; color:#333; margin-bottom:4px; }
   .pool-title { font-size:12px; font-weight:600; margin-bottom:4px; line-height:1.3; }
   .pool-snippet { font-size:11px; color:#777; line-height:1.4; margin-bottom:6px; max-height:44px; overflow:hidden; }
   .pool-cta { font-size:11px; font-weight:600; color:#1a1a1a; margin-bottom:4px; }
   .pool-meta { font-size:10px; color:#aaa; }
+  .pool-already-gen-note { font-size:10px; color:#8a5a12; margin-top:4px; }
   .check-mark { position:absolute; top:8px; right:8px; width:22px; height:22px; border-radius:50%; background:#1a7f42; color:#fff; display:none; align-items:center; justify-content:center; font-size:13px; font-weight:700; }
   .pool-card-thumb { position:relative; }
   .pool-card.selected .check-mark { display:flex; }
@@ -50,10 +59,13 @@
   .comp-row.selected { background:#f0ece4; border-radius:8px; }
   .comp-row.selected .comp-name { color:#1a7f42; }
   .comp-name { font-size:13px; font-weight:600; }
-  #competitors { max-height:400px; overflow-y:auto; }
+  #competitors, #products { max-height:280px; overflow-y:auto; }
   .layout > div:last-child { position:sticky; top:170px; align-self:start; }
   .selection-panel { font-size:13px; }
   #selectionCount { font-weight:700; }
+  .field-label { font-size:11px; color:#888; text-transform:uppercase; letter-spacing:0.5px; display:block; margin-bottom:2px; }
+  .field-group { display:flex; flex-direction:column; gap:2px; }
+  #instructionInput { min-height:38px; max-height:80px; resize:vertical; width:220px; }
 </style>
 </head>
 <body>
@@ -64,6 +76,7 @@
   </div>
   <a href="/">&larr; Back to Review</a>
 </header>
+<div class="sticky-controls">
 <div class="bar">
   <span style="font-size:13px;color:#888;">Competitor:</span>
   <span id="selectedCompName" style="font-size:13px;font-weight:600;">None selected</span>
@@ -71,6 +84,40 @@
   <input type="number" id="capInput" value="50" min="1" max="500">
   <button class="run" id="fetchBtn" onclick="fetchPool()" disabled>Fetch</button>
   <span class="status" id="fetchStatus">Select a competitor to begin.</span>
+</div>
+<div class="bar">
+  <!-- Reuses the SAME per-run inputs the main dashboard's run strip already has
+       (angle/body_area/offer_text/instruction/product) - not a second set with
+       different semantics. angle.body_area only ever PRE-FILLS bodyAreaInput
+       (onAngleChange below) - the value generate_from_selection actually gets is
+       read fresh from this input at Generate time, never re-derived from
+       angle_id server-side (Chunk 5, Item 2). -->
+  <div class="field-group">
+    <label class="field-label" for="angleSelect">Angle</label>
+    <select id="angleSelect" onchange="onAngleChange()">
+      <option value="">No angle</option>
+    </select>
+  </div>
+  <div class="field-group">
+    <label class="field-label" for="bodyAreaInput">Body area (per-run)</label>
+    <input type="text" id="bodyAreaInput" list="bodyAreaSuggestions" placeholder="varies per run">
+    <datalist id="bodyAreaSuggestions">
+      <option value="chest"><option value="arms"><option value="legs"><option value="stomach">
+      <option value="back"><option value="knees"><option value="elbows"><option value="neck">
+    </datalist>
+  </div>
+  <div class="field-group">
+    <label class="field-label" for="offerTextInput">Offer text (optional)</label>
+    <input type="text" id="offerTextInput" placeholder="optional">
+  </div>
+  <div class="field-group">
+    <label class="field-label" for="instructionInput">Extra direction (optional)</label>
+    <textarea id="instructionInput" maxlength="500" placeholder="e.g. make the background warmer"></textarea>
+  </div>
+  <button class="run" id="generateBtn" onclick="generateSelection()" disabled>Generate</button>
+  <button class="stop" id="generateStopBtn" onclick="stopGenerate()" disabled>Stop</button>
+  <span class="status" id="generateStatus"></span>
+</div>
 </div>
 <div class="layout">
   <div>
@@ -80,7 +127,13 @@
   <div>
     <div class="comp-panel selection-panel">
       <div><span id="selectionCount">0 selected</span></div>
-      <div style="font-size:11px;color:#999;margin-top:4px;">Selection is not saved yet - nothing is generated from it in this view.</div>
+      <div id="regenerateNote" style="font-size:11px;color:#8a5a12;margin-top:4px;display:none;">
+        One or more selected cards already have a draft for this angle - generating will version and replace it.
+      </div>
+    </div>
+    <div class="comp-panel">
+      <h2 style="margin-bottom:10px;">Product</h2>
+      <div id="products"><div class="empty">Loading…</div></div>
     </div>
     <div class="comp-panel">
       <h2 style="margin-bottom:10px;">Competitors</h2>
@@ -93,6 +146,9 @@ function esc(s){return (s||"").toString().replace(/[&<>]/g,c=>({'&':'&amp;','<':
 
 let selectedCompetitorId = null;
 let selectedAdIds = new Set();
+let selectedProductId = null;
+let _anglesCache = [];
+let _lastCards = [];
 
 async function loadCompetitors(){
   const r = await fetch('/api/competitors');
@@ -103,6 +159,53 @@ async function loadCompetitors(){
     <div class="comp-row${c.id===selectedCompetitorId?' selected':''}" data-id="${c.id}" onclick="selectCompetitor(${c.id},'${esc(c.name).replace(/'/g,"\\'")}')">
       <span class="comp-name">${esc(c.name)}</span>
     </div>`).join('');
+}
+
+// Product is a real selection, not a constant - populated from /api/products
+// like everything else here. Defaults to whichever product's name contains
+// "Magic Body Oil" (data-driven, not a hardcoded id) if one exists, but the
+// operator can pick any other product from the list (Chunk 5, Item 1).
+async function loadProducts(){
+  const r = await fetch('/api/products');
+  const data = await r.json();
+  const el = document.getElementById('products');
+  if(!data.length){ el.innerHTML = '<div class="empty">No products yet</div>'; return; }
+  if(selectedProductId === null){
+    const magic = data.find(p => (p.name||'').toLowerCase().includes('magic body oil'));
+    if(magic){ selectedProductId = magic.id; }
+  }
+  el.innerHTML = data.map(p => `
+    <div class="comp-row${p.id===selectedProductId?' selected':''}" data-id="${p.id}" onclick="selectProduct(${p.id})">
+      <span class="comp-name">${esc(p.name)}</span>
+    </div>`).join('');
+}
+
+function selectProduct(id){
+  selectedProductId = (selectedProductId === id) ? null : id;
+  loadProducts();
+}
+
+async function loadAngles(){
+  const r = await fetch('/api/angles');
+  const data = await r.json();
+  _anglesCache = data;
+  const sel = document.getElementById('angleSelect');
+  const prev = sel.value;
+  sel.innerHTML = '<option value="">No angle</option>'
+    + data.map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('');
+  if(data.some(a => String(a.id) === prev)){ sel.value = prev; }
+}
+
+// angle.body_area is a UI PRE-FILL SUGGESTION ONLY (same rule as the main
+// dashboard's onAngleChange) - changing the angle re-suggests it, but the
+// operator can freely overwrite the input afterward, and Generate always reads
+// whatever's in the box at click time, never the angle's stored value directly
+// (Chunk 5, Item 2 - process_ad never reads messaging_angle["body_area"] either).
+function onAngleChange(){
+  const sel = document.getElementById('angleSelect');
+  const angle = _anglesCache.find(a => String(a.id) === sel.value);
+  document.getElementById('bodyAreaInput').value = angle ? (angle.body_area || '') : '';
+  loadGrid();  // already_generated is angle-specific - re-check the new angle
 }
 
 function selectCompetitor(id, name){
@@ -154,6 +257,11 @@ async function fetchPool(){
   }, 2000);
 }
 
+function currentAngleId(){
+  const v = document.getElementById('angleSelect').value;
+  return v ? parseInt(v, 10) : null;
+}
+
 async function loadGrid(){
   const el = document.getElementById('grid');
   if(selectedCompetitorId === null){
@@ -161,10 +269,15 @@ async function loadGrid(){
     return;
   }
   el.innerHTML = '<div class="empty">Loading…</div>';
-  const r = await fetch('/api/pool/cards?competitor_id=' + selectedCompetitorId + '&limit=200');
+  const angleId = currentAngleId();
+  const r = await fetch('/api/pool/cards?competitor_id=' + selectedCompetitorId + '&limit=200'
+    + (angleId ? ('&angle_id=' + angleId) : ''));
   const data = await r.json();
   const cards = data.cards || [];
-  if(!cards.length){ await renderEmptyExplanation(el); return; }
+  _lastCards = cards;
+  if(!cards.length){ await renderEmptyExplanation(el); updateSelectionCount(); return; }
+  // Stale selections (from a competitor/angle switch) never carry over.
+  selectedAdIds = new Set([...selectedAdIds].filter(id => cards.some(c => c.ad_id === id)));
   el.innerHTML = '<div class="pool-grid">' + cards.map(cardHtml).join('') + '</div>';
   updateSelectionCount();
 }
@@ -176,21 +289,28 @@ function daysLabel(days){
 
 function cardHtml(c){
   const sel = selectedAdIds.has(c.ad_id) ? ' selected' : '';
+  const alreadyGen = c.already_generated ? ' already-generated' : '';
   const active = c.is_active ? '<span class="badge approve">Active</span>' : '<span class="badge pending">Inactive</span>';
+  const genBadge = c.already_generated ? '<span class="badge already-gen">Generated</span>' : '';
   const title = (c.ad_creative_link_titles || [])[0] || '';
   const body = (c.ad_creative_bodies || [])[0] || '';
-  return `<div class="pool-card${sel}" data-ad-id="${esc(c.ad_id)}" onclick="toggleSelect(this,'${esc(c.ad_id)}')">
+  // Item 3: marked BEFORE the operator clicks, and it says what selecting it
+  // anyway means, rather than a bare badge with no explanation.
+  const note = c.already_generated
+    ? '<div class="pool-already-gen-note">Already generated for this angle - selecting will version &amp; replace it.</div>' : '';
+  return `<div class="pool-card${sel}${alreadyGen}" data-ad-id="${esc(c.ad_id)}" onclick="toggleSelect(this,'${esc(c.ad_id)}')">
     <div class="pool-card-thumb">
       <img loading="lazy" onerror="this.style.display='none'" src="${esc(c.image_url || '')}">
       <span class="check-mark">&check;</span>
     </div>
     <div class="pool-card-body">
-      <div class="pool-card-head"><span class="media-type-badge">${esc(c.media_type)}</span>${active}</div>
+      <div class="pool-card-head"><span class="media-type-badge">${esc(c.media_type)}</span>${active}${genBadge}</div>
       <div class="pool-days">${daysLabel(c.days_running)}</div>
       ${title ? `<div class="pool-title">${esc(title)}</div>` : ''}
       ${body ? `<div class="pool-snippet">${esc(body)}</div>` : ''}
       ${c.cta_text ? `<div class="pool-cta">${esc(c.cta_text)}</div>` : ''}
       <div class="pool-meta">${esc(c.page_name)} &middot; fetched ${esc(c.fetched_at)}</div>
+      ${note}
     </div>
   </div>`;
 }
@@ -201,8 +321,20 @@ function toggleSelect(el, adId){
   updateSelectionCount();
 }
 
+// Selecting an already-generated card IS the operator's explicit ask to
+// regenerate (Item 3/7c) - no separate confirmation step in this chunk. This
+// computes that from the currently loaded cards' own already_generated flag,
+// which is itself angle-specific (Item 3), so switching the angle changes what
+// counts as "already generated" without any extra bookkeeping here.
+function selectionIncludesAlreadyGenerated(){
+  const genIds = new Set(_lastCards.filter(c => c.already_generated).map(c => c.ad_id));
+  return [...selectedAdIds].some(id => genIds.has(id));
+}
+
 function updateSelectionCount(){
   document.getElementById('selectionCount').textContent = selectedAdIds.size + ' selected';
+  document.getElementById('generateBtn').disabled = selectedAdIds.size === 0 || _generateRunning;
+  document.getElementById('regenerateNote').style.display = selectionIncludesAlreadyGenerated() ? 'block' : 'none';
 }
 
 // The pool being empty is never rendered as a blank grid - it must say WHY,
@@ -247,7 +379,100 @@ async function renderEmptyExplanation(el){
   el.innerHTML = `<div class="pool-empty-reason">Last fetch found ${result.fetched || 0} ad(s), ${result.stored || 0} usable and stored. Rejected: ${esc(parts) || 'none'}.${hint}</div>`;
 }
 
+// ---- Chunk 5: Generate action, backgrounded exactly like Fetch (Item 4) ----
+
+let _generateRunning = false;
+let _generatePoll = null;
+let _generateJobId = null;
+
+async function generateSelection(){
+  if(selectedAdIds.size === 0){ return; }
+  const angleId = currentAngleId();
+  const bodyArea = document.getElementById('bodyAreaInput').value.trim();
+  const offerText = document.getElementById('offerTextInput').value.trim();
+  const instruction = document.getElementById('instructionInput').value.trim();
+  try { localStorage.setItem('operatorInstruction', instruction); } catch(e) {}
+  const regenerate = selectionIncludesAlreadyGenerated();
+
+  _generateRunning = true;
+  document.getElementById('generateBtn').disabled = true;
+  document.getElementById('generateStopBtn').disabled = false;
+  const status = document.getElementById('generateStatus');
+  status.textContent = 'Starting…' + (regenerate ? ' (regenerating already-generated selections)' : '');
+
+  const r = await fetch('/api/generate', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      ad_ids: [...selectedAdIds], angle_id: angleId, body_area: bodyArea || null,
+      offer_text: offerText || null, instruction: instruction || null,
+      product_id: selectedProductId, regenerate,
+    }),
+  });
+  const body = await r.json();
+  if(!r.ok){
+    status.textContent = 'Could not start: ' + (body.error || r.status);
+    _generateRunning = false;
+    document.getElementById('generateStopBtn').disabled = true;
+    updateSelectionCount();
+    return;
+  }
+  _generateJobId = body.job_id;
+  if(_generatePoll){ clearInterval(_generatePoll); }
+  _generatePoll = setInterval(pollGenerateStatus, 2000);
+  pollGenerateStatus();
+}
+
+async function pollGenerateStatus(){
+  if(!_generateJobId){ return; }
+  const r = await fetch('/api/generate/status?job_id=' + _generateJobId);
+  const s = await r.json();
+  const status = document.getElementById('generateStatus');
+  const progress = s.progress || {};
+  const done = Object.keys(progress).length;
+  const total = selectedAdIds.size;
+  if(s.status === 'running'){
+    status.textContent = `Generating… ${done}/${total} done`;
+    return;
+  }
+  clearInterval(_generatePoll); _generatePoll = null;
+  _generateRunning = false;
+  document.getElementById('generateStopBtn').disabled = true;
+  if(s.status === 'error'){
+    status.textContent = 'Generation failed: ' + (s.error || 'unknown error');
+  } else {
+    const res = s.result || {};
+    status.textContent = `Done: ${res.processed||0} processed, ${res.already_generated||0} already-generated, `
+      + `${res.skipped||0} skipped, ${res.failed||0} failed.`;
+    loadGrid();  // refresh already_generated flags/status now that generation ran
+  }
+  updateSelectionCount();
+}
+
+async function stopGenerate(){
+  if(!_generateJobId){ return; }
+  document.getElementById('generateStatus').textContent = 'Stopping…';
+  document.getElementById('generateStopBtn').disabled = true;
+  await fetch('/api/generate/stop', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({job_id: _generateJobId}),
+  });
+}
+
+// Same localStorage key as dashboard.html's run strip - the operator's steering
+// direction is one concept shared across both pages, not two independent
+// histories. Still per-browser, not per-user - a known handover concern, left
+// as-is (see CLAUDE.md).
+function loadOperatorInstruction(){
+  try {
+    const saved = localStorage.getItem('operatorInstruction');
+    if(saved) document.getElementById('instructionInput').value = saved;
+  } catch(e) {}
+}
+
 loadCompetitors();
+loadProducts();
+loadAngles();
+loadOperatorInstruction();
 </script>
 </body>
 </html>

@@ -58,6 +58,7 @@ def test_api_pool_cards_flattens_only_judgeable_fields_never_ships_raw_meta():
             "ad_id", "image_url", "media_type", "is_active", "days_running",
             "ad_delivery_start_time", "ad_delivery_stop_time", "ad_creative_bodies",
             "ad_creative_link_titles", "cta_text", "page_name", "fetched_at",
+            "already_generated",  # Chunk 5, Item 3
         }
         assert "raw_meta" not in card
         assert "estimated_audience_size" not in card

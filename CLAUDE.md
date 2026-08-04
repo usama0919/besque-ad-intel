@@ -239,7 +239,11 @@ blueprint reused). Final failure is recorded via
   `localStorage` (`dashboard.html`'s `loadOperatorInstruction()`/`runPipeline()`), so the
   same operator switching machines or browsers won't see their last-used steering carry
   over. Fine for the single-operator-per-session workflow today; would need a server-side
-  per-user setting (like `brand_settings`) to fix properly.
+  per-user setting (like `brand_settings`) to fix properly. `pool.html` (Chunk 5) reuses
+  the SAME `localStorage` key for its own instruction field, deliberately, so the two
+  pages share one steering history rather than drifting into two — but that also means
+  this gap now applies to both pages identically, not just `dashboard.html`. Left as-is
+  per instruction (2026-08-04); noting it here so it isn't lost, not fixing it now.
 - Nothing deployed since 27 Jul 2026 — everything below (all of Prompt B, edit mode, and
   Prompt 4 items 1-5) is committed and pushed to `main`, but Cloud Run is still running
   the 27 Jul build; none of it is live.

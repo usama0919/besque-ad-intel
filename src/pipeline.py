@@ -102,7 +102,8 @@ def fetch_pool(competitor_id, cap=50):
 
 
 def generate_from_selection(ad_ids, angle_id=None, body_area=None, offer_text=None,
-                             instruction=None, product_id=None, should_stop=None):
+                             instruction=None, product_id=None, should_stop=None,
+                             regenerate=False, on_ad_done=None):
     """Generate drafts for an EXPLICIT list of already-fetched ads, rather than
     driving generation off scrape order. No Apify call - fetch_pool already
     stored the pool; this only reads scraped_ads and calls process_ad per
@@ -115,7 +116,7 @@ def generate_from_selection(ad_ids, angle_id=None, body_area=None, offer_text=No
     pool can be browsed for free, and only the ads actually picked cost anything.
 
     ad_ids refer to scraped_ads.ad_id (the Apify ad_archive_id) - matching what
-    the Chunk 3 grid surfaces per card and what Chunk 5 will pass through, NOT
+    the Chunk 3 grid surfaces per card and what Chunk 5 passes through, NOT
     scraped_ads.id. Each row's `ad` dict is reconstructed via scrape._map_ad on
     its stored raw_meta - the exact same mapping scrape_ads itself produces, so
     process_ad behaves identically regardless of which path fed it. An ad_id with
@@ -123,10 +124,10 @@ def generate_from_selection(ad_ids, angle_id=None, body_area=None, offer_text=No
     one bad id in a multi-ad selection must not abort the rest.
 
     realism/text_in_image/include_product/edit_mode/check_output/retheme_colours
-    are NOT threaded here (no UI in this chunk to set them) - process_ad runs
-    with ITS OWN defaults (generate mode, no in-image text, product included, no
-    critic). Chunk 5 (wiring the grid) is where these would need to reach this
-    function if the operator is meant to control them per selection.
+    are still NOT threaded here (Chunk 5 wires angle/body_area/offer_text/
+    instruction/product - the operator-facing run-strip controls - but not these)
+    - process_ad runs with ITS OWN defaults for them (generate mode, no in-image
+    text, product included, no critic).
 
     should_stop, if given, is checked BETWEEN ads (same as run_once) AND is
     forwarded into process_ad, which checks it once more immediately before the
@@ -134,33 +135,42 @@ def generate_from_selection(ad_ids, angle_id=None, body_area=None, offer_text=No
     responsiveness guarantee run_once provides on its own path, verified
     reachable here by test.
 
+    on_ad_done(ad_id, result), if given, is called after EACH ad's result is known
+    (success, failure, or already-generated skip) - purely additive, so callers
+    that don't need per-ad progress can ignore it. dashboard.py's POST
+    /api/generate background thread uses this to write live progress into the
+    generate_jobs table as each ad finishes, rather than the caller only finding
+    out anything once the entire selection is done - the whole point of Chunk 5's
+    "surface per-ad progress" requirement. Exceptions from this callback are
+    swallowed (logged, not raised) - a progress-reporting bug must never abort an
+    otherwise-successful generation.
+
     Explicit selection deliberately overrides the seen_ads skip
     (process_ad(explicit_selection=True)) - the operator picked this ad on
     purpose, so "already seen" must never silently no-op it. mark_seen still
     runs at the end exactly as normal, so a LATER non-explicit run (run_once)
     still treats it as seen.
 
-    THIS DOES NOT, and cannot from here, override save_artifact's own SEPARATE
-    gate in dedupe.py: save_artifact checks artifacts for an existing
-    (ad_id, angle_id) row and silently no-ops if one exists, UNLESS the
-    module-level FORCE_REPROCESS env var is set - a flag read once at import
-    time (see dedupe.py's own top-of-file note), not a per-call parameter this
-    function can pass through. Re-selecting an ad that already has a saved
-    artifact for this angle will still silently produce no new row unless
-    FORCE_REPROCESS=1 is ALSO set for the process. This is a genuine conflict
-    between "explicit selection overrides seen_ads" and "the artifacts gate is
-    separate and untouched" - reported here (and in CLAUDE.md) rather than
-    worked around, since forcing FORCE_REPROCESS behavior from inside this
-    function would mean silently replacing an existing draft with no backup
-    (dedupe.py's own documented risk for that flag), a much bigger decision than
-    this chunk's scope.
+    regenerate (Chunk 5, Item 7 fix - was a reported, unresolved conflict in
+    Chunk 4, now fixed): False (the default) means an ad that already has an
+    artifact for this angle_id is skipped BEFORE any paid call and reported as
+    "already_generated" - not "processed", not silently discarded after being
+    paid for. True is the operator's explicit ask (the grid marks an
+    already-generated card before they click, per Chunk 5 Item 3 - selecting it
+    anyway IS the ask) - process_ad then versions the outgoing draft (reusing
+    edit_image's own versioning scheme) before overwriting it, and passes
+    regenerate=True through to save_artifact's now-explicit per-call parameter
+    (Item 7b) instead of requiring FORCE_REPROCESS=1 process-wide. This applies
+    to the WHOLE selection in one call - no per-ad_id override in this chunk.
 
     Each selected row's scraped_ads.status moves off 'pool' as it progresses:
     'generating' immediately before process_ad runs, then the ad's own result
-    string ('processed'/'skipped'/'failed') once it returns - so the grid can
-    show what's already been generated from without a separate join.
+    string ('processed'/'skipped'/'failed'/'already_generated') once it returns -
+    so the grid can show what's already been generated from without a separate
+    join.
 
-    Returns {"processed": n, "skipped": n, "failed": n, "by_ad": {ad_id: result}}."""
+    Returns {"processed": n, "skipped": n, "failed": n, "already_generated": n,
+    "by_ad": {ad_id: result}}."""
     from src.config_check import validate_config
     validate_config()
     dedupe.init_db()
@@ -181,8 +191,17 @@ def generate_from_selection(ad_ids, angle_id=None, body_area=None, offer_text=No
             dedupe.record_warning(kind, detail)
     _stop = should_stop or (lambda: False)
 
+    def _report(ad_id, result):
+        if on_ad_done is None:
+            return
+        try:
+            on_ad_done(ad_id, result)
+        except Exception as e:
+            log.warning("generate_from_selection: on_ad_done callback raised for %s (%s: %s), ignored",
+                        ad_id, type(e).__name__, e)
+
     rows_by_ad_id = dedupe.get_scraped_ads_by_ad_ids(ad_ids)
-    summary = {"processed": 0, "skipped": 0, "failed": 0, "by_ad": {}}
+    summary = {"processed": 0, "skipped": 0, "failed": 0, "already_generated": 0, "by_ad": {}}
     for ad_id in ad_ids:
         if _stop():
             log.info("Stop requested, halting selection run.")
@@ -192,17 +211,19 @@ def generate_from_selection(ad_ids, angle_id=None, body_area=None, offer_text=No
             log.warning("Selected ad %s not found in scraped_ads, marking failed.", ad_id)
             summary["failed"] += 1
             summary["by_ad"][ad_id] = "failed"
+            _report(ad_id, "failed")
             continue
         ad = scrape._map_ad(row.get("raw_meta") or {})
         dedupe.update_scraped_ad_status(ad_id, row["competitor_id"], "generating")
         result = process_ad(
             ad, product=product, reference_images=reference_images, messaging_angle=messaging_angle,
             body_area=body_area, offer_text=offer_text, operator_instruction=instruction,
-            should_stop=should_stop, explicit_selection=True,
+            should_stop=should_stop, explicit_selection=True, regenerate=regenerate,
         )
         dedupe.update_scraped_ad_status(ad_id, row["competitor_id"], result)
         summary[result] += 1
         summary["by_ad"][ad_id] = result
+        _report(ad_id, result)
     log.info("generate_from_selection complete: %s", summary)
     return summary
 
@@ -211,7 +232,7 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
                 realism=None, text_in_image=False, include_product=True,
                 body_area=None, offer_text=None, edit_mode=False, operator_instruction=None,
                 check_output=False, retheme_colours=True, ad_index=None, total_ads=None,
-                should_stop=None, explicit_selection=False):
+                should_stop=None, explicit_selection=False, regenerate=False):
     """Run one ad through the full pipeline. Returns processed/skipped/failed.
     messaging_angle, if given, is a resolved angle dict (dedupe.get_angle's shape) - it
     changes the dedup identity of this ad to (ad_id, angle_id) instead of ad_id alone, so
@@ -285,11 +306,21 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
     on purpose from the pool grid, so the seen_ads skip below must not silently no-op it -
     True bypasses that check regardless of FORCE_REPROCESS. mark_seen still runs at the
     end exactly as normal (unchanged), so a LATER non-explicit run (run_once) still treats
-    it as seen. This does NOT bypass save_artifact's own SEPARATE artifacts-table gate
-    (dedupe.py's FORCE_REPROCESS-only check) - re-selecting an ad that already has a
-    saved artifact for this angle still silently no-ops at the save step unless
-    FORCE_REPROCESS=1 is ALSO set. That's a real, reported (not patched) gap between the
-    two gates - see CLAUDE.md and generate_from_selection's own docstring."""
+    it as seen.
+
+    regenerate (Chunk 5, Item 7 fix): the ORDERING defect - deconstruct and Gemini are
+    both paid, and save_artifact's own gate used to discard that paid result AFTER the
+    fact - is fixed by checking for an existing artifact BEFORE any paid call (below,
+    right after the seen_ads check) rather than relying on save_artifact's after-the-fact
+    gate alone. Only meaningful when explicit_selection=True (run_once never regenerates):
+    if an artifact already exists for (ad_id, angle_id) and regenerate is False (the
+    default), this returns "already_generated" having spent nothing. regenerate=True is
+    the operator's explicit ask (surfaced by the grid marking an already-generated card,
+    per Chunk 5 Item 3) - it versions the outgoing draft via
+    generate_image_prompt.version_current_draft (edit_image's own versioning scheme,
+    reused rather than duplicated) before generate_image overwrites it, and passes
+    regenerate=True through to save_artifact's now-explicit per-call parameter instead of
+    requiring FORCE_REPROCESS=1 process-wide."""
     ad_id = ad.get("ad_id")
     if not ad_id:
         return "failed"
@@ -305,6 +336,17 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
         if not explicit_selection and not FORCE_REPROCESS and not dedupe.is_new(ad_id, angle_id):
             log.info("Ad %s already seen for angle_id=%s, skipping", ad_id, angle_id)
             return "skipped"
+
+        # Item 7a: check BEFORE any paid call, not after. explicit_selection is the only
+        # path this can ever fire on - run_once never sets it, so its behaviour is
+        # untouched. Never pay for a deconstruct/Gemini call just to have save_artifact
+        # silently discard the result afterward.
+        if explicit_selection and not regenerate:
+            existing = dedupe.get_artifact(ad_id, angle_id=angle_id)
+            if existing is not None:
+                log.info("Ad %s already generated for angle_id=%s, skipping (regenerate not requested)",
+                         ad_id, angle_id)
+                return "already_generated"
 
         log.info("Ad %s (index %s/%s): deconstruct starting", ad_id, ad_index, total_ads)
         image_bytes = assets.download_image_bytes(ad["image_url"])
@@ -421,6 +463,17 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
         if _stop():
             log.info("Ad %s: stop requested, skipping before the paid image generation call", ad_id)
             return "skipped"
+
+        # Item 7c: a deliberate regenerate must version the outgoing draft BEFORE
+        # generate_image overwrites it, reusing edit_image's own versioning scheme
+        # (generate_image_prompt.version_current_draft) rather than a new one. Only
+        # reachable when explicit_selection already confirmed (above) that a prior
+        # artifact/draft exists for this (ad_id, angle_id) - never fires for a fresh ad.
+        if explicit_selection and regenerate:
+            versioned = generate_image_prompt.version_current_draft(ad_id, angle_slug)
+            if versioned:
+                log.info("Ad %s: versioned outgoing draft as %s before regenerating", ad_id, versioned)
+
         log.info("Ad %s: image generation starting (edit_mode=%s)", ad_id, edit_mode)
         try:
             draft_image = generate_image_prompt.generate_image(
@@ -467,6 +520,10 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
             operator_instruction=operator_instruction or "",
             format_flag=format_flag,
             product_override_note=product_override_note,
+            # None (not explicit_selection) preserves save_artifact's own
+            # FORCE_REPROCESS-driven default exactly - only an explicit-selection
+            # regenerate passes an explicit True, per Item 7b.
+            regenerate=(regenerate if explicit_selection else None),
         )
 
         if check_output:

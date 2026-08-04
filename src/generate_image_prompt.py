@@ -976,6 +976,52 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
         return None
 
 
+def _current_draft_bytes(ad_id, angle_slug=None):
+    """Read the CURRENT draft image bytes for (ad_id, angle_slug) - local disk first
+    (ASSET_DIR), then the GCS bucket - or None if there is no current draft at all
+    (e.g. a first-ever generation). Mirrors the lookup dashboard.py's api_edit_image
+    already does inline for the same purpose; extracted here so
+    version_current_draft below has exactly one source for "what's there right now"."""
+    stem = _draft_stem(ad_id, angle_slug)
+    local = ASSET_DIR / f"{stem}_draft.png"
+    if local.exists():
+        return local.read_bytes()
+    try:
+        from google.cloud import storage
+        blob = storage.Client().bucket(assets.asset_bucket_name()).blob(f"{stem}_draft.png")
+        if blob.exists():
+            return blob.download_as_bytes()
+    except Exception:
+        pass
+    return None
+
+
+def version_current_draft(ad_id, angle_slug=None):
+    """Preserve the CURRENT draft (if any) as {stem}_draft_v{n}.png - both locally and
+    in the bucket - before something is about to overwrite {stem}_draft.png with new
+    content. This is edit_image's own versioning scheme (same _next_draft_version
+    numbering, same {stem}_draft_v{n}.png naming), extracted so a deliberate
+    regenerate-from-scratch (pipeline.process_ad, Chunk 5 Item 7c) can reuse it
+    instead of inventing a second one. Returns the version filename, or None if
+    there was no current draft to preserve (nothing to version on a first-ever
+    generation)."""
+    current = _current_draft_bytes(ad_id, angle_slug)
+    if current is None:
+        return None
+    stem = _draft_stem(ad_id, angle_slug)
+    ASSET_DIR.mkdir(exist_ok=True)
+    version_name = f"{stem}_draft_v{_next_draft_version(ad_id, angle_slug)}.png"
+    with open(ASSET_DIR / version_name, "wb") as f:
+        f.write(current)
+    try:
+        from google.cloud import storage
+        storage.Client().bucket(assets.asset_bucket_name()).blob(version_name).upload_from_string(
+            current, content_type="image/png")
+    except Exception as e:
+        print(f"[version_current_draft] ad_id={ad_id} bucket upload failed (non-fatal): {e}")
+    return version_name
+
+
 def _next_draft_version(ad_id, angle_slug=None):
     """Next free n for {stem}_draft_v{n}.png (1-based), stem = _draft_stem(ad_id, angle_slug).
     Uses a prefix scan rather than glob() so an ad_id containing glob metacharacters can't

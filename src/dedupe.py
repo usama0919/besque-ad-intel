@@ -163,7 +163,7 @@ def init_artifacts():
 
 def save_artifact(ad_id, page_name, image_path, blueprint, generated_copy, draft_image, metadata,
                    image_prompt="", copy_prompt="", model_info="", angle_id=None, text_in_image=False,
-                   operator_instruction="", format_flag="", product_override_note=""):
+                   operator_instruction="", format_flag="", product_override_note="", regenerate=None):
     """Persist all artifacts for one (ad_id, angle_id) pair with a timestamp. Skips if that
     exact pair is already stored. angle_id=None reproduces the pre-angle behaviour exactly -
     one artifact per ad_id. A different angle_id for an already-processed ad is a distinct
@@ -180,9 +180,19 @@ def save_artifact(ad_id, page_name, image_path, blueprint, generated_copy, draft
     product_override_note (silent-override audit, 2026-08-05) is set by process_ad when
     resolve_effective_include_product forced include_product off against an explicit
     operator True - worded so the operator understands the reference had no product to
-    substitute, not just that the toggle "didn't work." Empty when no override happened."""
+    substitute, not just that the toggle "didn't work." Empty when no override happened.
+
+    regenerate (Chunk 5, Item 7b): explicit per-call override for whether an existing
+    (ad_id, angle_id) row gets replaced. regenerate=None (the default) preserves EXACTLY
+    today's behaviour - driven by the FORCE_REPROCESS env var read once at import time -
+    so every existing caller is unaffected. Pass True/False explicitly to decide this
+    PER CALL instead: pipeline.process_ad's deliberate-regenerate path (an operator
+    explicitly re-selecting an already-generated ad) passes this rather than requiring
+    FORCE_REPROCESS=1 set for the whole process, which would also silently affect every
+    OTHER save_artifact call happening anywhere else in that same run."""
+    effective_regenerate = FORCE_REPROCESS if regenerate is None else regenerate
     with get_conn() as conn, conn.cursor() as cur:
-        if FORCE_REPROCESS:
+        if effective_regenerate:
             cur.execute("DELETE FROM artifacts WHERE ad_id = %s AND angle_id IS NOT DISTINCT FROM %s", (ad_id, angle_id))
         else:
             cur.execute("SELECT 1 FROM artifacts WHERE ad_id = %s AND angle_id IS NOT DISTINCT FROM %s", (ad_id, angle_id))
@@ -822,6 +832,116 @@ def update_scraped_ad_status(ad_id, competitor_id, status):
             (status, ad_id, competitor_id),
         )
         conn.commit()
+
+
+def get_artifact_ad_ids(ad_ids, angle_id=None):
+    """Which of the given ad_ids already have an artifacts row for angle_id
+    (Chunk 5, Item 3) - the grid marks a card as already-generated for the
+    CURRENTLY SELECTED angle BEFORE the operator clicks, not after. Deliberately
+    angle_id-specific, unlike scraped_ads.status (Chunk 4), which is angle-
+    agnostic: the same ad can be generated for one angle and still fresh for
+    another, and the grid's marking must reflect THAT, not a single flat
+    per-row status that can't tell the two apart."""
+    if not ad_ids:
+        return set()
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT ad_id FROM artifacts WHERE ad_id = ANY(%s) AND angle_id IS NOT DISTINCT FROM %s",
+            (list(ad_ids), angle_id),
+        )
+        return {row[0] for row in cur.fetchall()}
+
+
+# ---- Generate jobs (Chunk 5, Item 4) - backgrounds POST /api/generate exactly
+# like fetch_jobs backgrounds POST /api/fetch, so a browser request doesn't block
+# on a multi-ad generation run. Keyed by an opaque job id (a uuid, not a
+# competitor_id) since one generation call can span ad_ids from different
+# competitors - there is no single natural key the way fetch_pool has one.
+# DB-backed for the same multi-instance reason fetch_jobs/pipeline_warnings/
+# run_progress all are (CLAUDE.md, ship.ps1's --min-instances 1 --max-instances 5). ----
+
+def init_generate_jobs():
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS generate_jobs (
+                id             TEXT PRIMARY KEY,
+                status         TEXT NOT NULL DEFAULT 'running',
+                ad_ids         JSONB,
+                progress       JSONB DEFAULT '{}'::jsonb,
+                result         JSONB,
+                error          TEXT,
+                stop_requested BOOLEAN DEFAULT false,
+                started_at     TIMESTAMPTZ DEFAULT now(),
+                finished_at    TIMESTAMPTZ
+            )
+        """)
+        conn.commit()
+
+
+def start_generate_job(job_id, ad_ids):
+    """Create a 'running' job row - one per POST /api/generate call, never reused
+    across calls (unlike fetch_jobs, which is one row per competitor and gets
+    reclaimed on the next fetch)."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO generate_jobs (id, status, ad_ids, progress, result, error, stop_requested, started_at, finished_at)
+               VALUES (%s, 'running', %s, '{}'::jsonb, NULL, NULL, false, now(), NULL)""",
+            (job_id, _json.dumps(list(ad_ids))),
+        )
+        conn.commit()
+
+
+def update_generate_job_progress(job_id, ad_id, result):
+    """Merge one ad's result into the job's progress dict - called after EACH ad
+    finishes (pipeline.generate_from_selection's on_ad_done callback), so a
+    poller sees live per-ad progress, not just the final summary once the whole
+    selection is done. The JSONB `||` merge is a single atomic statement, not
+    read-then-write - safe even if something else touched this row concurrently."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "UPDATE generate_jobs SET progress = progress || %s::jsonb WHERE id=%s",
+            (_json.dumps({ad_id: result}), job_id),
+        )
+        conn.commit()
+
+
+def finish_generate_job(job_id, result=None, error=None):
+    """Record the terminal state of one generate job - 'done' with the
+    generate_from_selection summary dict, or 'error' with the exception message.
+    Must be called from the background thread's own try/except (both branches) -
+    a thread that dies without reaching this leaves the row stuck on 'running'."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "UPDATE generate_jobs SET status=%s, result=%s, error=%s, finished_at=now() WHERE id=%s",
+            ("error" if error else "done",
+             _json.dumps(result) if result is not None else None,
+             error, job_id),
+        )
+        conn.commit()
+
+
+def request_generate_job_stop(job_id):
+    """Flip stop_requested for one job - polled by the background thread's own
+    should_stop callable, checked both between ads AND immediately before the
+    paid Gemini call (Chunk 5, Item 5) via the same plumbing Chunk 4 already
+    built into process_ad/generate_from_selection."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("UPDATE generate_jobs SET stop_requested=true WHERE id=%s", (job_id,))
+        conn.commit()
+
+
+def get_generate_job(job_id):
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, status, ad_ids, progress, result, error, stop_requested, started_at, finished_at "
+            "FROM generate_jobs WHERE id=%s",
+            (job_id,),
+        )
+        r = cur.fetchone()
+        if r is None:
+            return None
+        return {"id": r[0], "status": r[1], "ad_ids": r[2], "progress": r[3], "result": r[4],
+                "error": r[5], "stop_requested": r[6], "started_at": r[7], "finished_at": r[8]}
 
 
 # ---- Fetch jobs (Chunk 2C) - backgrounds POST /api/fetch so a browser request

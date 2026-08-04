@@ -56,7 +56,8 @@ def test_generate_from_selection_one_ad_generates_exactly_one(monkeypatch):
     _mock_success(monkeypatch)
     try:
         result = pipeline.generate_from_selection([ad_id])
-        assert result == {"processed": 1, "skipped": 0, "failed": 0, "by_ad": {ad_id: "processed"}}
+        assert result == {"processed": 1, "skipped": 0, "failed": 0, "already_generated": 0,
+                          "by_ad": {ad_id: "processed"}}
         assert dedupe.is_new(ad_id) is False  # mark_seen ran
         row = dedupe.get_scraped_ads(competitor_id=cid)[0]
         assert row["status"] == "processed"  # item 6: moved off 'pool'
@@ -87,7 +88,7 @@ def test_generate_from_selection_unknown_ad_id_recorded_failed_not_raised():
     cid = _make_competitor()
     try:
         result = pipeline.generate_from_selection(["NO_SUCH_AD_ID_XYZ"])
-        assert result == {"processed": 0, "skipped": 0, "failed": 1,
+        assert result == {"processed": 0, "skipped": 0, "failed": 1, "already_generated": 0,
                            "by_ad": {"NO_SUCH_AD_ID_XYZ": "failed"}}
     finally:
         dedupe.delete_competitor(cid)
@@ -202,13 +203,12 @@ def test_generate_from_selection_overrides_seen_ads_skip(monkeypatch):
         _cleanup(cid, [ad_id])
 
 
-def test_generate_from_selection_does_not_bypass_save_artifact_gate_reported_conflict(monkeypatch):
-    """Documents the real, reported gap: explicit_selection bypasses process_ad's
-    seen_ads check, but save_artifact has its OWN separate gate (an existing
-    artifacts row for this (ad_id, angle_id) + FORCE_REPROCESS unset -> silent
-    no-op). Re-selecting an ad that already has a saved artifact does NOT
-    produce a new artifact row without FORCE_REPROCESS=1 - proven here with the
-    REAL (unmocked) save_artifact, not the usual _mock_success stand-in."""
+def test_generate_from_selection_already_generated_skip_spends_nothing(monkeypatch):
+    """Chunk 5, Item 7 fix: the ordering defect is closed by checking for an
+    existing artifact BEFORE any paid call. regenerate=False (the default) means
+    re-selecting an already-generated ad must return "already_generated" having
+    called neither deconstruct nor generate_image - not "processed" with a
+    silently discarded result (the old, now-fixed, reported conflict)."""
     cid = _make_competitor()
     ad_id = _seed_scraped_ad(cid)
     dedupe.init_artifacts()
@@ -217,8 +217,47 @@ def test_generate_from_selection_does_not_bypass_save_artifact_gate_reported_con
         blueprint={"format": "hero"}, generated_copy={"headline": "Old"},
         draft_image="assets/x_draft.png", metadata={"cta": "Shop", "destination_url": "http://x"},
     )
-    before_rows = len(dedupe.get_artifacts(ad_id))
-    assert before_rows == 1
+    deconstruct_calls = []
+    image_calls = []
+    monkeypatch.setattr(pipeline.deconstruct, "deconstruct_image",
+                        lambda **k: deconstruct_calls.append(1) or {"format": "hero", "angle": "a"})
+    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image",
+                        lambda *a, **k: image_calls.append(1))
+    try:
+        result = pipeline.generate_from_selection([ad_id])  # regenerate defaults False
+        assert result["by_ad"][ad_id] == "already_generated"
+        assert result["already_generated"] == 1
+        assert deconstruct_calls == [], "must never pay for deconstruct on an already-generated ad"
+        assert image_calls == [], "must never reach generate_image on an already-generated ad"
+        assert len(dedupe.get_artifacts(ad_id)) == 1  # unchanged - still just the original
+        row = dedupe.get_scraped_ads(competitor_id=cid)[0]
+        assert row["status"] == "already_generated"
+    finally:
+        _cleanup(cid, [ad_id])
+
+
+def test_generate_from_selection_regenerate_versions_the_draft_and_writes_new_content(monkeypatch):
+    """regenerate=True is the operator's explicit ask (the grid marked this card
+    already-generated and they selected it anyway) - it must version the
+    outgoing draft (edit_image's own scheme, reused) and actually replace the
+    artifact content, using the REAL (unmocked) save_artifact and a REAL
+    (unmocked) version_current_draft to prove the file gets preserved."""
+    cid = _make_competitor()
+    ad_id = _seed_scraped_ad(cid)
+    dedupe.init_artifacts()
+    dedupe.save_artifact(
+        ad_id=ad_id, page_name="Brand", image_path="assets/x.jpg",
+        blueprint={"format": "hero"}, generated_copy={"headline": "Old"},
+        draft_image="assets/x_draft.png", metadata={"cta": "Shop", "destination_url": "http://x"},
+    )
+    from src import generate_image_prompt
+    import tempfile
+    from pathlib import Path as _Path
+    tmp_asset_dir = _Path(tempfile.mkdtemp())
+    monkeypatch.setattr(generate_image_prompt, "ASSET_DIR", tmp_asset_dir)
+    # Simulate an existing draft PNG on disk for this ad, at the exact stem
+    # version_current_draft/generate_image both key off.
+    (tmp_asset_dir / f"{ad_id}_draft.png").write_bytes(b"OLD-DRAFT-BYTES")
 
     monkeypatch.setattr(pipeline.assets, "download_image", lambda url, aid: "fake.jpg")
     monkeypatch.setattr(pipeline.assets, "download_image_bytes", lambda url: b"fake-bytes")
@@ -228,20 +267,111 @@ def test_generate_from_selection_does_not_bypass_save_artifact_gate_reported_con
                                                          "image_subtext": "S", "cta": "C"})
     monkeypatch.setattr(pipeline.compliance, "check_compliance", lambda copy, name, text, **k: (True, []))
     monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image",
-                        lambda bp, aid, product=None, reference_images=None, **k: "draft.png")
+                        lambda bp, aid, product=None, reference_images=None, **k: str(tmp_asset_dir / f"{aid}_draft.png"))
     monkeypatch.setattr(pipeline.slack_review, "post_review", lambda *a, **k: {"ts": "123"})
-    # save_artifact deliberately NOT mocked - that's the entire point of this test.
+    # save_artifact and version_current_draft deliberately NOT mocked.
     try:
-        result = pipeline.generate_from_selection([ad_id])
-        # explicit_selection got PAST the seen_ads skip and process_ad reports
-        # "processed" (save_artifact's own early-return isn't visible in the
-        # return value at all) - but no NEW artifact row was actually written.
+        result = pipeline.generate_from_selection([ad_id], regenerate=True)
         assert result["by_ad"][ad_id] == "processed"
-        after_rows = len(dedupe.get_artifacts(ad_id))
-        assert after_rows == before_rows == 1, (
-            "save_artifact's own gate silently no-ops without FORCE_REPROCESS=1, "
-            "even though explicit_selection bypassed the seen_ads check - the "
-            "reported conflict, not a regression in this test"
-        )
+        assert (tmp_asset_dir / f"{ad_id}_draft_v1.png").exists(), \
+            "the pre-regenerate draft must be preserved as a version, not just overwritten"
+        assert (tmp_asset_dir / f"{ad_id}_draft_v1.png").read_bytes() == b"OLD-DRAFT-BYTES"
+        rows = dedupe.get_artifacts(ad_id)
+        assert len(rows) == 1  # replaced in place (DELETE+INSERT), not appended as a second row
+        row = dedupe.get_scraped_ads(competitor_id=cid)[0]
+        assert row["status"] == "processed"
     finally:
         _cleanup(cid, [ad_id])
+
+
+def test_generate_from_selection_reports_progress_via_on_ad_done_callback(monkeypatch):
+    """on_ad_done must fire once per ad with its actual result - the mechanism
+    dashboard.py's POST /api/generate uses for live per-ad progress (Chunk 5,
+    Item 4)."""
+    cid = _make_competitor()
+    ad_id = _seed_scraped_ad(cid)
+    _mock_success(monkeypatch)
+    seen = []
+    try:
+        pipeline.generate_from_selection([ad_id], on_ad_done=lambda aid, result: seen.append((aid, result)))
+        assert seen == [(ad_id, "processed")]
+    finally:
+        _cleanup(cid, [ad_id])
+
+
+def test_generate_from_selection_on_ad_done_exception_does_not_abort_run(monkeypatch):
+    """A progress-reporting bug must never abort an otherwise-successful generation."""
+    cid = _make_competitor()
+    ad_id = _seed_scraped_ad(cid)
+    _mock_success(monkeypatch)
+
+    def boom(ad_id, result):
+        raise RuntimeError("progress sink is down")
+    try:
+        result = pipeline.generate_from_selection([ad_id], on_ad_done=boom)
+        assert result["by_ad"][ad_id] == "processed"
+    finally:
+        _cleanup(cid, [ad_id])
+
+
+# ---- Item 7b: save_artifact's regenerate param is an explicit per-call override,
+# defaulting to preserve today's FORCE_REPROCESS-driven behaviour ----
+
+def test_save_artifact_regenerate_true_replaces_regardless_of_module_flag(monkeypatch):
+    ad_id = f"SAV_{uuid.uuid4().hex[:8]}"
+    monkeypatch.setattr(dedupe, "FORCE_REPROCESS", False)  # module flag says "don't"
+    dedupe.init_artifacts()
+    try:
+        dedupe.save_artifact(ad_id=ad_id, page_name="Brand", image_path="x", blueprint={"v": 1},
+                             generated_copy={}, draft_image="d1.png", metadata={})
+        dedupe.save_artifact(ad_id=ad_id, page_name="Brand", image_path="x", blueprint={"v": 2},
+                             generated_copy={}, draft_image="d2.png", metadata={}, regenerate=True)
+        rows = dedupe.get_artifacts(ad_id)
+        assert len(rows) == 1
+        assert rows[0][1]["v"] == 2  # replaced, not left as v==1 or duplicated
+    finally:
+        with dedupe.get_conn() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM artifacts WHERE ad_id=%s", (ad_id,))
+            conn.commit()
+
+
+def test_save_artifact_regenerate_false_no_ops_regardless_of_module_flag(monkeypatch):
+    ad_id = f"SAV_{uuid.uuid4().hex[:8]}"
+    monkeypatch.setattr(dedupe, "FORCE_REPROCESS", True)  # module flag says "do"
+    dedupe.init_artifacts()
+    try:
+        dedupe.save_artifact(ad_id=ad_id, page_name="Brand", image_path="x", blueprint={"v": 1},
+                             generated_copy={}, draft_image="d1.png", metadata={})
+        dedupe.save_artifact(ad_id=ad_id, page_name="Brand", image_path="x", blueprint={"v": 2},
+                             generated_copy={}, draft_image="d2.png", metadata={}, regenerate=False)
+        rows = dedupe.get_artifacts(ad_id)
+        assert len(rows) == 1
+        assert rows[0][1]["v"] == 1  # explicit False wins over the module flag - untouched
+    finally:
+        with dedupe.get_conn() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM artifacts WHERE ad_id=%s", (ad_id,))
+            conn.commit()
+
+
+def test_save_artifact_regenerate_none_preserves_module_flag_behaviour(monkeypatch):
+    """The default (no regenerate param passed) must behave EXACTLY as before this
+    chunk - existing callers (run_once via process_ad with explicit_selection=False)
+    are unaffected."""
+    ad_id = f"SAV_{uuid.uuid4().hex[:8]}"
+    dedupe.init_artifacts()
+    try:
+        monkeypatch.setattr(dedupe, "FORCE_REPROCESS", False)
+        dedupe.save_artifact(ad_id=ad_id, page_name="Brand", image_path="x", blueprint={"v": 1},
+                             generated_copy={}, draft_image="d1.png", metadata={})
+        dedupe.save_artifact(ad_id=ad_id, page_name="Brand", image_path="x", blueprint={"v": 2},
+                             generated_copy={}, draft_image="d2.png", metadata={})
+        assert dedupe.get_artifacts(ad_id)[0][1]["v"] == 1  # no-op, FORCE_REPROCESS was False
+
+        monkeypatch.setattr(dedupe, "FORCE_REPROCESS", True)
+        dedupe.save_artifact(ad_id=ad_id, page_name="Brand", image_path="x", blueprint={"v": 3},
+                             generated_copy={}, draft_image="d3.png", metadata={})
+        assert dedupe.get_artifacts(ad_id)[0][1]["v"] == 3  # replaced, FORCE_REPROCESS was True
+    finally:
+        with dedupe.get_conn() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM artifacts WHERE ad_id=%s", (ad_id,))
+            conn.commit()

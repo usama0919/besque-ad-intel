@@ -3,6 +3,7 @@ Read-only view + approve/reject + run trigger. Uses existing pipeline/db.
 """
 import os
 import threading
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from dotenv import load_dotenv
@@ -42,6 +43,8 @@ _run_status = {"running": False, "last_summary": None, "stop_requested": False, 
 _run_thread = None
 # Same reasoning as _run_thread above, for api_fetch_pool's background thread.
 _fetch_thread = None
+# Same reasoning again, for api_generate's background thread (Chunk 5).
+_generate_thread = None
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -750,7 +753,7 @@ def _days_running(start_raw, stop_raw):
 
 
 @app.get("/api/pool/cards")
-def api_pool_cards(competitor_id: int = None, status: str = "pool", limit: int = 200):
+def api_pool_cards(competitor_id: int = None, status: str = "pool", limit: int = 200, angle_id: int = None):
     """Flattened, judgeable-fields-only view of the pool for the Chunk 3
     browse-and-pick grid - deliberately a SEPARATE endpoint from GET /api/pool
     above (which stays a dumb raw_meta-in-full passthrough) rather than a query
@@ -764,9 +767,20 @@ def api_pool_cards(competitor_id: int = None, status: str = "pool", limit: int =
     (default 200, no hardcoded 50) and applied AFTER sorting: the pool for this
     filter is fetched and sorted in full first (dedupe.get_scraped_ads with no
     SQL limit), so limiting here never truncates by database row order instead
-    of by days_running."""
+    of by days_running.
+
+    angle_id (Chunk 5, Item 3): each card's "already_generated" flag reflects
+    whether an artifact already exists for THIS angle specifically (via
+    dedupe.get_artifact_ad_ids), not scraped_ads.status (Chunk 4's flat,
+    angle-agnostic status) - the same ad can be fresh for one angle and already
+    generated for another, and the grid must show the CURRENTLY SELECTED angle's
+    truth, not a single per-row flag that can't distinguish the two. angle_id
+    omitted/None checks the "no angle" identity, same as everywhere else angle_id
+    is used as a dedup key."""
     dedupe.init_scraped_ads()
+    dedupe.init_artifacts()
     rows = dedupe.get_scraped_ads(competitor_id=competitor_id, status=status, limit=None)
+    generated_ad_ids = dedupe.get_artifact_ad_ids([r["ad_id"] for r in rows], angle_id=angle_id)
     cards = []
     for r in rows:
         meta = r.get("raw_meta") or {}
@@ -783,6 +797,7 @@ def api_pool_cards(competitor_id: int = None, status: str = "pool", limit: int =
             "cta_text": meta.get("cta_text"),
             "page_name": meta.get("page_name") or "",
             "fetched_at": r["fetched_at"].strftime("%Y-%m-%d %H:%M:%S") if r.get("fetched_at") else "",
+            "already_generated": r["ad_id"] in generated_ad_ids,
         })
     cards.sort(key=lambda c: (c["days_running"] is None, -(c["days_running"] or 0)))
     return JSONResponse({"total": len(cards), "limit": limit, "cards": cards[:limit]})
@@ -862,6 +877,94 @@ def api_fetch_status(competitor_id: int):
     if job is None:
         return JSONResponse({"status": "none", "result": None, "error": None})
     return JSONResponse({"status": job["status"], "result": job["result"], "error": job["error"]})
+
+
+@app.post("/api/generate")
+async def api_generate(request: Request):
+    """Start pipeline.generate_from_selection on a background thread and return
+    immediately (Chunk 5, Item 4) - same backgrounding pattern as POST /api/fetch:
+    a multi-ad generation run is exactly the kind of multi-minute call that must
+    never block the request. Poll GET /api/generate/status?job_id=... for live
+    per-ad progress and the terminal state.
+
+    Body: ad_ids (required, non-empty list), angle_id/body_area/offer_text/
+    instruction/product_id (the existing per-run inputs, reused as-is - Item 1),
+    regenerate (bool, default False - the operator's explicit ask after seeing a
+    card marked already-generated, Item 3/7c).
+
+    should_stop is a DB-backed poll of this job's own stop_requested flag (Item 5)
+    - forwarded into generate_from_selection, which checks it BETWEEN ads and
+    passes it into process_ad, which checks it once more immediately before the
+    paid Gemini call. on_ad_done writes live progress into generate_jobs.progress
+    after each ad finishes, not just once the whole selection is done."""
+    body = await request.json()
+    ad_ids = body.get("ad_ids")
+    if not ad_ids or not isinstance(ad_ids, list):
+        return JSONResponse({"ok": False, "error": "ad_ids (a non-empty list) required"}, status_code=400)
+    angle_id = body.get("angle_id")
+    body_area = (body.get("body_area") or "").strip() or None
+    offer_text = (body.get("offer_text") or "").strip() or None
+    instruction = (body.get("instruction") or "").strip() or None
+    product_id = body.get("product_id")
+    regenerate = bool(body.get("regenerate", False))
+
+    job_id = uuid.uuid4().hex
+    dedupe.init_generate_jobs()
+    dedupe.start_generate_job(job_id, ad_ids)
+
+    from src import pipeline
+
+    def _on_ad_done(ad_id, result):
+        dedupe.update_generate_job_progress(job_id, ad_id, result)
+
+    def _job_should_stop():
+        job = dedupe.get_generate_job(job_id)
+        return bool(job and job.get("stop_requested"))
+
+    def _run_generate():
+        try:
+            result = pipeline.generate_from_selection(
+                ad_ids, angle_id=angle_id, body_area=body_area, offer_text=offer_text,
+                instruction=instruction, product_id=product_id, regenerate=regenerate,
+                should_stop=_job_should_stop, on_ad_done=_on_ad_done,
+            )
+            dedupe.finish_generate_job(job_id, result=result)
+        except Exception as e:
+            dedupe.finish_generate_job(job_id, error=str(e))
+
+    global _generate_thread
+    _generate_thread = threading.Thread(target=_run_generate, daemon=True)
+    _generate_thread.start()
+    return JSONResponse({"ok": True, "started": True, "job_id": job_id})
+
+
+@app.get("/api/generate/status")
+def api_generate_status(job_id: str):
+    """Poll one generation job - 'running'/'done'/'error', or 'none' if job_id is
+    unrecognised. progress is {ad_id: result} filled in live as each ad finishes;
+    result is generate_from_selection's final summary dict once status is 'done'."""
+    dedupe.init_generate_jobs()
+    job = dedupe.get_generate_job(job_id)
+    if job is None:
+        return JSONResponse({"status": "none", "progress": {}, "result": None, "error": None})
+    return JSONResponse({
+        "status": job["status"], "progress": job["progress"] or {},
+        "result": job["result"], "error": job["error"],
+    })
+
+
+@app.post("/api/generate/stop")
+async def api_generate_stop(request: Request):
+    """Request a running generation job halt - checked by that job's own
+    background thread both between ads and immediately before the next paid
+    Gemini call (Item 5), never just between ads."""
+    body = await request.json()
+    job_id = body.get("job_id")
+    if not job_id:
+        return JSONResponse({"ok": False, "error": "job_id required"}, status_code=400)
+    dedupe.init_generate_jobs()
+    dedupe.request_generate_job_stop(job_id)
+    return JSONResponse({"ok": True})
 
 
 @app.get("/api/stats")
