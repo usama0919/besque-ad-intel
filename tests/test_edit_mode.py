@@ -90,6 +90,24 @@ def test_edit_mode_instruction_and_rule6_agree_text_in_image_true():
     assert "NEVER render any headline" not in rule6
 
 
+def test_edit_mode_instruction_text_branch_states_entire_text_budget():
+    instruction = generate_image_prompt._edit_mode_instruction(
+        text_in_image=True, headline="Headline", subtext="Short line."
+    )
+    text_section = instruction.split("TEXT:")[1].split("OFFER:")[0]
+    assert "ENTIRE text budget for this image" in text_section
+    assert "ingredient list" in text_section
+
+
+def test_edit_mode_instruction_caps_overlong_subtext():
+    long_text = " ".join(f"word{i}" for i in range(30))
+    instruction = generate_image_prompt._edit_mode_instruction(
+        text_in_image=True, headline="Headline", subtext=long_text
+    )
+    assert "word11" in instruction
+    assert "word12" not in instruction
+
+
 def test_edit_mode_instruction_and_rule6_agree_text_in_image_false():
     instruction = generate_image_prompt._edit_mode_instruction(text_in_image=False)
     rule6 = generate_image_prompt._rule6_text_policy(text_in_image=False)

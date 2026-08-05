@@ -236,6 +236,23 @@ _RULES_1_TO_5 = (
 )
 
 
+MAX_SUBTEXT_WORDS = 12
+
+
+def _cap_subtext(subtext):
+    """Hard cap on the in-image supporting line at MAX_SUBTEXT_WORDS - mechanical, not
+    just prompted, since generate_copy.py's own "under ~12 words" instruction to the
+    copy step is a soft constraint the model doesn't always obey. A live failure: an
+    overlong image_subtext (a mechanism paragraph, ingredient bullets, a CTA sentence)
+    reached rule 6 verbatim, and rule 6 has no length limit of its own - it renders
+    whatever text it's told is authorised. Truncates on a word boundary; never adds
+    an ellipsis or other invented text that could itself render as content."""
+    if not subtext:
+        return subtext
+    words = subtext.split()
+    return subtext if len(words) <= MAX_SUBTEXT_WORDS else " ".join(words[:MAX_SUBTEXT_WORDS])
+
+
 def effective_authorised_text(text_in_image, headline=None, subtext=None):
     """The (headline, subtext) actually authorised to render in-scene, given text_in_image -
     the single source for a condition (text_in_image and headline) that used to be
@@ -247,9 +264,13 @@ def effective_authorised_text(text_in_image, headline=None, subtext=None):
     caller that needs to know "what text is the model/critic actually told is allowed"
     must call this, not re-check text_in_image/headline itself - see
     test_rule6_and_critic_authorised_text_never_contradict, which exists because two
-    independent truthy checks drifted apart in exactly this way."""
+    independent truthy checks drifted apart in exactly this way.
+
+    subtext is passed through _cap_subtext here - the ONE place both rule 6 and
+    _edit_mode_instruction's TEXT branch get their authorised text from, so a
+    generation-time cap can never be bypassed by one caller and not the other."""
     if text_in_image and headline:
-        return headline, subtext
+        return headline, _cap_subtext(subtext)
     return None, None
 
 
@@ -268,9 +289,12 @@ def _rule6_text_policy(text_in_image=False, headline=None, subtext=None):
         return (
             f"6) TEXT POLICY (STRICT, TEXT-IN-IMAGE MODE): the ONLY text permitted anywhere "
             f"in the image is {permitted}, rendered as in-scene typography, plus the Besque "
-            f"product's own printed label. NEVER render any price, discount, percentage, "
-            f"offer, badge, sticker, sticky note, extra caption, tagline, watermark, or extra "
-            f"logo, whether copied from the competitor ad or invented. "
+            f"product's own printed label. This is the ENTIRE text budget for this image - "
+            f"no ingredient list, mechanism or benefit paragraph, additional body copy, or "
+            f"CTA sentence may ALSO be rendered, even if such text exists in the product "
+            f"description, generated copy, or reference ad. NEVER render any price, discount, "
+            f"percentage, offer, badge, sticker, sticky note, extra caption, tagline, "
+            f"watermark, or extra logo, whether copied from the competitor ad or invented. "
         )
     return (
         "6) TEXT POLICY (STRICT): the Besque product's own printed label — exactly as shown on "
@@ -650,9 +674,12 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             f"the wording with {permitted}, same layout, our words. Typography (typeface "
             f"weight, casing, placement) and text colour are INHERITED from the "
             f"reference exactly as shown, never re-themed or restyled to a different "
-            f"look - the wording is the ONLY thing that changes. The competitor's brand "
-            f"name, product name, and claims must NEVER survive into the output, even "
-            f"inside this inherited styling. "
+            f"look - the wording is the ONLY thing that changes. This is the ENTIRE text "
+            f"budget for this image - no ingredient list, mechanism or benefit paragraph, "
+            f"additional body copy, or CTA sentence may ALSO be rendered, even if such "
+            f"text exists in the product description, generated copy, or reference ad. "
+            f"The competitor's brand name, product name, and claims must NEVER survive "
+            f"into the output, even inside this inherited styling. "
         )
     else:
         base += (

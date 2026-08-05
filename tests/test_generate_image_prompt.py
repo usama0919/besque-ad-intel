@@ -31,6 +31,51 @@ def test_prompt_handles_missing_visual_gracefully():
     assert len(prompt) > 20
 
 
+# ---- Text volume: subtext hard-capped so a copy step that ignores its own "under ~12
+# words" instruction can't blow rule 6's in-image text budget ----
+
+def test_cap_subtext_truncates_overlong_text():
+    long_text = " ".join(f"word{i}" for i in range(30))
+    capped = generate_image_prompt._cap_subtext(long_text)
+    assert len(capped.split()) == generate_image_prompt.MAX_SUBTEXT_WORDS
+
+
+def test_cap_subtext_leaves_short_text_unchanged():
+    short_text = "7 oils. Deeper hydration. Visibly firmer skin."
+    assert generate_image_prompt._cap_subtext(short_text) == short_text
+
+
+def test_cap_subtext_handles_falsy_input():
+    assert generate_image_prompt._cap_subtext(None) is None
+    assert generate_image_prompt._cap_subtext("") == ""
+
+
+def test_effective_authorised_text_caps_subtext():
+    long_text = " ".join(f"word{i}" for i in range(30))
+    _, capped = generate_image_prompt.effective_authorised_text(True, "Headline", long_text)
+    assert len(capped.split()) == generate_image_prompt.MAX_SUBTEXT_WORDS
+
+
+def test_rule6_text_in_image_states_entire_text_budget():
+    rule6 = generate_image_prompt._rule6_text_policy(True, "Headline", "Short line.")
+    assert "ENTIRE text budget for this image" in rule6
+    assert "ingredient list" in rule6
+    assert "mechanism or benefit paragraph" in rule6
+    assert "CTA sentence" in rule6
+
+
+def test_rule6_no_text_in_image_unaffected_by_budget_wording():
+    rule6 = generate_image_prompt._rule6_text_policy(False)
+    assert "ENTIRE text budget" not in rule6
+
+
+def test_rule6_caps_overlong_subtext_end_to_end():
+    long_text = " ".join(f"word{i}" for i in range(30))
+    rule6 = generate_image_prompt._rule6_text_policy(True, "Headline", long_text)
+    assert "word11" in rule6
+    assert "word12" not in rule6
+
+
 def test_prompt_includes_compliance_rules():
     prompt = generate_image_prompt.build_image_prompt(_blueprint())
     assert "C1. NO REAL PEOPLE" in prompt
