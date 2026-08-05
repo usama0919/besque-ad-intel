@@ -6,13 +6,7 @@
 <title>Besque Ad Intelligence</title>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
-  /* One ad at a time, no page scroll: html/body fill the viewport exactly and the
-     page is a flex column (header, sticky-controls, layout) so #layoutRoot's flex:1
-     receives exactly whatever height remains - never a hand-computed pixel offset,
-     which would drift the moment the legacy-run strip or a warning banner changes
-     height. */
-  html, body { height:100%; overflow:hidden; }
-  body { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; background:#f4f1ec; color:#2a2a2a; display:flex; flex-direction:column; }
+  body { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; background:#f4f1ec; color:#2a2a2a; }
   header { background:#1a1a1a; color:#fff; padding:22px 40px; display:flex; align-items:center; justify-content:space-between; position:sticky; top:0; z-index:100; }
   header h1 { font-size:20px; font-weight:600; letter-spacing:0.5px; }
   header .sub { font-size:13px; color:#b8b8b8; margin-top:2px; }
@@ -38,60 +32,25 @@
   /* Sidebar (products/angles/competitors/Discover Pages/log) is collapsed - hidden -
      by default, so the competitor-ad/Besque-draft comparison gets full width. Opened
      via #sidebarToggle, which toggles .sidebar-open on .layout. */
-  .layout { display:grid; grid-template-columns:1fr; gap:24px; padding:24px 40px; align-items:start;
-            flex:1; min-height:0; }
+  .layout { display:grid; grid-template-columns:1fr; gap:24px; padding:24px 40px; align-items:start; }
   .layout.sidebar-open { grid-template-columns:1fr 320px; }
   .layout > div:last-child { display:none; }
   .layout.sidebar-open > div:last-child { display:block; }
-  .layout > div:first-child { display:flex; flex-direction:column; min-height:0; }
   #sidebarToggle { background:none; border:1px solid #ccc; color:#666; padding:7px 14px; border-radius:7px; font-size:12px; cursor:pointer; margin-bottom:14px; }
   #sidebarToggle:hover { background:#f0ece4; }
   h2 { font-size:15px; text-transform:uppercase; letter-spacing:1px; color:#888; margin-bottom:14px; }
-  /* One ad at a time: #cards fills whatever height the flex column above it leaves,
-     and every .card is display:none except the one currently focused - reusing the
-     exact same card markup (version-nav, overlay, decision buttons) rather than a
-     second rendering path. */
-  #cards { flex:1; min-height:0; position:relative; }
-  .card { display:none; background:#fff; border:1px solid #e5e0d8; border-radius:12px; overflow:hidden; box-shadow:0 1px 3px rgba(0,0,0,0.04); }
-  .card.focused { display:flex; flex-direction:column; height:100%; }
-  .card-head { padding:14px 18px; display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #f0ece4; flex:0 0 auto; }
+  .card { background:#fff; border:1px solid #e5e0d8; border-radius:12px; overflow:hidden; margin-bottom:20px; box-shadow:0 1px 3px rgba(0,0,0,0.04); }
+  .card-head { padding:14px 18px; display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #f0ece4; }
   .comp { font-weight:600; font-size:14px; }
   .badge { font-size:11px; padding:3px 10px; border-radius:20px; font-weight:600; }
   .badge.approve { background:#e3f5e9; color:#1a7f42; }
   .badge.reject { background:#fbe6e6; color:#c0392b; }
   .badge.pending { background:#f0ece4; color:#999; }
-  /* Notes (operator instruction/critic findings/format flag/override) shrink-wrap by
-     default; if any one is unusually long it scrolls within its own small box rather
-     than pushing the split/actions out of view. */
-  .card.focused > .operator-instruction, .card.focused > .critic-findings,
-  .card.focused > .format-flag, .card.focused > .product-override-note {
-    flex:0 1 auto; max-height:60px; overflow-y:auto;
-  }
-  .split { display:grid; grid-template-columns:1fr 1fr; flex:1; min-height:0; }
-  .side { padding:18px; display:flex; flex-direction:column; min-height:0; }
+  .split { display:grid; grid-template-columns:1fr 1fr; }
+  .side { padding:18px; }
   .side.orig { border-right:1px solid #f0ece4; background:#fafafa; }
-  .side .lbl { font-size:11px; text-transform:uppercase; letter-spacing:1px; color:#aaa; margin-bottom:10px; flex:0 0 auto; }
+  .side .lbl { font-size:11px; text-transform:uppercase; letter-spacing:1px; color:#aaa; margin-bottom:10px; }
   .side img { width:100%; border-radius:8px; margin-bottom:10px; background:#eee; }
-  /* Height-bound, width-auto, centered - the image is scaled to fit available height
-     without letterboxing gaps, so the draft's .ov overlay (positioned by percentage
-     against .draft-wrap) still aligns to the actual rendered image edges exactly as
-     it did when the image was width:100%/height:auto. */
-  .card.focused .side { align-items:center; justify-content:center; }
-  .card.focused .side > img { flex:0 1 auto; min-height:0; height:100%; width:auto; max-width:100%; }
-  .card.focused .draft-wrap { flex:0 1 auto; min-height:0; height:100%; max-width:100%; display:inline-flex; }
-  .card.focused .draft-wrap img { height:100%; width:auto; max-width:100%; display:block; }
-  .card.focused .headline, .card.focused .primary, .card.focused .cta { flex:0 0 auto; }
-  .card.focused .primary { max-height:60px; overflow-y:auto; }
-  .review-nav { display:flex; align-items:center; gap:12px; padding:8px 0; font-size:13px; color:#666; flex:0 0 auto; }
-  .review-nav button { background:#1a1a1a; color:#fff; border:none; padding:8px 16px; border-radius:7px; font-size:13px; font-weight:600; cursor:pointer; }
-  .review-nav button:disabled { background:#ccc; cursor:default; }
-  #reviewPendingCount { margin-left:auto; font-weight:600; color:#8a5a12; }
-  .version-nav { display:flex; align-items:center; gap:8px; margin:0 0 10px; font-size:11px; color:#888; }
-  .version-nav button { background:#f0ece4; border:none; color:#333; padding:3px 9px; border-radius:5px; cursor:pointer; font-size:11px; font-weight:600; }
-  .version-nav button:disabled { opacity:0.4; cursor:default; }
-  .version-nav .version-label { min-width:76px; text-align:center; }
-  .version-nav .version-restore { background:#8a5a12; color:#fff; margin-left:auto; }
-  .version-nav .version-restore:disabled { background:#ddd; color:#999; }
   /* --- editable text overlay on the Besque draft (client-side only) --- */
   .draft-wrap { position:relative; margin-bottom:10px; }
   .draft-wrap img { margin-bottom:0; display:block; }
@@ -140,7 +99,7 @@
      the tool explaining why it didn't do what the operator asked, not a violation. */
   .product-override-note { font-size:12px; color:#555; background:#f0f0f0; border:1px solid #ddd;
                             border-radius:6px; padding:6px 12px; margin:0 18px 10px; }
-  .actions { padding:14px 18px; display:flex; gap:10px; border-top:1px solid #f0ece4; flex:0 0 auto; }
+  .actions { padding:14px 18px; display:flex; gap:10px; border-top:1px solid #f0ece4; }
   .actions button { flex:1; padding:9px; border:none; border-radius:7px; font-size:13px; font-weight:600; cursor:pointer; }
   .btn-a { background:#1a7f42; color:#fff; }
   .btn-r { background:#c0392b; color:#fff; }
@@ -266,17 +225,6 @@
     <h2>Competitor Ads &rarr; Besque Drafts</h2>
     <button id="sidebarToggle" onclick="toggleSidebar()">Products / Angles / Competitors / Discover Pages &raquo;</button>
     <input id="searchBox" placeholder="Search existing ads (competitor, headline, copy)…" oninput="applySearchFilter()">
-    <!-- Decisions are part of reviewing, not configuration - unlike products/angles/
-         competitors/Discover Pages, this stays on the review screen itself, visible
-         without opening the sidebar. -->
-    <h2>Decision Log</h2>
-    <div class="log" id="log"><div class="empty">No decisions yet</div></div>
-    <div class="review-nav">
-      <button id="reviewPrevBtn" onclick="reviewGoTo(-1)" title="Previous (Left arrow)">&larr; Prev</button>
-      <span id="reviewPosition">0 of 0</span>
-      <span id="reviewPendingCount"></span>
-      <button id="reviewNextBtn" onclick="reviewGoTo(1)" title="Next (Right arrow)">Next &rarr;</button>
-    </div>
     <div id="cards"><div class="empty">Loading…</div></div>
   </div>
   <div>
@@ -320,6 +268,8 @@
       </div>
       <div id="competitors"><div class="empty">Loading…</div></div>
     </div>
+    <h2>Decision Log</h2>
+    <div class="log" id="log"><div class="empty">No decisions yet</div></div>
   </div>
 </div>
 <script>
@@ -377,10 +327,9 @@ function applySearchFilter(force){
   const sig = cardSig(list, q);
   // force: regenerated images reuse the same /assets path, so the sig can be identical
   // even though the bytes changed - explicit user actions must always re-render.
-  if(!force && sig === _lastRenderSig){ _applySingleAdFocus(list); return; }
+  if(!force && sig === _lastRenderSig) return;
   _lastRenderSig = sig;
   renderCards(list);
-  _applySingleAdFocus(list);
 }
 
 
@@ -464,82 +413,6 @@ function imgFallback(el){
     const t = wrap.nextElementSibling;
     if(t && t.classList.contains('ov-toggles')) t.remove();
   }
-}
-
-// --- draft version navigation: prev/next through {stem}_draft_v{n}.png history,
-// current last. Lazily fetched on first arrow click per (ad_id, angle_id), cached
-// client-side after that. ---
-const _versionState = {};
-function _versionKey(adId, angleId){ return adId + '::' + (angleId==null?'':angleId); }
-function _versionNavEls(adId, angleId){
-  const sel = '[data-ad="'+CSS.escape(String(adId))+'"][data-angle="'+CSS.escape(String(angleId))+'"]';
-  return {
-    nav: document.querySelector('.version-nav'+sel),
-    img: document.querySelector('.draft-img'+sel),
-  };
-}
-
-async function _ensureVersions(adId, angleId){
-  const key = _versionKey(adId, angleId);
-  if(_versionState[key]) return _versionState[key];
-  const angleQ = angleId!=null ? ('&angle_id='+angleId) : '';
-  const r = await fetch('/api/draft_versions?ad_id='+encodeURIComponent(adId)+angleQ);
-  const body = await r.json();
-  const versions = (body.ok && body.versions) ? body.versions : [];
-  const state = {versions, index: Math.max(0, versions.length - 1)};
-  _versionState[key] = state;
-  return state;
-}
-
-function _renderVersionNav(adId, angleId, state){
-  const {nav, img} = _versionNavEls(adId, angleId);
-  if(!nav) return;
-  const total = state.versions.length;
-  if(!total) return;
-  const v = state.versions[state.index];
-  nav.querySelector('.version-label').textContent =
-    v.version === 'current' ? 'current' : ('v'+v.version+' of '+(total-1));
-  nav.querySelector('.version-prev').disabled = state.index <= 0;
-  nav.querySelector('.version-next').disabled = state.index >= total - 1;
-  const restoreBtn = nav.querySelector('.version-restore');
-  if(v.version === 'current'){
-    restoreBtn.style.display = 'none';
-  } else {
-    restoreBtn.style.display = '';
-    restoreBtn.disabled = !v.has_prompt;
-    restoreBtn.title = v.has_prompt ? '' : 'No stored prompt for this version - cannot be safely restored';
-  }
-  if(img && v.url) img.src = v.url;
-}
-
-async function navVersion(adId, angleId, delta){
-  const state = await _ensureVersions(adId, angleId);
-  if(!state.versions.length) return;
-  state.index = Math.max(0, Math.min(state.versions.length - 1, state.index + delta));
-  _renderVersionNav(adId, angleId, state);
-}
-
-async function restoreVersion(adId, angleId){
-  const key = _versionKey(adId, angleId);
-  const state = _versionState[key];
-  if(!state) return;
-  const v = state.versions[state.index];
-  if(!v || v.version === 'current' || !v.has_prompt) return;
-  const {nav} = _versionNavEls(adId, angleId);
-  const restoreBtn = nav ? nav.querySelector('.version-restore') : null;
-  if(restoreBtn) restoreBtn.disabled = true;
-  const r = await fetch('/api/draft_version/restore', {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ad_id: adId, version: v.version, angle_id: angleId}),
-  });
-  const body = await r.json();
-  if(!body.ok){
-    alert('Restore failed: ' + (body.error || 'unknown'));
-    if(restoreBtn) restoreBtn.disabled = false;
-    return;
-  }
-  delete _versionState[key];
-  await loadCards(true);
 }
 
 // --- draft text overlay: per-ad_id state, survives re-render within the session ---
@@ -633,13 +506,7 @@ function renderCards(data){
       : '<span class="badge pending">Pending</span>');
     const orig = a.original_image?`<img onerror="imgFallback(this)" src="${a.original_image}">`:'';
     const draft = a.draft_image
-      ? `<div class="draft-wrap"><img class="draft-img" data-ad="${a.ad_id}" data-angle="${angleArg}" onerror="imgFallback(this)" src="${a.draft_image}">${ovLayer(a)}</div>`
-        + `<div class="version-nav" data-ad="${a.ad_id}" data-angle="${angleArg}">`
-        + `<button class="version-prev" onclick="navVersion('${a.ad_id}',${angleArg},-1)">&larr;</button>`
-        + `<span class="version-label">current</span>`
-        + `<button class="version-next" onclick="navVersion('${a.ad_id}',${angleArg},1)">&rarr;</button>`
-        + `<button class="version-restore" style="display:none;" onclick="restoreVersion('${a.ad_id}',${angleArg})">Restore</button>`
-        + `</div>${ovToggles(a)}`
+      ? `<div class="draft-wrap"><img onerror="imgFallback(this)" src="${a.draft_image}">${ovLayer(a)}</div>${ovToggles(a)}`
       : '';
     const operatorInstructionNote = a.operator_instruction
       ? `<div class="operator-instruction" title="Extra direction the operator gave for this run">Operator direction: ${esc(a.operator_instruction)}</div>`
@@ -661,7 +528,7 @@ function renderCards(data){
     const productOverrideNote = a.product_override_note
       ? `<div class="product-override-note" title="An explicit operator setting was overridden for this draft">${esc(a.product_override_note)}</div>`
       : '';
-    return `<div class="card" data-card-key="${a.ad_id}__${angleArg}" data-decided="${dec?'1':''}">
+    return `<div class="card">
       <div class="card-head"><span class="comp">${esc(a.page_name)||'Competitor'} <span style="font-size:11px;color:#aaa;font-weight:400;">· ${a.created_at||''}</span></span>${badge}</div>
       ${operatorInstructionNote}
       ${criticFindings}
@@ -682,57 +549,6 @@ function renderCards(data){
       </div></div>`;
   }).join('');
 }
-
-// --- one ad at a time: every .card already exists in #cards, only the focused one
-// is shown (display:none/flex via .focused). Tracked by data-card-key (ad_id+angle),
-// not index, so focus survives a re-render (poll, decide, search) even if cards were
-// added/removed/reordered around it. ---
-let _focusCardKey = null;
-
-function _cardEls(){ return Array.from(document.getElementById('cards').querySelectorAll('.card')); }
-
-function _applySingleAdFocus(list){
-  const cards = _cardEls();
-  if(!cards.length){ _focusCardKey = null; _updateReviewNav(0, 0, 0); return; }
-  let idx = _focusCardKey ? cards.findIndex(c => c.dataset.cardKey === _focusCardKey) : -1;
-  if(idx < 0) idx = 0;
-  cards.forEach((c, i) => c.classList.toggle('focused', i === idx));
-  _focusCardKey = cards[idx].dataset.cardKey;
-  const pending = (list || []).filter(a => !a.decision).length;
-  _updateReviewNav(idx, cards.length, pending);
-}
-
-function _updateReviewNav(idx, total, pending){
-  const posEl = document.getElementById('reviewPosition');
-  if(!posEl) return;
-  posEl.textContent = total ? (idx+1)+' of '+total : '0 of 0';
-  document.getElementById('reviewPendingCount').textContent = total ? (pending+' pending') : '';
-  document.getElementById('reviewPrevBtn').disabled = total===0 || idx<=0;
-  document.getElementById('reviewNextBtn').disabled = total===0 || idx>=total-1;
-}
-
-function reviewGoTo(delta){
-  const cards = _cardEls();
-  if(!cards.length) return;
-  let idx = _focusCardKey ? cards.findIndex(c => c.dataset.cardKey === _focusCardKey) : 0;
-  if(idx < 0) idx = 0;
-  idx = Math.max(0, Math.min(cards.length - 1, idx + delta));
-  cards.forEach((c, i) => c.classList.toggle('focused', i === idx));
-  _focusCardKey = cards[idx].dataset.cardKey;
-  const decidedCount = cards.filter(c => c.dataset.decided === '1').length;
-  _updateReviewNav(idx, cards.length, cards.length - decidedCount);
-}
-
-// Left/Right move between ads - ignored while typing anywhere (search box, overlay
-// text, modal inputs) so arrow keys inside those still move the text cursor.
-document.addEventListener('keydown', e => {
-  if(e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
-  const t = e.target;
-  const tag = (t && t.tagName || '').toLowerCase();
-  const isEditable = t && (t.isContentEditable || tag === 'input' || tag === 'textarea' || tag === 'select');
-  if(isEditable) return;
-  reviewGoTo(e.key === 'ArrowLeft' ? -1 : 1);
-});
 
 async function loadLog(){
   const r = await fetch('/api/decisions'); const data = await r.json();
