@@ -18,11 +18,26 @@
      tall the run strip renders, the stats bar always sits directly beneath it. */
   .sticky-controls { position:sticky; top:66px; z-index:90; background:#fff; }
   .bar { padding:20px 40px; display:flex; flex-wrap:wrap; gap:16px; align-items:center; background:#fff; border-bottom:1px solid #e5e0d8; }
+  .legacy-run { border-bottom:1px solid #e5e0d8; }
+  .legacy-run > summary { padding:10px 40px; font-size:12px; color:#999; cursor:pointer; list-style:none; }
+  .legacy-run > summary::-webkit-details-marker { display:none; }
+  .legacy-run > summary:before { content:"\25b8  "; }
+  .legacy-run[open] > summary:before { content:"\25be  "; }
+  .legacy-run .bar { border-bottom:none; padding-top:0; }
+  .legacy-run-label { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:#a83232; background:#fdecea; border:1px solid #f3c6c6; border-radius:5px; padding:3px 8px; margin-right:8px; }
   button.run { background:#1a1a1a; color:#fff; border:none; padding:11px 22px; border-radius:8px; font-size:14px; font-weight:600; cursor:pointer; }
   button.run:hover { background:#333; }
   button.run:disabled { background:#999; cursor:wait; }
   .status { font-size:13px; color:#666; }
-  .layout { display:grid; grid-template-columns:1fr 320px; gap:24px; padding:24px 40px; align-items:start; }
+  /* Sidebar (products/angles/competitors/Discover Pages/log) is collapsed - hidden -
+     by default, so the competitor-ad/Besque-draft comparison gets full width. Opened
+     via #sidebarToggle, which toggles .sidebar-open on .layout. */
+  .layout { display:grid; grid-template-columns:1fr; gap:24px; padding:24px 40px; align-items:start; }
+  .layout.sidebar-open { grid-template-columns:1fr 320px; }
+  .layout > div:last-child { display:none; }
+  .layout.sidebar-open > div:last-child { display:block; }
+  #sidebarToggle { background:none; border:1px solid #ccc; color:#666; padding:7px 14px; border-radius:7px; font-size:12px; cursor:pointer; margin-bottom:14px; }
+  #sidebarToggle:hover { background:#f0ece4; }
   h2 { font-size:15px; text-transform:uppercase; letter-spacing:1px; color:#888; margin-bottom:14px; }
   .card { background:#fff; border:1px solid #e5e0d8; border-radius:12px; overflow:hidden; margin-bottom:20px; box-shadow:0 1px 3px rgba(0,0,0,0.04); }
   .card-head { padding:14px 18px; display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #f0ece4; }
@@ -152,7 +167,7 @@
      Competitors sits far enough down the sidebar that reaching it via the sidebar's own
      internal scroll reliably lands it in that dead zone. Still below header (100) and
      modals (200). */
-  .layout > div:last-child { position: sticky; top: 90px; z-index: 95; align-self: start; max-height: calc(100vh - 110px); overflow-y: auto; padding-right: 8px; }
+  .layout > div:last-child { position: sticky; top: 196px; z-index: 95; align-self: start; max-height: calc(100vh - 216px); overflow-y: auto; padding-right: 8px; }
   #competitors { max-height: 320px; overflow-y: auto; }
   .log { position: static; max-height: 380px; overflow-y: auto; padding-top: 8px; }
   /* Discover Pages cards */
@@ -183,86 +198,21 @@
 </header>
 <div id="warningsBanner" style="display:none;background:#fdf3e0;color:#8a5a12;border:1px solid #f0dcb4;border-radius:8px;padding:10px 14px;margin:0 24px 12px;font-size:13px;"></div>
 <div class="sticky-controls">
-<div class="bar">
-  <select id="adCount" onchange="updateProjectedTotal()" style="padding:9px;border:1px solid #ccc;border-radius:7px;font-size:13px;">
-    <option value="1">1 ad</option>
-    <option value="2" selected>2 ads</option>
-    <option value="3">3 ads</option>
-    <option value="5">5 ads</option>
-  </select>
-  <!-- Category sweep: run_once(category=...) already exists server-side (loops every
-       competitor tagged with it) - this is the only way to reach it from the UI. Options
-       are built dynamically in buildCategorySelectOptions() from the categories actually
-       present on competitors, never a fixed schema enum, so a category with zero tagged
-       competitors never shows up as a confusing selectable choice. "ad count" is
-       PER-COMPETITOR (see updateProjectedTotal()) - a sweep multiplies by competitor count. -->
-  <select id="categorySelect" onchange="onCategoryChange()" style="padding:9px;border:1px solid #ccc;border-radius:7px;font-size:13px;">
-    <option value="">— Category —</option>
-    <option value="__all__">All competitors</option>
-  </select>
-  <select id="angleSelect" style="padding:9px;border:1px solid #ccc;border-radius:7px;font-size:13px;" onchange="onAngleChange()">
-    <option value="">No angle</option>
-  </select>
-  <select id="realismSelect" style="padding:9px;border:1px solid #ccc;border-radius:7px;font-size:13px;">
-    <option value="">(auto)</option>
-    {% for s in production_styles %}<option value="{{ s }}">{{ s }}</option>
-    {% endfor %}
-  </select>
-  <!-- Body area is confirmed to vary per run, not fixed per angle - a fixed set would be
-       wrong for how this is actually used, so this is a free-text input with suggestions
-       only (datalist), never a <select>. An angle's stored body_area (if any) only
-       pre-fills this as a starting suggestion (see onAngleChange()), never treated as
-       authoritative. -->
-  <input type="text" id="bodyAreaInput" list="bodyAreaSuggestions" placeholder="Body area (varies per run)" style="padding:9px;border:1px solid #ccc;border-radius:7px;font-size:13px;">
-  <datalist id="bodyAreaSuggestions">
-    <option value="chest"><option value="arms"><option value="legs"><option value="stomach">
-    <option value="back"><option value="knees"><option value="elbows"><option value="neck">
-  </datalist>
-  <input type="text" id="offerTextInput" placeholder="Offer text (optional)" style="padding:9px;border:1px solid #ccc;border-radius:7px;font-size:13px;">
-  <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#555;">
-    <input type="checkbox" id="textInImageToggle" style="width:auto;"> Text in image
-  </label>
-  <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#555;">
-    <input type="checkbox" id="includeProductToggle" checked style="width:auto;"> Include product
-  </label>
-  <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#555;" title="Reproduce the competitor's ad, substituting only the product - off by default (generate from a text brief instead).">
-    <input type="checkbox" id="editModeToggle" style="width:auto;"> Edit mode (reproduce reference)
-  </label>
-  <!-- Prompt 4, Item 1: a SAFETY control, not a quality feature - every guardrail on the
-       image path is prompt-only, nothing has ever inspected what Gemini actually
-       produced. Off by default: it's an extra vision call per ad, real cost that
-       multiplies across a sweep (see updateProjectedTotal()'s time estimate). -->
-  <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#555;" title="After generation, ask Claude what the draft actually violates (competitor logos, unauthorised offers, fabricated claims/testimonials, etc.) and flag it on the card - never auto-rejects or auto-regenerates.">
-    <input type="checkbox" id="checkOutputToggle" onchange="updateProjectedTotal()" style="width:auto;"> Check output
-  </label>
-  <!-- Prompt 4, Item 5: on by default per the team's own doc ("re-themed to Besque's
-       palette... unless the angle specifically calls for something else") - the operator
-       disables it per run for that stated exception, which also protects the
-       faithful-clone (edit mode's original) behaviour already validated in production. -->
-  <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#555;" title="Re-map the reference's colours to Besque's palette (edit mode only) - geometry is preserved, only colour is substituted. Turn off to clone the reference's own colours faithfully.">
-    <input type="checkbox" id="rethemeColoursToggle" checked style="width:auto;"> Re-theme colours
-  </label>
-  <!-- Step 2: freeform per-run steering. Sits in a fixed position in the assembled prompt
-       (below brand rules/compliance/rules 6/7/9, above the writer's own composition/mood/
-       framing choices - see generate_image_prompt._operator_instruction_clause) so it can
-       steer the scene but never grant a permission those rules forbid. Pre-filled from
-       localStorage - see loadOperatorInstruction()/runPipeline() - so the operator isn't
-       retyping the same steering every run within a ~25-ad-a-day session. -->
-  <div style="display:flex;flex-direction:column;gap:2px;flex:1 1 280px;min-width:220px;">
-    <label for="operatorInstructionInput" style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;">Extra direction for this run (optional)</label>
-    <textarea id="operatorInstructionInput" rows="2" maxlength="500"
-              placeholder="e.g. make the background warmer, show the oil being poured, keep it minimal"
-              style="padding:9px;border:1px solid #ccc;border-radius:7px;font-size:13px;resize:vertical;font-family:inherit;"></textarea>
+<details class="legacy-run">
+  <summary><span class="legacy-run-label">Legacy</span>Run Pipeline (Cloud Run Job) - ignores /pool selections, runs against the competitor selected in the sidebar</summary>
+  <div class="bar">
+    <select id="adCount" style="padding:9px;border:1px solid #ccc;border-radius:7px;font-size:13px;">
+      <option value="1">1 ad</option>
+      <option value="2" selected>2 ads</option>
+      <option value="3">3 ads</option>
+      <option value="5">5 ads</option>
+    </select>
+    <button class="run" id="runBtn" onclick="runPipeline()" disabled>Run Pipeline</button>
+    <button class="stop" id="stopBtn" onclick="stopPipeline()" disabled>Stop</button>
+    <span id="selectedCompName">No competitor selected</span>
+    <span class="status" id="status">Ready</span>
   </div>
-  <button class="run" id="runBtn" onclick="runPipeline()" disabled>Run Pipeline</button>
-  <!-- Ad count is per-competitor - a category sweep multiplies by the number of matching
-       competitors, so "2 ads" across 6 brands is 12 generations, not 2. Must be visible
-       BEFORE the run starts, not discovered afterward. -->
-  <span id="projectedTotal" style="font-size:12px;color:#888;"></span>
-  <button class="stop" id="stopBtn" onclick="stopPipeline()" disabled>Stop</button>
-  <span id="selectedCompName">No competitor selected</span>
-  <span class="status" id="status">Ready</span>
-</div>
+</details>
 <div class="bar" style="border-top:none;padding-top:0;padding-bottom:20px;gap:32px;">
   <div><div style="font-size:26px;font-weight:700;" id="stat-total">0</div><div style="font-size:12px;color:#888;text-transform:uppercase;letter-spacing:1px;">Ads Processed</div></div>
   <div><div style="font-size:26px;font-weight:700;color:#1a7f42;" id="stat-approved">0</div><div style="font-size:12px;color:#888;text-transform:uppercase;letter-spacing:1px;">Approved</div></div>
@@ -270,9 +220,10 @@
   <div><div style="font-size:26px;font-weight:700;color:#999;" id="stat-pending">0</div><div style="font-size:12px;color:#888;text-transform:uppercase;letter-spacing:1px;">Pending</div></div>
 </div>
 </div>
-<div class="layout">
+<div class="layout" id="layoutRoot">
   <div>
     <h2>Competitor Ads &rarr; Besque Drafts</h2>
+    <button id="sidebarToggle" onclick="toggleSidebar()">Products / Angles / Competitors / Discover Pages &raquo;</button>
     <input id="searchBox" placeholder="Search existing ads (competitor, headline, copy)…" oninput="applySearchFilter()">
     <div id="cards"><div class="empty">Loading…</div></div>
   </div>
@@ -627,12 +578,6 @@ async function decide(ad, dec, angleId){
 
 let selectedCompetitorId = null;
 let selectedCompetitorName = null;
-// null = no category filter (blank or explicit "All competitors" via the "__all__"
-// sentinel - both send category="" server-side, same as today's no-filter default).
-// A real category value here is mutually exclusive with selectedCompetitorId in the UI -
-// selecting one visibly clears the other, even though competitor_id alone decides
-// precedence server-side.
-let selectedCategory = null;
 
 let selectedProductId = null;
   let selectedProductName = null;
@@ -802,13 +747,6 @@ let selectedProductId = null;
   async function loadAngles(){
     const r = await fetch('/api/angles'); const data = await r.json();
     _anglesCache = data;
-    // Populate the run-strip angle dropdown too, preserving the operator's current
-    // selection across a reload (e.g. after editing an angle) if it still exists.
-    const sel = document.getElementById('angleSelect');
-    const prevSelected = sel.value;
-    sel.innerHTML = '<option value="">No angle</option>'
-      + data.map(a=>`<option value="${a.id}">${esc(a.name)}</option>`).join('');
-    if(data.some(a=>String(a.id)===prevSelected)){ sel.value = prevSelected; }
     const el = document.getElementById('angles');
     if(!data.length){ el.innerHTML='<div class="empty">No angles yet</div>'; return; }
     el.innerHTML = data.map(a=>`
@@ -826,20 +764,6 @@ let selectedProductId = null;
           <span class="cat-badge${a.includes_product?'':' cat-none'}">${a.includes_product?'product':'no product'}</span>
         </div>
       </div>`).join('');
-  }
-
-  // Selecting an angle pre-fills realism/include-product/body-area from its stored
-  // defaults - the operator can still change any of them before clicking Run. Values are
-  // read fresh at Run time from whatever the controls currently show, never re-derived
-  // from angle_id. angle.body_area is only ever used here, as a starting SUGGESTION - the
-  // team confirmed body area varies every run and is never fixed per angle, so nothing
-  // downstream may treat it as the angle's actual/authoritative body part.
-  function onAngleChange(){
-    const sel = document.getElementById('angleSelect');
-    const angle = _anglesCache.find(a => String(a.id) === sel.value);
-    document.getElementById('realismSelect').value = angle ? (angle.default_realism || '') : '';
-    document.getElementById('includeProductToggle').checked = angle ? !!angle.includes_product : true;
-    document.getElementById('bodyAreaInput').value = angle ? (angle.body_area || '') : '';
   }
 
   function addAngleRow(){
@@ -898,14 +822,6 @@ let selectedProductId = null;
   }
 
 
-  // Distinct competitors tagged with `cat` (or every competitor, for the "__all__" sentinel) -
-  // shared by the status line and the projected-total display so they never disagree.
-  function categoryCompetitorCount(cat){
-    const comps = window._compsCache || [];
-    if(cat === '__all__') return comps.length;
-    return comps.filter(c => (c.category||'') === cat).length;
-  }
-
   function computeSelectionLabelText(){
     if(selectedCompetitorId !== null){
       let txt = 'Selected: ' + selectedCompetitorName;
@@ -914,10 +830,6 @@ let selectedProductId = null;
         txt += '  -  Product: ' + selectedProductName + (pc ? (' [' + pc + ']') : ' [no category]');
       }
       return txt;
-    }
-    if(selectedCategory){
-      const label = selectedCategory === '__all__' ? 'All competitors' : selectedCategory;
-      return 'Category: ' + label + ' — ' + categoryCompetitorCount(selectedCategory) + ' competitors';
     }
     return 'No competitor selected';
   }
@@ -966,7 +878,6 @@ async function loadCompetitors(){
   if(selectedCompetitorId !== null && !data.some(c=>c.id===selectedCompetitorId)){
     selectedCompetitorId = null; selectedCompetitorName = null;
   }
-  buildCategorySelectOptions();
   if(!data.length){ el.innerHTML='<div class="empty">No competitors yet</div>'; updateRunButtonState(); return; }
   el.innerHTML = data.map(c=>`
     <div class="comp-row${c.id===selectedCompetitorId?' selected':''}" data-id="${c.id}">
@@ -984,81 +895,17 @@ async function loadCompetitors(){
   updateRunButtonState();
 }
 
-// Distinct categories actually present on competitors, never the fixed product-category
-// schema enum - a category nobody has tagged must never appear as a selectable option.
-function buildCategorySelectOptions(){
-  const sel = document.getElementById('categorySelect');
-  const prevValue = sel.value;
-  const counts = {};
-  (window._compsCache||[]).forEach(c => {
-    const cat = (c.category||'').trim();
-    if(cat) counts[cat] = (counts[cat]||0) + 1;
-  });
-  const cats = Object.keys(counts).sort();
-  sel.innerHTML = '<option value="">— Category —</option><option value="__all__">All competitors</option>'
-    + cats.map(c => `<option value="${esc(c)}">${esc(c)} (${counts[c]})</option>`).join('');
-  if(prevValue === '__all__' || cats.includes(prevValue)){ sel.value = prevValue; }
-}
-
-function onCategoryChange(){
-  const val = document.getElementById('categorySelect').value;
-  selectedCategory = val || null;
-  if(selectedCategory){
-    // Selecting a category visibly clears any selected competitor - competitor_id still
-    // wins server-side if somehow both were set, but the UI must never show both as
-    // active at once, so the operator can always see which mode they're in.
-    selectedCompetitorId = null; selectedCompetitorName = null;
-    loadCompetitors();
-  }
-  updateRunButtonState();
-}
-
 function selectCompetitor(id, name){
   if(selectedCompetitorId === id){ selectedCompetitorId = null; selectedCompetitorName = null; }
-  else {
-    selectedCompetitorId = id; selectedCompetitorName = name;
-    // competitor_id wins over category server-side - clear the category selection here
-    // too, so the UI never shows both as active simultaneously.
-    selectedCategory = null;
-    document.getElementById('categorySelect').value = '';
-  }
+  else { selectedCompetitorId = id; selectedCompetitorName = name; }
   loadCompetitors();
   updateSelectionLabel();
-  updateProjectedTotal();
 }
 
 function updateRunButtonState(){
   const btn = document.getElementById('runBtn');
   document.getElementById('selectedCompName').textContent = computeSelectionLabelText();
-  if(!btn.dataset.running){ btn.disabled = (selectedCompetitorId === null && !selectedCategory); }
-  updateProjectedTotal();
-}
-
-// Ad count is PER-COMPETITOR - a category sweep multiplies by the number of matching
-// competitors ("2 ads" across 6 brands is 12 generations, not 2). Must be visible before
-// the run starts, not discovered afterward. Rough estimate, not measured - an extra
-// vision call per ad for the output critic (Prompt 4, Item 1), real cost that multiplies
-// across a sweep just like the generation count itself.
-const CHECK_OUTPUT_SECONDS_PER_AD = 15;
-
-function updateProjectedTotal(){
-  const el = document.getElementById('projectedTotal');
-  const nAds = parseInt(document.getElementById('adCount').value, 10) || 0;
-  const checkOutput = document.getElementById('checkOutputToggle').checked;
-  const parts = [];
-  let totalAds = null;
-  if(selectedCompetitorId === null && selectedCategory){
-    const count = categoryCompetitorCount(selectedCategory);
-    totalAds = nAds * count;
-    parts.push('= up to ' + totalAds + ' generations across ' + count + ' competitor' + (count===1?'':'s'));
-  } else if(selectedCompetitorId !== null){
-    totalAds = nAds;
-  }
-  if(checkOutput && totalAds){
-    const extraMin = Math.round((totalAds * CHECK_OUTPUT_SECONDS_PER_AD / 60) * 10) / 10;
-    parts.push('+~' + extraMin + ' min for output checks');
-  }
-  el.textContent = parts.join('  ');
+  if(!btn.dataset.running){ btn.disabled = (selectedCompetitorId === null); }
 }
 
 async function addCompetitorRow(){
@@ -1145,47 +992,14 @@ function stopProgress(){
 }
 
 async function runPipeline(){
-  if(selectedCompetitorId === null && !selectedCategory){ return; }
+  if(selectedCompetitorId === null){ return; }
   const btn=document.getElementById('runBtn'), stopBtn=document.getElementById('stopBtn'), st=document.getElementById('status');
   btn.disabled=true; btn.dataset.running='1'; stopBtn.disabled=false;
-  // category is sent only when no competitor is selected - competitor_id always wins
-  // server-side (pipeline.run_once), and "__all__" (or blank) means no filter, same as
-  // category="" today.
-  const categoryParam = (selectedCompetitorId === null && selectedCategory && selectedCategory !== '__all__')
-    ? selectedCategory : '';
-  const runLabel = selectedCompetitorId !== null ? selectedCompetitorName
-    : (selectedCategory ? ('Category: ' + (selectedCategory === '__all__' ? 'All competitors' : selectedCategory))
-                         : '');
-  startProgress(runLabel);
+  startProgress(selectedCompetitorName);
   const nAds = document.getElementById('adCount').value;
-  const angleId = document.getElementById('angleSelect').value;
-  const realism = document.getElementById('realismSelect').value;
-  const textInImage = document.getElementById('textInImageToggle').checked;
-  const includeProduct = document.getElementById('includeProductToggle').checked;
-  const bodyArea = document.getElementById('bodyAreaInput').value.trim();
-  const offerText = document.getElementById('offerTextInput').value.trim();
-  const editMode = document.getElementById('editModeToggle').checked;
-  const checkOutput = document.getElementById('checkOutputToggle').checked;
-  const rethemeColours = document.getElementById('rethemeColoursToggle').checked;
-  const operatorInstruction = document.getElementById('operatorInstructionInput').value.trim();
-  // Persist the value actually used for this run as "last-used" - see loadOperatorInstruction().
-  // localStorage (not just leaving it in the DOM) survives a page reload/new tab, matching
-  // the ~25-ad-a-day session workflow where the steering is usually constant all day.
-  try { localStorage.setItem('operatorInstruction', operatorInstruction); } catch(e) {}
   await fetch('/api/run?n='+nAds
-    +(selectedCompetitorId!==null ? ('&competitor_id='+selectedCompetitorId) : '')
-    +(categoryParam ? ('&category='+encodeURIComponent(categoryParam)) : '')
-    +(selectedProductId?('&product_id='+selectedProductId):'')
-    +(angleId?('&angle_id='+angleId):'')
-    +(realism?('&realism='+encodeURIComponent(realism)):'')
-    +'&text_in_image='+(textInImage?'1':'0')
-    +'&include_product='+(includeProduct?'1':'0')
-    +(bodyArea?('&body_area='+encodeURIComponent(bodyArea)):'')
-    +(offerText?('&offer_text='+encodeURIComponent(offerText)):'')
-    +'&edit_mode='+(editMode?'1':'0')
-    +'&check_output='+(checkOutput?'1':'0')
-    +'&retheme_colours='+(rethemeColours?'1':'0')
-    +(operatorInstruction?('&operator_instruction='+encodeURIComponent(operatorInstruction)):''),
+    +'&competitor_id='+selectedCompetitorId
+    +(selectedProductId?('&product_id='+selectedProductId):''),
     {method:'POST'});
   const poll=setInterval(async()=>{
     const r=await fetch('/api/run/status'); const s=await r.json();
@@ -1245,16 +1059,6 @@ function dismissWarning(id){ _dismissedWarningIds.add(id); loadWarnings(); }
 
 function tick(){document.getElementById('clock').textContent=new Date().toLocaleString();}
 setInterval(tick,1000); tick();
-// Pre-fill "Extra direction for this run" with the last value actually used - see
-// runPipeline()'s localStorage.setItem. Retyping identical steering every run across a
-// ~25-ad-a-day session is exactly the toil this field exists to remove.
-function loadOperatorInstruction(){
-  try {
-    const saved = localStorage.getItem('operatorInstruction');
-    if(saved) document.getElementById('operatorInstructionInput').value = saved;
-  } catch(e) {}
-}
-loadOperatorInstruction();
 
 // Prompt 4, Item 5: palette is DATA (dedupe.get_brand_settings()), not a hardcoded
 // string - loaded here so the field always reflects the value a run would actually use.
@@ -1271,6 +1075,10 @@ async function saveBrandSettings(){
   await loadBrandSettings();
 }
 loadBrandSettings();
+
+function toggleSidebar(){
+  document.getElementById('layoutRoot').classList.toggle('sidebar-open');
+}
 
 loadCards(); loadLog(); loadCompetitors(); loadProducts(); loadAngles(); loadWarnings();
 // Never rebuild the feed while a caret sits in an overlay. Defer rather than drop, so a
