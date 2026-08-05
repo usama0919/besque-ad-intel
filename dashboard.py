@@ -372,6 +372,7 @@ async def api_edit_image(ad_id: str, request: Request):
         text_in_image=bool(art.get("text_in_image")),
         headline=generated_copy.get("headline"),
         subtext=generated_copy.get("primary_text"),
+        current_prompt=art.get("image_prompt"),
     )
     if result is None:
         return JSONResponse({"ok": False, "error": "image edit failed"})
@@ -387,6 +388,82 @@ async def api_edit_image(ad_id: str, request: Request):
         except Exception as e:
             print(f"[api_edit_image] ad_id={ad_id} prompt record failed (non-fatal): {e}")
     return JSONResponse({"ok": True, "ad_id": ad_id})
+
+
+def _stem_from_artifact(art, ad_id):
+    """The {stem} draft-file prefix for an artifact - read from its OWN stored
+    draft_image path (never reconstructed from ad_id/angle_slug), the same approach
+    api_edit_image already uses, so an angle-variant stem is never guessed wrong."""
+    filename = os.path.basename((art.get("draft_image") or f"{ad_id}_draft.png").replace("\\", "/"))
+    return filename[:-len("_draft.png")] if filename.endswith("_draft.png") else ad_id
+
+
+@app.get("/api/draft_versions")
+def api_draft_versions(ad_id: str, angle_id: int = None):
+    """List every saved version of this ad's draft, oldest first, plus the current
+    draft last. has_prompt tells the UI whether Restore is safe for that version - one
+    saved before this feature existed has no recoverable prompt sidecar."""
+    art = dedupe.get_artifact(ad_id, angle_id=angle_id)
+    if art is None:
+        return JSONResponse({"ok": False, "error": "artifact not found"}, status_code=404)
+    from src import generate_image_prompt
+    angle = dedupe.get_angle(angle_id) if angle_id else None
+    angle_slug = angle["slug"] if angle else None
+    stem = _stem_from_artifact(art, ad_id)
+    versions = generate_image_prompt.list_draft_versions(ad_id, angle_slug=angle_slug)
+    out = [
+        {"version": v["version"], "url": f"/assets/{stem}_draft_v{v['version']}.png",
+         "has_prompt": v["has_prompt"]}
+        for v in versions
+    ]
+    out.append({"version": "current", "url": f"/assets/{stem}_draft.png",
+                "has_prompt": bool((art.get("image_prompt") or "").strip())})
+    return JSONResponse({"ok": True, "versions": out})
+
+
+@app.post("/api/draft_version/restore")
+async def api_restore_draft_version(request: Request):
+    """Make a prior version the current draft. Versions the outgoing draft first (so
+    nothing is destroyed) and updates the artifact's image_prompt to the RESTORED
+    version's own prompt, never the discarded one - a subsequent edit/regenerate then
+    runs against a correctly paired image+prompt, not a mismatched one.
+
+    Fails (400) if the requested version has no recoverable prompt sidecar - restoring
+    an image without its matching prompt would silently mispair the two, exactly what
+    every later edit must never work from."""
+    body = await request.json()
+    ad_id = (body.get("ad_id") or "").strip()
+    version = body.get("version")
+    angle_id = body.get("angle_id")
+    if not ad_id or version is None:
+        return JSONResponse({"ok": False, "error": "ad_id and version required"}, status_code=400)
+    try:
+        version = int(version)
+    except (TypeError, ValueError):
+        return JSONResponse({"ok": False, "error": "version must be an integer"}, status_code=400)
+    art = dedupe.get_artifact(ad_id, angle_id=angle_id)
+    if art is None:
+        return JSONResponse({"ok": False, "error": "artifact not found"}, status_code=404)
+    from src import generate_image_prompt
+    angle = dedupe.get_angle(angle_id) if angle_id else None
+    angle_slug = angle["slug"] if angle else None
+
+    restored_prompt = generate_image_prompt.read_version_prompt(ad_id, version, angle_slug=angle_slug)
+    if not restored_prompt:
+        return JSONResponse({
+            "ok": False,
+            "error": f"no stored prompt for version {version} - refusing to restore "
+                     f"(would pair a restored image with a mismatched prompt)",
+        }, status_code=400)
+    version_bytes = generate_image_prompt.read_version_bytes(ad_id, version, angle_slug=angle_slug)
+    if version_bytes is None:
+        return JSONResponse({"ok": False, "error": f"version {version} image not found"}, status_code=404)
+
+    current_prompt = art.get("image_prompt") or ""
+    versioned = generate_image_prompt.version_current_draft(ad_id, angle_slug=angle_slug, current_prompt=current_prompt)
+    generate_image_prompt.overwrite_current_draft(ad_id, version_bytes, angle_slug=angle_slug)
+    dedupe.update_artifact_image_prompt(ad_id, restored_prompt, angle_id=angle_id)
+    return JSONResponse({"ok": True, "ad_id": ad_id, "restored_version": version, "versioned_previous_as": versioned})
 
 
 @app.post("/api/edit_copy/{ad_id}")

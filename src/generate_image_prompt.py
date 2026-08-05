@@ -1072,7 +1072,120 @@ def _current_draft_bytes(ad_id, angle_slug=None):
     return None
 
 
-def version_current_draft(ad_id, angle_slug=None):
+def _version_prompt_name(version_name):
+    """{stem}_draft_v{n}.png -> {stem}_draft_v{n}.prompt.txt - the sidecar that records
+    the EXACT prompt that produced that version's PNG, so a later restore can pair the
+    two correctly instead of guessing."""
+    return version_name[:-len(".png")] + ".prompt.txt"
+
+
+def _write_version_prompt(version_name, prompt):
+    """Best-effort sidecar write, mirroring the PNG's own local+bucket write pattern.
+    Never raises - a missing sidecar just means this version can't be restored later
+    (read_version_prompt returns None), not that versioning the image itself failed."""
+    if not prompt:
+        return
+    prompt_name = _version_prompt_name(version_name)
+    try:
+        ASSET_DIR.mkdir(exist_ok=True)
+        with open(ASSET_DIR / prompt_name, "w", encoding="utf-8") as f:
+            f.write(prompt)
+    except Exception as e:
+        print(f"[_write_version_prompt] {prompt_name} local write failed (non-fatal): {e}")
+    try:
+        from google.cloud import storage
+        storage.Client().bucket(assets.asset_bucket_name()).blob(prompt_name).upload_from_string(
+            prompt, content_type="text/plain")
+    except Exception as e:
+        print(f"[_write_version_prompt] {prompt_name} bucket upload failed (non-fatal): {e}")
+
+
+def read_version_prompt(ad_id, version_n, angle_slug=None):
+    """The EXACT prompt that produced version_n's PNG (local disk first, then bucket),
+    or None if no sidecar was ever written for it - e.g. every version that existed
+    before this feature. Callers must treat None as "cannot be restored", never
+    substitute the current prompt or any other guess."""
+    stem = _draft_stem(ad_id, angle_slug)
+    prompt_name = f"{stem}_draft_v{version_n}.prompt.txt"
+    local = ASSET_DIR / prompt_name
+    if local.exists():
+        return local.read_text(encoding="utf-8")
+    try:
+        from google.cloud import storage
+        blob = storage.Client().bucket(assets.asset_bucket_name()).blob(prompt_name)
+        if blob.exists():
+            return blob.download_as_bytes().decode("utf-8")
+    except Exception:
+        pass
+    return None
+
+
+def read_version_bytes(ad_id, version_n, angle_slug=None):
+    """version_n's PNG bytes (local disk first, then bucket), or None if that version
+    doesn't exist there. Mirrors _current_draft_bytes's own lookup, for an arbitrary
+    past version instead of the current draft."""
+    stem = _draft_stem(ad_id, angle_slug)
+    version_name = f"{stem}_draft_v{version_n}.png"
+    local = ASSET_DIR / version_name
+    if local.exists():
+        return local.read_bytes()
+    try:
+        from google.cloud import storage
+        blob = storage.Client().bucket(assets.asset_bucket_name()).blob(version_name)
+        if blob.exists():
+            return blob.download_as_bytes()
+    except Exception:
+        pass
+    return None
+
+
+def list_draft_versions(ad_id, angle_slug=None):
+    """Every {stem}_draft_v{n}.png that exists on local disk, ascending by n, each with
+    whether it has a recoverable prompt sidecar. Does not include the current draft -
+    callers that need "current" too (dashboard.py) add it themselves, since its prompt
+    lives in the artifacts DB row, not a sidecar file this module has no DB access to
+    read. Local-disk only (unlike _current_draft_bytes/read_version_prompt, which also
+    check the bucket) - listing is for the UI's own browser session, which only ever
+    runs against whichever storage backend this process is actually using; Cloud Run's
+    ephemeral local disk means this naturally returns nothing post-restart there, same
+    as any other local-disk-only read in this module already does for listing purposes."""
+    stem = _draft_stem(ad_id, angle_slug)
+    prefix = f"{stem}_draft_v"
+    versions = []
+    if ASSET_DIR.exists():
+        for p in ASSET_DIR.iterdir():
+            if p.name.startswith(prefix) and p.suffix == ".png":
+                tail = p.stem[len(prefix):]
+                if tail.isdigit():
+                    n = int(tail)
+                    versions.append({
+                        "version": n,
+                        "has_prompt": (ASSET_DIR / f"{prefix}{n}.prompt.txt").exists(),
+                    })
+    versions.sort(key=lambda v: v["version"])
+    return versions
+
+
+def overwrite_current_draft(ad_id, image_bytes, angle_slug=None):
+    """Write image_bytes as the new {stem}_draft.png, local + bucket - used by restore
+    to make a prior version the current draft again. Caller must version the outgoing
+    draft (version_current_draft) BEFORE calling this, same ordering contract as every
+    other overwrite-the-current-draft path in this module."""
+    stem = _draft_stem(ad_id, angle_slug)
+    ASSET_DIR.mkdir(exist_ok=True)
+    dest = ASSET_DIR / f"{stem}_draft.png"
+    with open(dest, "wb") as f:
+        f.write(image_bytes)
+    try:
+        from google.cloud import storage
+        storage.Client().bucket(assets.asset_bucket_name()).blob(f"{stem}_draft.png").upload_from_string(
+            image_bytes, content_type="image/png")
+    except Exception as e:
+        print(f"[overwrite_current_draft] ad_id={ad_id} bucket upload failed (non-fatal): {e}")
+    return str(dest)
+
+
+def version_current_draft(ad_id, angle_slug=None, current_prompt=None):
     """Preserve the CURRENT draft (if any) as {stem}_draft_v{n}.png - both locally and
     in the bucket - before something is about to overwrite {stem}_draft.png with new
     content. This is edit_image's own versioning scheme (same _next_draft_version
@@ -1080,7 +1193,13 @@ def version_current_draft(ad_id, angle_slug=None):
     regenerate-from-scratch (pipeline.process_ad, Chunk 5 Item 7c) can reuse it
     instead of inventing a second one. Returns the version filename, or None if
     there was no current draft to preserve (nothing to version on a first-ever
-    generation)."""
+    generation).
+
+    current_prompt, if given, is the CURRENT artifact's own image_prompt (the caller's
+    to fetch from the DB - this module has no artifact access) - written alongside the
+    PNG as a sidecar (see _write_version_prompt) so this exact version can be restored
+    later. None (the default, matching every caller before version navigation existed)
+    versions the PNG only, exactly as before."""
     current = _current_draft_bytes(ad_id, angle_slug)
     if current is None:
         return None
@@ -1095,6 +1214,7 @@ def version_current_draft(ad_id, angle_slug=None):
             current, content_type="image/png")
     except Exception as e:
         print(f"[version_current_draft] ad_id={ad_id} bucket upload failed (non-fatal): {e}")
+    _write_version_prompt(version_name, current_prompt)
     return version_name
 
 
@@ -1125,10 +1245,13 @@ def _edit_preserve_clause(instruction):
 
 
 def edit_image(current_image_bytes, instruction, ad_id, aspect="1:1", angle_slug=None,
-                text_in_image=False, headline=None, subtext=None):
+                text_in_image=False, headline=None, subtext=None, current_prompt=None):
     """Edit an existing draft image via nano banana; versions the outgoing draft and
     returns the new path, or None on failure. text_in_image/headline/subtext are accepted
-    for call-site compatibility only - no longer used in the prompt."""
+    for call-site compatibility only - no longer used in the prompt. current_prompt, if
+    given, is the CURRENT artifact's own image_prompt - written as a sidecar alongside
+    the versioned-out PNG (see version_current_draft) so this version can be restored
+    later; None skips the sidecar, same as every caller before version navigation existed."""
     from google.genai import types as genai_types
     stem = _draft_stem(ad_id, angle_slug)
     prompt = (
@@ -1180,6 +1303,7 @@ def edit_image(current_image_bytes, instruction, ad_id, aspect="1:1", angle_slug
             bucket.blob(f"{stem}_draft.png").upload_from_string(image_bytes, content_type="image/png")
         except Exception as e:
             print(f"Bucket upload failed (non-fatal): {e}")
+        _write_version_prompt(version_name, current_prompt)
         edit_image.last_prompt = prompt
         return str(dest)
     except Exception:

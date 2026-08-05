@@ -278,7 +278,7 @@ def _regenerate_existing_draft(ad, angle_id, angle_slug, operator_instruction, s
     if _stop():
         log.info("Ad %s: stop requested, skipping before the paid regenerate call", ad_id)
         return "skipped"
-    versioned = generate_image_prompt.version_current_draft(ad_id, angle_slug)
+    versioned = generate_image_prompt.version_current_draft(ad_id, angle_slug, current_prompt=stored_prompt)
     if versioned:
         log.info("Ad %s: versioned outgoing draft as %s before regenerating", ad_id, versioned)
     new_draft = generate_image_prompt.regenerate_from_stored_prompt(

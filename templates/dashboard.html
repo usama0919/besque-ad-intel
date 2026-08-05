@@ -426,8 +426,12 @@ const OV_FIELDS = [
 function ovGet(a){
   if(!overlayState[a.ad_id]){
     const c = a.copy || {};
+    // text_in_image means the headline is already baked into the draft's own pixels -
+    // the separate editable overlay defaults off so it doesn't show a redundant
+    // duplicate; the operator can still toggle it back on via ov-toggles.
+    const bakedIn = !!a.text_in_image;
     overlayState[a.ad_id] = {
-      headline: {text: c.headline || '', show: true},
+      headline: {text: c.headline || '', show: !bakedIn},
       offer:    {text: '', show: true},
       price:    {text: '', show: false},
     };
