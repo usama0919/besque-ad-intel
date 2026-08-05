@@ -1,0 +1,12 @@
+services:
+  test-db:
+    image: postgres:16-alpine
+    container_name: besque-test-pg
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: besque_test
+    ports:
+      - "5433:5432"
+    tmpfs:
+      - /var/lib/postgresql/data

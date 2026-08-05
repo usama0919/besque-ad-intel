@@ -34,3 +34,11 @@ check_osea.py
 *_result.txt
 ad_data_view.json
 brand_scheme.json
+
+backups/
+exports/
+
+backups/
+exports/
+
+data/
