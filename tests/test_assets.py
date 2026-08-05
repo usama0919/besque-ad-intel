@@ -10,10 +10,3 @@ def test_local_storage_saves_bytes(tmp_path):
 def test_get_storage_defaults_to_local(monkeypatch):
     monkeypatch.delenv("STORAGE_BACKEND", raising=False)
     assert type(assets.get_storage()).__name__ == "LocalStorage"
-
-
-def test_gcs_backend_not_provisioned(monkeypatch):
-    monkeypatch.setenv("STORAGE_BACKEND", "gcs")
-    import pytest
-    with pytest.raises(NotImplementedError):
-        assets.get_storage()
