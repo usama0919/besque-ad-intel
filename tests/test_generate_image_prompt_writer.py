@@ -35,6 +35,39 @@ def test_build_user_prompt_never_reads_angle_body_area():
     assert "elbow and forearm" not in prompt_with_run_value
 
 
+def test_effective_body_area_none_when_reference_has_no_human_subject():
+    bp = {"body_area_shown": "none"}
+    assert writer.effective_body_area(bp, "legs") is None
+    assert writer.effective_body_area(bp, None) is None
+
+
+def test_effective_body_area_uses_reference_region_by_default():
+    bp = {"body_area_shown": "arms"}
+    assert writer.effective_body_area(bp, None) == "arms"
+
+
+def test_effective_body_area_operator_override_wins():
+    bp = {"body_area_shown": "arms"}
+    assert writer.effective_body_area(bp, "legs") == "legs"
+
+
+def test_effective_body_area_field_absent_passes_operator_value_through():
+    assert writer.effective_body_area({}, "knees") == "knees"
+    assert writer.effective_body_area({}, None) is None
+
+
+def test_build_user_prompt_omits_body_area_when_reference_has_no_human_subject():
+    bp = {"body_area_shown": "none"}
+    prompt = writer._build_user_prompt(bp, angle={"name": "Bruising"}, body_area="legs")
+    assert "legs" not in prompt
+
+
+def test_build_user_prompt_uses_reference_region_when_operator_gave_none():
+    bp = {"body_area_shown": "arms"}
+    prompt = writer._build_user_prompt(bp, angle={"name": "Bruising"}, body_area=None)
+    assert "arms" in prompt
+
+
 def test_build_user_prompt_includes_product_visual_description():
     product = {"visual_description": "amber glass bottle, gold pump top"}
     prompt = writer._build_user_prompt({}, product=product)

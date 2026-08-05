@@ -66,6 +66,7 @@
       }
     },
     "legibility_notes": { "type": "string" },
+    "body_area_shown": { "type": "string" },
     "creative_objective": { "type": "string" },
     "target_audience": { "type": "string" },
     "typography": {

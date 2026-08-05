@@ -50,6 +50,32 @@ WRITER_SYSTEM = (
 )
 
 
+def effective_body_area(blueprint, body_area):
+    """The body area actually appropriate for this generation, given what the reference
+    ad's own blueprint (deconstruct.py's body_area_shown, Item E, 2026-08-05) says is
+    actually in frame. A real live failure: a product-only reference (no human subject at
+    all) generated with operator body_area="legs" produced illustrated legs draped over
+    the bottle - so a reference with NO human subject forces this to None regardless of
+    what the operator typed, not just when they left it blank; there is nothing to feature
+    a body area ON.
+
+    When the reference DOES show a human subject, its own detected region is the DEFAULT,
+    but an explicit operator body_area OVERRIDES it - operator input is an override, never
+    a default, matching the team's confirmed answer that body area is per-run and never
+    fixed (the same reasoning angles.body_area is already never read here for).
+
+    body_area_shown absent entirely (a blueprint from before this field existed) falls back
+    to today's behaviour unchanged - the operator's body_area passes straight through -
+    since there is no reference-derived signal either way to act on."""
+    shown = (blueprint or {}).get("body_area_shown")
+    if shown is None:
+        return body_area
+    shown = shown.strip()
+    if not shown or shown.lower() == "none":
+        return None
+    return (body_area or "").strip() or shown
+
+
 def _build_user_prompt(blueprint, product=None, angle=None, realism=None, body_area=None,
                         offer_text=None, reference_image_count=0, text_in_image=False,
                         include_product=True, headline=None, subtext=None,
@@ -72,10 +98,10 @@ def _build_user_prompt(blueprint, product=None, angle=None, realism=None, body_a
     # it exists for nothing else, so it must be consumed here, not left unread.
     if angle.get("notes"):
         lines.append(f"Operator guidance for this angle (from the angle's notes field): {angle['notes']}")
-    if body_area:
-        # Per-run, NEVER angle.body_area - body area varies every run and is never fixed
-        # per angle (confirmed by the team). This is the only body-area value fed in here.
-        lines.append(f"Body area to feature in THIS image (operator-specified for this run): {body_area}.")
+    eff_body_area = effective_body_area(blueprint, body_area)
+    if eff_body_area:
+        source = "operator-specified for this run" if (body_area or "").strip() else "the region shown in the reference ad"
+        lines.append(f"Body area to feature in THIS image ({source}): {eff_body_area}.")
     if product:
         visual_desc = product.get("visual_description", "")
         if visual_desc:
