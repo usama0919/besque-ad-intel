@@ -190,6 +190,8 @@ def generate_from_selection(ad_ids, angle_id=None, body_area=None, offer_text=No
 
     Returns {"processed": n, "skipped": n, "failed": n, "already_generated": n,
     "by_ad": {ad_id: result}}."""
+    log.info("[TRACE-A] generate_from_selection received edit_mode=%r (type=%s)",
+              edit_mode, type(edit_mode).__name__)
     from src.config_check import validate_config
     validate_config()
     dedupe.init_db()
@@ -247,6 +249,64 @@ def generate_from_selection(ad_ids, angle_id=None, body_area=None, offer_text=No
         _report(ad_id, result)
     log.info("generate_from_selection complete: %s", summary)
     return summary
+
+
+def _regenerate_existing_draft(ad, angle_id, angle_slug, operator_instruction, should_stop):
+    """Apply operator_instruction as a delta to the EXACT prompt that produced the
+    current draft - never a fresh pipeline re-run from current form state. Fails loudly
+    (returns "failed") if no prompt was stored, rather than rebuilding one."""
+    ad_id = ad.get("ad_id")
+    _stop = should_stop or (lambda: False)
+    existing = dedupe.get_artifact(ad_id, angle_id=angle_id)
+    if existing is None:
+        log.error("Ad %s: regenerate requested but no existing artifact for angle_id=%s", ad_id, angle_id)
+        return "failed"
+    stored_prompt = (existing.get("image_prompt") or "").strip()
+    if not stored_prompt:
+        log.error("Ad %s: regenerate requested but the existing artifact has no stored image_prompt", ad_id)
+        dedupe.init_pipeline_warnings()
+        dedupe.record_warning(
+            "regenerate_missing_stored_prompt",
+            f"Ad {ad_id} ({ad.get('page_name', '?')}): regenerate requested but no image_prompt "
+            f"was stored on the existing artifact - failed rather than rebuilding one from current inputs.",
+        )
+        return "failed"
+    draft_bytes = generate_image_prompt._current_draft_bytes(ad_id, angle_slug)
+    if draft_bytes is None:
+        log.error("Ad %s: regenerate requested but no current draft image could be read", ad_id)
+        return "failed"
+    if _stop():
+        log.info("Ad %s: stop requested, skipping before the paid regenerate call", ad_id)
+        return "skipped"
+    versioned = generate_image_prompt.version_current_draft(ad_id, angle_slug)
+    if versioned:
+        log.info("Ad %s: versioned outgoing draft as %s before regenerating", ad_id, versioned)
+    new_draft = generate_image_prompt.regenerate_from_stored_prompt(
+        draft_bytes, stored_prompt, operator_instruction or "", ad_id, angle_slug=angle_slug,
+    )
+    if not new_draft:
+        log.error("Ad %s: regenerate failed - no draft image produced", ad_id)
+        return "failed"
+    img_prompt = getattr(generate_image_prompt.regenerate_from_stored_prompt, "last_prompt", "")
+    dedupe.save_artifact(
+        ad_id=ad_id, page_name=ad.get("page_name", ""),
+        image_path=existing.get("image_path", ""),
+        blueprint=existing.get("blueprint") or {},
+        generated_copy=existing.get("generated_copy") or {},
+        draft_image=new_draft,
+        image_prompt=img_prompt,
+        copy_prompt=existing.get("copy_prompt", ""),
+        model_info=existing.get("model_info", ""),
+        metadata=existing.get("metadata") or {},
+        angle_id=angle_id,
+        text_in_image=bool(existing.get("text_in_image")),
+        operator_instruction=operator_instruction or "",
+        format_flag=existing.get("format_flag", ""),
+        product_override_note=existing.get("product_override_note", ""),
+        regenerate=True,
+    )
+    dedupe.mark_seen(ad_id, ad.get("page_name", ""), angle_id)
+    return "processed"
 
 
 def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
@@ -329,20 +389,13 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
     end exactly as normal (unchanged), so a LATER non-explicit run (run_once) still treats
     it as seen.
 
-    regenerate (Chunk 5, Item 7 fix): the ORDERING defect - deconstruct and Gemini are
-    both paid, and save_artifact's own gate used to discard that paid result AFTER the
-    fact - is fixed by checking for an existing artifact BEFORE any paid call (below,
-    right after the seen_ads check) rather than relying on save_artifact's after-the-fact
-    gate alone. Only meaningful when explicit_selection=True (run_once never regenerates):
-    if an artifact already exists for (ad_id, angle_id) and regenerate is False (the
-    default), this returns "already_generated" having spent nothing. regenerate=True is
-    the operator's explicit ask (surfaced by the grid marking an already-generated card,
-    per Chunk 5 Item 3) - it versions the outgoing draft via
-    generate_image_prompt.version_current_draft (edit_image's own versioning scheme,
-    reused rather than duplicated) before generate_image overwrites it, and passes
-    regenerate=True through to save_artifact's now-explicit per-call parameter instead of
-    requiring FORCE_REPROCESS=1 process-wide."""
+    regenerate: only meaningful when explicit_selection=True (run_once never regenerates).
+    False (default) returns "already_generated" if an artifact exists, spending nothing.
+    True hands off entirely to _regenerate_existing_draft - applies operator_instruction as
+    a delta to the artifact's own stored image_prompt, never a fresh deconstruct/copy/
+    generate_image run from current form state; fails loudly if no prompt was stored."""
     ad_id = ad.get("ad_id")
+    log.info("[TRACE-A] process_ad top: edit_mode=%r (type=%s)", edit_mode, type(edit_mode).__name__)
     if not ad_id:
         return "failed"
     angle_id = messaging_angle["id"] if messaging_angle else None
@@ -368,6 +421,11 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
                 log.info("Ad %s already generated for angle_id=%s, skipping (regenerate not requested)",
                          ad_id, angle_id)
                 return "already_generated"
+
+        # Regenerate supersedes the rest of this pipeline entirely - no deconstruct, no
+        # fresh copy, no full generate_image rebuild from current form state.
+        if explicit_selection and regenerate:
+            return _regenerate_existing_draft(ad, angle_id, angle_slug, operator_instruction, should_stop)
 
         log.info("Ad %s (index %s/%s): deconstruct starting", ad_id, ad_index, total_ads)
         image_bytes = assets.download_image_bytes(ad["image_url"])
@@ -484,16 +542,6 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
         if _stop():
             log.info("Ad %s: stop requested, skipping before the paid image generation call", ad_id)
             return "skipped"
-
-        # Item 7c: a deliberate regenerate must version the outgoing draft BEFORE
-        # generate_image overwrites it, reusing edit_image's own versioning scheme
-        # (generate_image_prompt.version_current_draft) rather than a new one. Only
-        # reachable when explicit_selection already confirmed (above) that a prior
-        # artifact/draft exists for this (ad_id, angle_id) - never fires for a fresh ad.
-        if explicit_selection and regenerate:
-            versioned = generate_image_prompt.version_current_draft(ad_id, angle_slug)
-            if versioned:
-                log.info("Ad %s: versioned outgoing draft as %s before regenerating", ad_id, versioned)
 
         log.info("Ad %s: image generation starting (edit_mode=%s)", ad_id, edit_mode)
         try:

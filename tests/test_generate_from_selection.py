@@ -279,12 +279,58 @@ def test_generate_from_selection_already_generated_skip_spends_nothing(monkeypat
         _cleanup(cid, [ad_id])
 
 
-def test_generate_from_selection_regenerate_versions_the_draft_and_writes_new_content(monkeypatch):
-    """regenerate=True is the operator's explicit ask (the grid marked this card
-    already-generated and they selected it anyway) - it must version the
-    outgoing draft (edit_image's own scheme, reused) and actually replace the
-    artifact content, using the REAL (unmocked) save_artifact and a REAL
-    (unmocked) version_current_draft to prove the file gets preserved."""
+def test_generate_from_selection_regenerate_versions_draft_and_applies_delta_to_stored_prompt(monkeypatch):
+    """regenerate=True applies operator_instruction as a delta to the artifact's OWN
+    stored image_prompt - never a fresh deconstruct/copy/generate_image run. Versions
+    the outgoing draft first (edit_image's scheme, reused), using REAL (unmocked)
+    save_artifact and version_current_draft to prove the file is preserved."""
+    cid = _make_competitor()
+    ad_id = _seed_scraped_ad(cid)
+    dedupe.init_artifacts()
+    dedupe.save_artifact(
+        ad_id=ad_id, page_name="Brand", image_path="assets/x.jpg",
+        blueprint={"format": "hero"}, generated_copy={"headline": "Old"},
+        draft_image="assets/x_draft.png", metadata={"cta": "Shop", "destination_url": "http://x"},
+        image_prompt="STORED PROMPT TEXT",
+    )
+    from src import generate_image_prompt
+    import tempfile
+    from pathlib import Path as _Path
+    tmp_asset_dir = _Path(tempfile.mkdtemp())
+    monkeypatch.setattr(generate_image_prompt, "ASSET_DIR", tmp_asset_dir)
+    # Simulate an existing draft PNG on disk for this ad, at the exact stem
+    # version_current_draft/regenerate_from_stored_prompt both key off.
+    (tmp_asset_dir / f"{ad_id}_draft.png").write_bytes(b"OLD-DRAFT-BYTES")
+
+    deconstruct_calls = []
+    copy_calls = []
+    monkeypatch.setattr(pipeline.deconstruct, "deconstruct_image",
+                        lambda **k: deconstruct_calls.append(1) or {"format": "hero", "angle": "a"})
+    monkeypatch.setattr(pipeline.generate_copy, "generate_copy_live",
+                        lambda bp, product=None, **k: copy_calls.append(1) or {"headline": "New"})
+    monkeypatch.setattr(pipeline.generate_image_prompt, "regenerate_from_stored_prompt",
+                        lambda *a, **k: str(tmp_asset_dir / f"{ad_id}_draft.png"))
+    # save_artifact and version_current_draft deliberately NOT mocked.
+    try:
+        result = pipeline.generate_from_selection([ad_id], regenerate=True, instruction="fix the bottle")
+        assert result["by_ad"][ad_id] == "processed"
+        assert deconstruct_calls == [], "regenerate must never call deconstruct"
+        assert copy_calls == [], "regenerate must never generate fresh copy"
+        assert (tmp_asset_dir / f"{ad_id}_draft_v1.png").exists(), \
+            "the pre-regenerate draft must be preserved as a version, not just overwritten"
+        assert (tmp_asset_dir / f"{ad_id}_draft_v1.png").read_bytes() == b"OLD-DRAFT-BYTES"
+        rows = dedupe.get_artifacts(ad_id)
+        assert len(rows) == 1  # replaced in place (DELETE+INSERT), not appended as a second row
+        assert rows[0][2]["headline"] == "Old"  # generated_copy carried forward unchanged
+        row = dedupe.get_scraped_ads(competitor_id=cid)[0]
+        assert row["status"] == "processed"
+    finally:
+        _cleanup(cid, [ad_id])
+
+
+def test_generate_from_selection_regenerate_fails_loudly_without_stored_prompt(monkeypatch):
+    """No image_prompt on the existing artifact must fail, never silently rebuild one
+    from current form state."""
     cid = _make_competitor()
     ad_id = _seed_scraped_ad(cid)
     dedupe.init_artifacts()
@@ -293,36 +339,13 @@ def test_generate_from_selection_regenerate_versions_the_draft_and_writes_new_co
         blueprint={"format": "hero"}, generated_copy={"headline": "Old"},
         draft_image="assets/x_draft.png", metadata={"cta": "Shop", "destination_url": "http://x"},
     )
-    from src import generate_image_prompt
-    import tempfile
-    from pathlib import Path as _Path
-    tmp_asset_dir = _Path(tempfile.mkdtemp())
-    monkeypatch.setattr(generate_image_prompt, "ASSET_DIR", tmp_asset_dir)
-    # Simulate an existing draft PNG on disk for this ad, at the exact stem
-    # version_current_draft/generate_image both key off.
-    (tmp_asset_dir / f"{ad_id}_draft.png").write_bytes(b"OLD-DRAFT-BYTES")
-
-    monkeypatch.setattr(pipeline.assets, "download_image", lambda url, aid: "fake.jpg")
-    monkeypatch.setattr(pipeline.assets, "download_image_bytes", lambda url: b"fake-bytes")
-    monkeypatch.setattr(pipeline.deconstruct, "deconstruct_image", lambda **k: {"format": "hero", "angle": "a"})
-    monkeypatch.setattr(pipeline.generate_copy, "generate_copy_live",
-                        lambda bp, product=None, **k: {"headline": "New", "primary_text": "P",
-                                                         "image_subtext": "S", "cta": "C"})
-    monkeypatch.setattr(pipeline.compliance, "check_compliance", lambda copy, name, text, **k: (True, []))
-    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image",
-                        lambda bp, aid, product=None, reference_images=None, **k: str(tmp_asset_dir / f"{aid}_draft.png"))
-    monkeypatch.setattr(pipeline.slack_review, "post_review", lambda *a, **k: {"ts": "123"})
-    # save_artifact and version_current_draft deliberately NOT mocked.
+    deconstruct_calls = []
+    monkeypatch.setattr(pipeline.deconstruct, "deconstruct_image",
+                        lambda **k: deconstruct_calls.append(1) or {"format": "hero", "angle": "a"})
     try:
         result = pipeline.generate_from_selection([ad_id], regenerate=True)
-        assert result["by_ad"][ad_id] == "processed"
-        assert (tmp_asset_dir / f"{ad_id}_draft_v1.png").exists(), \
-            "the pre-regenerate draft must be preserved as a version, not just overwritten"
-        assert (tmp_asset_dir / f"{ad_id}_draft_v1.png").read_bytes() == b"OLD-DRAFT-BYTES"
-        rows = dedupe.get_artifacts(ad_id)
-        assert len(rows) == 1  # replaced in place (DELETE+INSERT), not appended as a second row
-        row = dedupe.get_scraped_ads(competitor_id=cid)[0]
-        assert row["status"] == "processed"
+        assert result["by_ad"][ad_id] == "failed"
+        assert deconstruct_calls == []
     finally:
         _cleanup(cid, [ad_id])
 

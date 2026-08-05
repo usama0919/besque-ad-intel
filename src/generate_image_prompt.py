@@ -1160,3 +1160,64 @@ def edit_image(current_image_bytes, instruction, ad_id, aspect="1:1", angle_slug
         import traceback
         traceback.print_exc()
         return None
+
+
+def _regenerate_delta_clause(instruction):
+    return (
+        " REGENERATE: the prompt above is the EXACT prompt that produced the attached "
+        "image - apply ONLY the following instruction as a targeted change to it; every "
+        "other element it describes (composition, text, colours, product) still applies "
+        f"exactly as already stated. Instruction: {instruction}"
+    )
+
+
+def regenerate_from_stored_prompt(current_image_bytes, stored_prompt, instruction, ad_id, angle_slug=None):
+    """Regenerate a draft by applying `instruction` as a delta to `stored_prompt` (the
+    exact prompt that produced current_image_bytes), never a fresh rebuild from current
+    form state. Aspect ratio is derived from current_image_bytes itself, never a
+    parameter. Caller must version the outgoing draft before calling this - it only
+    overwrites. Returns the new draft path, or None on failure."""
+    from google.genai import types as genai_types
+    stem = _draft_stem(ad_id, angle_slug)
+    prompt = stored_prompt.strip() + _regenerate_delta_clause(instruction)
+    try:
+        client = genai.Client(vertexai=True, project="besque-martech", location="global")
+        aspect_ratio = derive_aspect_ratio(current_image_bytes)
+        generation_config = None
+        if aspect_ratio is not None:
+            generation_config = genai_types.GenerateContentConfig(
+                image_config=genai_types.ImageConfig(aspect_ratio=aspect_ratio)
+            )
+        call_kwargs = {
+            "model": "gemini-3.1-flash-image",
+            "contents": [
+                genai_types.Part.from_bytes(data=current_image_bytes, mime_type="image/png"),
+                prompt,
+            ],
+        }
+        if generation_config is not None:
+            call_kwargs["config"] = generation_config
+        response = client.models.generate_content(**call_kwargs)
+        image_bytes = None
+        for part in response.candidates[0].content.parts:
+            if part.inline_data is not None:
+                image_bytes = part.inline_data.data
+                break
+        if image_bytes is None:
+            return None
+        ASSET_DIR.mkdir(exist_ok=True)
+        dest = ASSET_DIR / f"{stem}_draft.png"
+        with open(dest, "wb") as f:
+            f.write(image_bytes)
+        try:
+            from google.cloud import storage
+            storage.Client().bucket(assets.asset_bucket_name()).blob(f"{stem}_draft.png").upload_from_string(
+                image_bytes, content_type="image/png")
+        except Exception as e:
+            print(f"Bucket upload failed (non-fatal): {e}")
+        regenerate_from_stored_prompt.last_prompt = prompt
+        return str(dest)
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return None

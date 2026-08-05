@@ -674,10 +674,13 @@ def get_artifact(ad_id, angle_id=None):
 
     Returns angle_id/text_in_image too - callers editing a draft (dashboard.py's
     api_edit_image) need these to restore the ORIGINAL generation's rule-6 mode rather
-    than falling back to brand_rules()'s hardcoded defaults."""
+    than falling back to brand_rules()'s hardcoded defaults. Also returns image_path/
+    metadata/image_prompt/copy_prompt/model_info/format_flag/product_override_note -
+    pipeline.py's regenerate path carries these forward unchanged onto the new row."""
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
-            "SELECT ad_id, page_name, blueprint, generated_copy, draft_image, angle_id, text_in_image "
+            "SELECT ad_id, page_name, blueprint, generated_copy, draft_image, angle_id, text_in_image, "
+            "image_path, metadata, image_prompt, copy_prompt, model_info, format_flag, product_override_note "
             "FROM artifacts WHERE ad_id=%s AND angle_id IS NOT DISTINCT FROM %s ORDER BY id DESC LIMIT 1",
             (ad_id, angle_id),
         )
@@ -687,8 +690,12 @@ def get_artifact(ad_id, angle_id=None):
         import json as _j
         bp = r[2] if isinstance(r[2], dict) else _j.loads(r[2] or "{}")
         cp = r[3] if isinstance(r[3], dict) else _j.loads(r[3] or "{}")
+        meta = r[8] if isinstance(r[8], dict) else _j.loads(r[8] or "{}")
         return {"ad_id": r[0], "page_name": r[1], "blueprint": bp, "generated_copy": cp,
-                "draft_image": r[4], "angle_id": r[5], "text_in_image": r[6]}
+                "draft_image": r[4], "angle_id": r[5], "text_in_image": r[6],
+                "image_path": r[7] or "", "metadata": meta, "image_prompt": r[9] or "",
+                "copy_prompt": r[10] or "", "model_info": r[11] or "",
+                "format_flag": r[12] or "", "product_override_note": r[13] or ""}
 
 
 def set_suggested_name(competitor_id, suggested):
