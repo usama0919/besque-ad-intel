@@ -47,7 +47,8 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
                         text_in_image: bool = False, headline: str = None, subtext: str = None,
                         creative_description: str = None, edit_mode: bool = False,
                         offer_text: str = None, operator_instruction: str = None,
-                        retheme_colours: bool = True, brand_palette: str = None) -> str:
+                        retheme_colours: bool = True, brand_palette: str = None,
+                        realism: str = None) -> str:
     """Construct a Besque-adapted image generation prompt from the blueprint's visual notes.
     include_product=True, text_in_image=False, creative_description=None, edit_mode=False,
     offer_text=None, operator_instruction=None (today's defaults) reproduce the prior
@@ -87,14 +88,15 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
     non-edit-mode template branch - a real bug this parameter's first draft had, caught
     by test_build_image_prompt_edit_mode_forwards_retheme_and_palette: the template's
     local assignment silently shadowed the caller's value before _edit_mode_instruction
-    ever saw it. blueprint.get("creative_format") is read directly here for the TEXT
-    branch's typeface guidance (TYPOGRAPHY_GUIDANCE), not threaded as a separate
-    parameter since it's already part of the blueprint passed in.
+    ever saw it.
 
     substance_colour (Item 6b) is read straight from product.get("substance_colour") here
-    in the edit_mode branch only, the same "read it directly, don't add a parameter"
-    pattern as creative_format above - it's already part of the product dict already
-    passed in. See _substance_recolour_clause for what happens when it's unset."""
+    in the edit_mode branch only - it's already part of the product dict already passed
+    in, the same "read it directly, don't add a parameter" reasoning that used to apply to
+    creative_format here too, before Item C (2026-08-05) removed that read entirely - the
+    TEXT branch now inherits the reference's own typography rather than mapping
+    creative_format to a Besque typeface, so there's nothing left to read it for. See
+    _substance_recolour_clause for what happens when substance_colour is unset."""
     visual = blueprint.get("visual", {})
     # visual.subject is deliberately NOT read here. In practice it's where the vision
     # deconstruct step puts rich, identity-carrying descriptions of the competitor ad's
@@ -175,8 +177,8 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
                                    offer_text=offer_text, include_product=include_product,
                                    reference_has_product=reference_has_product,
                                    retheme_colours=retheme_colours, palette=brand_palette,
-                                   creative_format=blueprint.get("creative_format"),
-                                   substance_colour=(product or {}).get("substance_colour")) +
+                                   substance_colour=(product or {}).get("substance_colour"),
+                                   style=(realism or "").strip() or prod_style) +
             product_clause +
             closing
         )
@@ -191,7 +193,8 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
                         headline=headline, subtext=subtext) +
             _operator_instruction_clause(operator_instruction) +
             creative_description.strip() + " "
-            + product_clause +
+            + product_clause
+            + _bottle_fixed_clause() + _register_lighting_only_clause() +
             f"Square 1:1 aspect ratio composition. " +
             closing
         )
@@ -206,7 +209,8 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
             + product_clause +
             f"Palette and mood: {palette}. Text placement: {text_placement}. "
             f"Square 1:1 aspect ratio composition. "
-            + PRODUCTION_STYLE_GUIDANCE.get(prod_style, DEFAULT_STYLE_GUIDANCE) +
+            + PRODUCTION_STYLE_GUIDANCE.get(prod_style, DEFAULT_STYLE_GUIDANCE)
+            + _bottle_fixed_clause() + _register_lighting_only_clause() +
             closing
         )
     return prompt
@@ -444,6 +448,15 @@ def _container_list_phrase():
 # preservation while the OFFER clause below still removed a container - the exact
 # contradiction 6c was built to prevent, just for a different suppressed category. Found
 # during 6d, not by a live run.
+#
+# Item D (2026-08-05): a THIRD partition of the same suppressing_offer condition, not a
+# new mechanism - offer_text truthy already made suppressing_offer False here (the offer
+# container was never in the removed set), so the exception clause above already reads
+# correctly for substitution: only the OFFER clause below needed strengthening, from
+# naming just "shape and position" to naming position/shape/size/colour/typography
+# explicitly, matching TEXT's own inheritance wording (Item C) - the badge is preserved
+# exactly, only its wording changes, same as a headline is preserved exactly, only its
+# wording changes.
 def _suppressed_container_exception(suppressing_text, suppressing_offer):
     if not (suppressing_text or suppressing_offer):
         return ""
@@ -461,10 +474,39 @@ def _suppressed_container_exception(suppressing_text, suppressing_offer):
     )
 
 
+def _bottle_fixed_clause():
+    return (
+        "The Besque bottle's geometry, proportions, and label text/layout are FIXED - "
+        "never subject to re-theming, style adaptation, or creative variation, and never "
+        "changed unless the operator's instruction explicitly names the bottle. "
+    )
+
+
+def _register_lighting_only_clause():
+    return (
+        "Only the bottle's lighting, grading, and finish adapt to match the rendering "
+        "register - lit like a phone photo in a UGC frame, like a studio product shot in a "
+        "studio frame, rendered in that illustration's own style in an illustrated frame - "
+        "always the same bottle, same shape, same label. Never a hand-drawn bottle inside a "
+        "photographic frame, never a photographic bottle inside an illustrated frame. "
+    )
+
+
+def _register_clause(style):
+    if not style:
+        return ""
+    guidance = PRODUCTION_STYLE_GUIDANCE.get(style, DEFAULT_STYLE_GUIDANCE)
+    return (
+        f"REGISTER: match the reference image's own rendering register exactly - {guidance}"
+        + _bottle_fixed_clause()
+        + _register_lighting_only_clause()
+    )
+
+
 def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, offer_text=None,
                             include_product=True, reference_has_product=True,
-                            retheme_colours=True, palette=None, creative_format=None,
-                            substance_colour=None):
+                            retheme_colours=True, palette=None,
+                            substance_colour=None, style=None):
     """EDIT MODE (2026-08-01): Gemini receives the competitor's own ad as an input image
     Part, not just a text description of it - the reference image IS the creative brief,
     so no template scene/layout/palette description is assembled here (see
@@ -520,7 +562,29 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
     independently - text_in_image=True with offer_text unset must still except the offer
     container, exactly the gap a text_in_image-only check left open. Neither suppressed ->
     opening is unaffected, byte-for-byte identical to before this item, the same
-    additive-only pattern retheme_colours/substance_colour already established."""
+    additive-only pattern retheme_colours/substance_colour already established.
+
+    Item B (2026-08-05): retheme_colours' palette remap contradicted TEXT (Item C - text
+    colour is inherited from the reference) and OFFER (Item D - a substituted badge keeps
+    its own reference colour exactly) whenever both were in effect at once. Folded into the
+    SAME sentence that states the remap, not a competing clause after it: the remap still
+    covers background/props/wardrobe/surfaces exactly as before, but now says outright that
+    it never reaches text/typography or a substituted offer badge's own colour - those are
+    governed by TEXT/OFFER below. retheme_colours=False is unaffected (that branch already
+    reproduces every colour including text/badges, so there was never a contradiction to
+    guard against there).
+
+    Item C (2026-08-05): the TEXT branch below now INHERITS the reference's own typography
+    (weight, casing, placement) and text colour, replacing ONLY the wording - a deliberate
+    reversal of Prompt 4 Item 5's "map creative_format to Besque's OWN typeface, never the
+    reference's own font" (TYPOGRAPHY_GUIDANCE), which was this function's only caller of
+    that map. Live use showed the output ignoring the reference's text styling entirely, and
+    the team's answer for this function going forward is inheritance, not substitution - so
+    the `creative_format` parameter (only ever threaded here for that lookup) and
+    TYPOGRAPHY_GUIDANCE/DEFAULT_TYPOGRAPHY_GUIDANCE are removed as dead code, not left
+    unused. Must not contradict Item B: text colour is explicitly named as INHERITED, never
+    re-themed - see B's palette-remap sentence, which now says the same thing from the
+    other side."""
     suppressing_text = not (text_in_image and headline)
     suppressing_offer = not offer_text
     exception_clause = _suppressed_container_exception(suppressing_text, suppressing_offer)
@@ -537,7 +601,11 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             + exception_clause +
             f"At the same time, every hue in the scene (background, props, "
             f"wardrobe, surfaces) re-maps to Besque's palette: {effective_palette} - "
-            f"overriding the reference's own colours entirely. "
+            f"overriding the reference's own colours entirely. This colour substitution "
+            f"NEVER reaches text/typography (see TEXT below - its colour is INHERITED "
+            f"from the reference, not re-themed) or a substituted offer/price badge's own "
+            f"colour (see OFFER below - its colour is preserved exactly, not re-themed): "
+            f"both keep the reference's own colour untouched by this palette remap. "
         )
     else:
         opening = (
@@ -546,6 +614,7 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             "palette, text placement, and overall layout as closely as possible. "
             + exception_clause
         )
+    opening += _register_clause(style)
 
     if include_product and reference_has_product:
         base = opening + (
@@ -575,14 +644,15 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
         permitted = f'the headline "{eff_headline}"'
         if eff_subtext:
             permitted += f' and the supporting text "{eff_subtext}"'
-        typo_guidance = TYPOGRAPHY_GUIDANCE.get(creative_format, DEFAULT_TYPOGRAPHY_GUIDANCE)
         base += (
-            f"TEXT: preserve the reference image's text zones, size, and position "
-            f"EXACTLY as they appear - but replace the wording with {permitted} only, "
-            f"same layout, our words. Use Besque's OWN typeface style here, never the "
-            f"reference's own font: {typo_guidance}. The competitor's brand name, "
-            f"product name, and claims must NEVER survive into the output, even inside "
-            f"this replacement typeface. "
+            f"TEXT: preserve the reference image's text zones EXACTLY as they appear - "
+            f"same size, position, weight, casing, and text colour - and replace ONLY "
+            f"the wording with {permitted}, same layout, our words. Typography (typeface "
+            f"weight, casing, placement) and text colour are INHERITED from the "
+            f"reference exactly as shown, never re-themed or restyled to a different "
+            f"look - the wording is the ONLY thing that changes. The competitor's brand "
+            f"name, product name, and claims must NEVER survive into the output, even "
+            f"inside this inherited styling. "
         )
     else:
         base += (
@@ -597,9 +667,11 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
         )
     if offer_text:
         base += (
-            f"OFFER: if the reference shows an offer, discount, price, or CTA button, "
-            f"reproduce its shape and position but with ONLY this exact wording: "
-            f"{offer_text}. Do not invent a different number, percentage, or term. "
+            f"OFFER: if the reference shows an offer, discount, price, or CTA badge, "
+            f"preserve its position, shape, size, colour, and typography EXACTLY as "
+            f"shown in the reference - and replace ONLY its wording with: {offer_text}. "
+            f"Do not invent a different number, percentage, or term; do not restyle, "
+            f"resize, or recolour the badge itself. "
         )
     else:
         # Item 6d (2026-08-04): enumerated explicitly after "SUMMER SALE" survived as a
@@ -671,35 +743,11 @@ del _validator
 # Used when production_style is absent/null/unknown — preserves the previous hardcoded look.
 DEFAULT_STYLE_GUIDANCE = "Style: clean, editorial, aspirational, natural light. "
 
-# Per-creative-format typeface guidance (Prompt 4, Item 5): map the FORMAT to a Besque
-# typeface style rather than copying the reference's own font - "map creative_format to a
-# typeface style rather than copying the reference's". Direct-response formats get clean
-# sans-serif for scannability/urgency; premium/editorial formats get elegant serif;
-# testimonial_review gets a handwritten-marker feel (a real customer's own note), the
-# whiteboard/diagram-style annotation register the spec names.
-TYPOGRAPHY_GUIDANCE = {
-    "before_after": "clean, bold sans-serif - direct-response clarity and urgency",
-    "problem_solution": "clean, bold sans-serif - direct-response clarity and urgency",
-    "offer_led": "clean, bold sans-serif - direct-response clarity and urgency",
-    "comparison": "clean, bold sans-serif - direct-response clarity",
-    "listicle_tips": "clean sans-serif - easy to scan, direct-response clarity",
-    "product_hero": "elegant serif - premium, editorial, aspirational",
-    "founder_story": "elegant serif - premium, editorial, aspirational",
-    "ingredient_focus": "elegant serif - premium, editorial, aspirational",
-    "lifestyle_scene": "elegant serif - premium, editorial, aspirational",
-    "text_led_editorial": "elegant serif - premium, editorial, aspirational",
-    "testimonial_review": "handwritten marker - informal and personal, like a real customer's own note",
-}
-# Same coverage guarantee as PRODUCTION_STYLE_GUIDANCE above - a schema addition to
-# creative_format can't silently fall through to DEFAULT_TYPOGRAPHY_GUIDANCE unnoticed.
-from src import validator as _validator
-assert set(_validator.creative_formats()) <= set(TYPOGRAPHY_GUIDANCE), (
-    "TYPOGRAPHY_GUIDANCE is missing an entry for one of validator.creative_formats()"
-)
-del _validator
-
-# Used when creative_format is absent/null/unrecognised.
-DEFAULT_TYPOGRAPHY_GUIDANCE = "clean sans-serif - versatile, legible default"
+# TYPOGRAPHY_GUIDANCE (Prompt 4, Item 5: map creative_format to a Besque typeface style
+# rather than copying the reference's own font) was removed 2026-08-05 (Item C) - its only
+# caller, _edit_mode_instruction's TEXT branch, now inherits the reference's own typography
+# and text colour instead, per the team's live-use finding that edit mode's output was
+# ignoring the reference's text styling entirely.
 
 
 def _reference_framing(count):
@@ -871,7 +919,8 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
                                  text_in_image=text_in_image, headline=headline, subtext=subtext,
                                  creative_description=creative_description, edit_mode=edit_mode,
                                  offer_text=offer_text, operator_instruction=operator_instruction,
-                                 retheme_colours=retheme_colours, brand_palette=brand_palette)
+                                 retheme_colours=retheme_colours, brand_palette=brand_palette,
+                                 realism=realism)
     stem = _draft_stem(ad_id, angle_slug)
     try:
         client = genai.Client(vertexai=True, project="besque-martech", location="global")
@@ -934,6 +983,7 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
                     image_config=genai_types.ImageConfig(aspect_ratio=aspect_ratio)
                 )
 
+        print(f"[TRACE-A] generate_image building Gemini call: edit_mode={edit_mode!r} (type={type(edit_mode).__name__})")
         import time as _time
         response = None
         for _attempt in range(3):

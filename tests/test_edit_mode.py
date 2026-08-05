@@ -345,7 +345,7 @@ def test_edit_mode_instruction_offer_text_absent_bans_urgency_and_cta():
 
 def test_edit_mode_instruction_offer_text_given_states_exact_wording_only():
     instruction = generate_image_prompt._edit_mode_instruction(offer_text="20% off this week")
-    assert "ONLY this exact wording: 20% off this week" in instruction
+    assert "replace ONLY its wording with: 20% off this week" in instruction
     assert "none of the following may survive anywhere in the image" not in instruction
 
 
@@ -356,7 +356,49 @@ def test_build_image_prompt_edit_mode_forwards_offer_text_to_edit_instruction():
     prompt_with_offer = generate_image_prompt.build_image_prompt(
         _blueprint(), edit_mode=True, offer_text="free shipping this week"
     )
-    assert "ONLY this exact wording: free shipping this week" in prompt_with_offer
+    assert "replace ONLY its wording with: free shipping this week" in prompt_with_offer
+
+
+# ---- Item D (2026-08-05): offer substitution inverts 6d's removal - preserve the
+# reference badge's position/shape/size/colour/typography exactly, replace only wording.
+# A third partition of the SAME suppressing_offer condition 6c/6d already established,
+# not a parallel clause: offer_text truthy already excluded the offer container from
+# _suppressed_container_exception's removed set (it was never in scope to fold in). ----
+
+def test_offer_substitution_preserves_every_named_property():
+    instruction = generate_image_prompt._edit_mode_instruction(offer_text="20% off, code SUMMER20")
+    for prop in ("position", "shape", "size", "colour", "typography"):
+        assert prop in instruction.split("OFFER:")[1].split("EFFICACY")[0]
+    assert "do not restyle, resize, or recolour the badge itself" in instruction
+
+
+def test_offer_substitution_does_not_remove_the_badge_container():
+    """offer_text supplied means the badge is preserved, not one of the containers
+    _suppressed_container_exception's opening clause removes."""
+    instruction = generate_image_prompt._edit_mode_instruction(
+        offer_text="20% off", text_in_image=False
+    )
+    # text is suppressed (no headline given) but offer is NOT - opening should name only
+    # the text container as removed, never the offer one.
+    assert "any container holding text that's being suppressed this run" in instruction
+    assert "any container holding an offer that's being suppressed this run" not in instruction
+    assert "any container holding text or an offer" not in instruction
+
+
+def test_offer_removal_unaffected_when_offer_text_empty():
+    """The empty-offer_text branch (6d's removal wording) must be byte-for-byte
+    unchanged by Item D - substitution only applies when offer_text is actually supplied."""
+    instruction = generate_image_prompt._edit_mode_instruction(offer_text=None)
+    assert "none of the following may survive anywhere in the image" in instruction
+    assert "position, shape, size, colour, and typography" not in instruction
+
+
+def test_build_image_prompt_edit_mode_offer_substitution_reaches_the_prompt():
+    prompt = generate_image_prompt.build_image_prompt(
+        _blueprint(), edit_mode=True, offer_text="Buy 2 Get 1 Free"
+    )
+    assert "position, shape, size, colour, and typography EXACTLY as shown" in prompt
+    assert "replace ONLY its wording with: Buy 2 Get 1 Free" in prompt
 
 
 # ---- Item 6d (2026-08-04): strengthen the offer ban - "SUMMER SALE" survived as a tiled
@@ -826,56 +868,93 @@ def test_build_image_prompt_non_edit_mode_unaffected_by_retheme_colours():
             == generate_image_prompt.build_image_prompt(bp, retheme_colours=False))
 
 
-# ---- Typography: map creative_format to OUR typeface, never copy the reference's ----
+# ---- Item C (2026-08-05): TEXT inherits the reference's own typography/colour instead
+# of mapping creative_format to a Besque typeface - reverses Prompt 4 Item 5's
+# TYPOGRAPHY_GUIDANCE, which is now removed entirely (this was its only caller). ----
 
-def test_typography_guidance_used_in_text_branch():
+def test_text_branch_inherits_typography_and_colour_from_reference():
     instruction = generate_image_prompt._edit_mode_instruction(
-        text_in_image=True, headline="Firmer Skin By Friday", creative_format="product_hero"
+        text_in_image=True, headline="Firmer Skin By Friday"
     )
-    assert "elegant serif" in instruction
-    assert "never the reference's own font" in instruction
+    assert "weight, casing, and text colour" in instruction
+    assert "INHERITED from the reference" in instruction
+    assert "the wording is the ONLY thing that changes" in instruction
+    # The old Besque-own-typeface wording must be gone.
+    assert "Besque's OWN typeface" not in instruction
+    assert "never the reference's own font" not in instruction
 
 
-def test_typography_guidance_varies_by_creative_format():
-    direct_response = generate_image_prompt._edit_mode_instruction(
-        text_in_image=True, headline="H", creative_format="offer_led"
-    )
-    assert "clean, bold sans-serif" in direct_response
-
-    premium = generate_image_prompt._edit_mode_instruction(
-        text_in_image=True, headline="H", creative_format="founder_story"
-    )
-    assert "elegant serif" in premium
-
-    testimonial = generate_image_prompt._edit_mode_instruction(
-        text_in_image=True, headline="H", creative_format="testimonial_review"
-    )
-    assert "handwritten marker" in testimonial
+def test_text_branch_no_longer_takes_a_creative_format_kwarg():
+    """creative_format was only ever threaded here for the now-removed TYPOGRAPHY_GUIDANCE
+    lookup - passing it must fail loudly (TypeError), not be silently ignored."""
+    import pytest
+    with pytest.raises(TypeError):
+        generate_image_prompt._edit_mode_instruction(text_in_image=True, headline="H",
+                                                       creative_format="product_hero")
 
 
-def test_typography_guidance_default_when_creative_format_missing():
-    instruction = generate_image_prompt._edit_mode_instruction(
-        text_in_image=True, headline="H", creative_format=None
-    )
-    assert "clean sans-serif - versatile, legible default" in instruction
+def test_typography_guidance_removed_entirely():
+    assert not hasattr(generate_image_prompt, "TYPOGRAPHY_GUIDANCE")
+    assert not hasattr(generate_image_prompt, "DEFAULT_TYPOGRAPHY_GUIDANCE")
 
 
 def test_typography_guidance_absent_when_no_text_rendered():
-    instruction = generate_image_prompt._edit_mode_instruction(text_in_image=False, creative_format="product_hero")
-    assert "elegant serif" not in instruction
+    """The TEXT-inheritance clause only applies when text is actually being rendered -
+    checked within the TEXT: section specifically, since B's palette-remap sentence also
+    legitimately mentions "INHERITED from the reference" (pointing at this same clause)
+    regardless of whether text is being rendered this run."""
+    instruction = generate_image_prompt._edit_mode_instruction(text_in_image=False)
+    text_section = instruction.split("TEXT:")[1].split("OFFER:")[0]
+    assert "the wording is the ONLY thing that changes" not in text_section
 
 
-def test_typography_guidance_has_every_creative_format():
-    from src import validator
-    for fmt in validator.creative_formats():
-        assert fmt in generate_image_prompt.TYPOGRAPHY_GUIDANCE
-
-
-def test_build_image_prompt_edit_mode_reads_creative_format_from_blueprint():
+def test_build_image_prompt_edit_mode_text_inheritance_reaches_the_prompt():
     bp = _blueprint()
     bp["creative_format"] = "founder_story"
     prompt = generate_image_prompt.build_image_prompt(bp, edit_mode=True, text_in_image=True, headline="H")
-    assert "elegant serif" in prompt
+    assert "INHERITED from the reference" in prompt
+
+
+# ---- Item B (2026-08-05): retheme_colours' palette remap must never contradict Item C's
+# text-colour inheritance or Item D's offer-badge colour preservation - all four
+# edit_mode x retheme_colours combinations. ----
+
+def test_retheme_on_edit_mode_on_excludes_text_and_offer_from_palette_remap():
+    instruction = generate_image_prompt._edit_mode_instruction(retheme_colours=True)
+    assert "NEVER reaches text/typography" in instruction
+    assert "a substituted offer/price badge's own colour" in instruction
+    assert "INHERITED" in instruction  # points at TEXT's own inheritance wording
+    assert "preserved exactly, not re-themed" in instruction
+
+
+def test_retheme_off_edit_mode_on_has_no_exclusion_clause():
+    """retheme_colours=False already reproduces every colour including text/badges - no
+    remap happens at all, so there is nothing for an exclusion clause to guard against."""
+    instruction = generate_image_prompt._edit_mode_instruction(retheme_colours=False)
+    assert "NEVER reaches text/typography" not in instruction
+
+
+def test_build_image_prompt_edit_mode_on_retheme_on_reaches_prompt():
+    prompt = generate_image_prompt.build_image_prompt(_blueprint(), edit_mode=True, retheme_colours=True)
+    assert "NEVER reaches text/typography" in prompt
+
+
+def test_build_image_prompt_edit_mode_on_retheme_off_reaches_prompt():
+    prompt = generate_image_prompt.build_image_prompt(_blueprint(), edit_mode=True, retheme_colours=False)
+    assert "NEVER reaches text/typography" not in prompt
+    assert "colour palette" in prompt  # reverts to the original reproduce-list wording
+
+
+def test_build_image_prompt_edit_mode_off_retheme_on_unaffected():
+    """retheme_colours only matters in edit_mode - the non-edit-mode template path must
+    never mention the edit-mode-only exclusion wording regardless of retheme_colours."""
+    prompt = generate_image_prompt.build_image_prompt(_blueprint(), edit_mode=False, retheme_colours=True)
+    assert "NEVER reaches text/typography" not in prompt
+
+
+def test_build_image_prompt_edit_mode_off_retheme_off_unaffected():
+    prompt = generate_image_prompt.build_image_prompt(_blueprint(), edit_mode=False, retheme_colours=False)
+    assert "NEVER reaches text/typography" not in prompt
 
 
 # ---- generate_image(): palette fetched from brand_settings only when it will be used ----
@@ -918,3 +997,41 @@ def test_generate_image_does_not_fetch_palette_when_not_edit_mode(monkeypatch, t
 
     generate_image_prompt.generate_image(_blueprint(), "AD_NO_EDIT", edit_mode=False, retheme_colours=True)
     assert calls == []
+
+
+def test_register_clause_absent_when_no_style():
+    assert generate_image_prompt._register_clause(None) == ""
+    assert generate_image_prompt._register_clause("") == ""
+
+
+def test_register_clause_uses_production_style_guidance():
+    instruction = generate_image_prompt._register_clause("illustrated")
+    assert "not a photograph" in instruction
+    assert "hand-drawn bottle inside a photographic frame" in instruction
+
+
+def test_edit_mode_instruction_style_reaches_register_clause():
+    instruction = generate_image_prompt._edit_mode_instruction(style="ugc_native")
+    assert "REGISTER:" in instruction
+    assert "phone" in instruction.lower()
+
+
+def test_build_image_prompt_edit_mode_uses_reference_style_by_default():
+    bp = _blueprint()
+    bp["production_style"] = {"style": "illustrated"}
+    prompt = generate_image_prompt.build_image_prompt(bp, edit_mode=True)
+    assert "not a photograph" in prompt
+
+
+def test_build_image_prompt_edit_mode_operator_realism_overrides_reference_style():
+    bp = _blueprint()
+    bp["production_style"] = {"style": "illustrated"}
+    prompt = generate_image_prompt.build_image_prompt(bp, edit_mode=True, realism="ugc_native")
+    assert "phone" in prompt.lower()
+    assert "not a photograph" not in prompt
+
+
+def test_build_image_prompt_generate_mode_unaffected_by_realism_param():
+    bp = _blueprint()
+    assert (generate_image_prompt.build_image_prompt(bp)
+            == generate_image_prompt.build_image_prompt(bp, realism="ugc_native"))
