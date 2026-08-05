@@ -274,23 +274,69 @@ def test_no_creative_description_reproduces_default_path():
             == generate_image_prompt.build_image_prompt(bp, creative_description=None))
 
 
-# ---- Part 5: edit_image's text clause respects the original generation's mode ----
+# ---- edit_image: minimal prompt - hard safety rules + bottle-fixed + targeted-edit
+# preserve clause only, no body copy/text-policy/offer/layout bloat ----
 
-def test_edit_text_clause_default_matches_original_hardcoded_text():
-    OLD_TEXT = (
-        "Keep the edited image completely free of overlaid marketing text — only the Besque "
-        "product's own label may appear, exactly as it appears in the image being edited — and "
-        "leave clean, uncluttered negative space where headline and offer text will be added "
-        "later as a separate HTML overlay; no competitor branding anywhere. "
-    )
-    assert generate_image_prompt._edit_text_clause(False) == OLD_TEXT
-    assert generate_image_prompt._edit_text_clause() == OLD_TEXT
+def test_edit_preserve_clause_states_instruction_and_preserve_everything():
+    clause = generate_image_prompt._edit_preserve_clause('make the background warmer')
+    assert "Instruction: make the background warmer" in clause
+    assert "TARGETED EDIT" in clause
+    assert "Preserve EVERY element" in clause
+    assert "except for what the instruction below explicitly names" in clause
 
 
-def test_edit_text_clause_text_in_image_permits_headline():
-    clause = generate_image_prompt._edit_text_clause(True)
-    assert "Render exactly the headline and supporting text specified in rule 6" in clause
-    assert "completely free" not in clause
+def test_bottle_fixed_clause_states_fixed_unless_named():
+    clause = generate_image_prompt._bottle_fixed_clause()
+    assert "geometry, proportions, and label" in clause
+    assert "FIXED" in clause
+    assert "unless the operator's instruction explicitly names the bottle" in clause
+
+
+def test_register_lighting_only_clause_states_lighting_adapts_not_geometry():
+    clause = generate_image_prompt._register_lighting_only_clause()
+    assert "lighting, grading, and finish adapt" in clause
+    assert "same bottle, same shape, same label" in clause
+    assert "hand-drawn bottle" in clause
+
+
+class _CapturingGenaiClientForEdit:
+    last_contents = None
+
+    def __init__(self, *a, **k):
+        self.models = self
+
+    def generate_content(self, model, contents, config=None):
+        _CapturingGenaiClientForEdit.last_contents = contents
+        part = type("Part", (), {"inline_data": type("Data", (), {"data": b"fake-png-bytes"})()})()
+        candidate = type("Candidate", (), {"content": type("Content", (), {"parts": [part]})()})()
+        return type("Response", (), {"candidates": [candidate]})()
+
+
+def _run_edit_image(monkeypatch, tmp_path, instruction="make the headline shorter"):
+    monkeypatch.setattr(generate_image_prompt, "genai",
+                         type("obj", (), {"Client": _CapturingGenaiClientForEdit}))
+    monkeypatch.setattr(generate_image_prompt, "ASSET_DIR", tmp_path)
+    generate_image_prompt.edit_image(b"fake-current-bytes", instruction, "AD_EDIT")
+    return _CapturingGenaiClientForEdit.last_contents[-1]
+
+
+def test_edit_image_prompt_contains_compliance_bottle_fixed_and_instruction(monkeypatch, tmp_path):
+    prompt = _run_edit_image(monkeypatch, tmp_path, instruction="make the headline shorter")
+    assert "BESQUE COMPLIANCE RULES" in prompt
+    assert "FIXED" in prompt
+    assert "Instruction: make the headline shorter" in prompt
+
+
+def test_edit_image_prompt_excludes_body_copy_and_layout_bloat(monkeypatch, tmp_path):
+    prompt = _run_edit_image(monkeypatch, tmp_path)
+    for excluded in ("TEXT POLICY", "PRODUCT POLICY", "LAYOUT DESCRIPTORS",
+                     "STRICT RULES - NEVER VIOLATE", "ingredient", "OFFER:", "REGISTER:"):
+        assert excluded not in prompt
+
+
+def test_edit_image_prompt_states_aspect_ratio(monkeypatch, tmp_path):
+    prompt = _run_edit_image(monkeypatch, tmp_path)
+    assert "Output aspect ratio: 1:1." in prompt
 
 
 # ---- Part 5: generate_image() gates the writer pass on messaging_angle, end to end ----

@@ -1087,51 +1087,29 @@ def _next_draft_version(ad_id, angle_slug=None):
     return n + 1
 
 
-def _edit_text_clause(text_in_image=False):
-    """The text-policy clause appended to an edit-image prompt. Mirrors _rule6_text_policy's
-    two branches - extracted as its own function so it's directly testable without
-    mocking genai.Client, the same way brand_rules' helpers are."""
-    if text_in_image:
-        return (
-            "Render exactly the headline and supporting text specified in rule 6 above as "
-            "in-scene typography - do not leave space for a separate overlay, and do not add "
-            "any other text; no competitor branding anywhere. "
-        )
+def _edit_preserve_clause(instruction):
     return (
-        "Keep the edited image completely free of overlaid marketing text — only the Besque "
-        "product's own label may appear, exactly as it appears in the image being edited — and "
-        "leave clean, uncluttered negative space where headline and offer text will be added "
-        "later as a separate HTML overlay; no competitor branding anywhere. "
+        "This is a TARGETED EDIT to the attached image, not a new composition. Preserve "
+        "EVERY element of the attached image EXACTLY as it appears - layout, typography, "
+        "wording, colours, product, bottle, background, lighting, existing text - except "
+        "for what the instruction below explicitly names. Change ONLY what the instruction "
+        f"names; nothing else may move, resize, recolour, reword, or be added or removed. "
+        f"Instruction: {instruction}"
     )
 
 
 def edit_image(current_image_bytes, instruction, ad_id, aspect="1:1", angle_slug=None,
                 text_in_image=False, headline=None, subtext=None):
-    """Edit an existing draft image with a natural-language instruction via nano banana.
-    Versions the outgoing draft to {stem}_draft_v{n}.png (stem = ad_id, or ad_id+angle),
-    then saves/uploads the result under the same stem's key and returns it. Returns None
-    on failure.
-
-    text_in_image/headline/subtext restore the ORIGINAL generation's rule-6 mode for this
-    edit - without them, editing a text-in-image draft would silently fall back to
-    brand_rules()'s defaults (no text permitted) while the closing instruction still told
-    the model to keep the base free of text, directly contradicting a headline that's
-    already baked into the image being edited. Callers should read these back from the
-    artifact row (angle_id + text_in_image + generated_copy), never ask the operator to
-    re-specify. include_product is NOT restorable here - artifacts has no column for it,
-    so an edited productless (e.g. glp1) draft still uses rule 7's default (include_product
-    assumed True); this is a known gap, not a silent choice.
-
-    Edit Mode's angle_slug param exists so an angle-variant draft can't be
-    versioned/overwritten under the wrong (ad_id-only) key if this function is called."""
+    """Edit an existing draft image via nano banana; versions the outgoing draft and
+    returns the new path, or None on failure. text_in_image/headline/subtext are accepted
+    for call-site compatibility only - no longer used in the prompt."""
     from google.genai import types as genai_types
     stem = _draft_stem(ad_id, angle_slug)
     prompt = (
-        brand_rules(text_in_image=text_in_image, headline=headline, subtext=subtext) +
-        f"Edit this Besque skincare advertisement image. Instruction: {instruction}. "
-        f"Keep it a premium, editorial skincare ad. Output aspect ratio: {aspect}. "
-        + _edit_text_clause(text_in_image) +
-        f"Do not add or alter ingredients, percentages, or claims."
+        COMPLIANCE_RULES +
+        _bottle_fixed_clause() +
+        _edit_preserve_clause(instruction) +
+        f" Output aspect ratio: {aspect}."
     )
     try:
         client = genai.Client(vertexai=True, project="besque-martech", location="global")
