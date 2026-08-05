@@ -261,11 +261,31 @@ function onAngleChange(){
 function selectCompetitor(id, name){
   if(selectedCompetitorId === id){ selectedCompetitorId = null; }
   else { selectedCompetitorId = id; }
+  try {
+    if(selectedCompetitorId === null){ localStorage.removeItem('poolSelectedCompetitorId'); }
+    else { localStorage.setItem('poolSelectedCompetitorId', selectedCompetitorId); }
+  } catch(e) {}
   document.getElementById('selectedCompName').textContent = selectedCompetitorId === null ? 'None selected' : name;
   document.getElementById('fetchBtn').disabled = selectedCompetitorId === null;
   document.getElementById('fetchStatus').textContent = selectedCompetitorId === null ? 'Select a competitor to begin.' : 'Ready.';
   selectedAdIds = new Set();
   updateSelectionCount();
+  loadCompetitors();
+  loadGrid();
+}
+
+// Restores the last-selected competitor (localStorage) and re-loads its grid from the
+// DB - a reload/navigation must not present an empty grid when scraped_ads rows exist.
+function restoreSelectedCompetitor(){
+  let saved = null;
+  try { saved = localStorage.getItem('poolSelectedCompetitorId'); } catch(e) {}
+  if(!saved) return;
+  const row = document.querySelector('.comp-row[data-id="'+saved+'"]');
+  if(!row) return;
+  selectedCompetitorId = parseInt(saved, 10);
+  document.getElementById('selectedCompName').textContent = row.querySelector('.comp-name').textContent;
+  document.getElementById('fetchBtn').disabled = false;
+  document.getElementById('fetchStatus').textContent = 'Ready.';
   loadCompetitors();
   loadGrid();
 }
@@ -534,7 +554,7 @@ function loadOperatorInstruction(){
   } catch(e) {}
 }
 
-loadCompetitors();
+loadCompetitors().then(restoreSelectedCompetitor);
 loadProducts();
 loadAngles();
 loadOperatorInstruction();

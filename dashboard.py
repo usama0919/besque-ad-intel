@@ -772,7 +772,7 @@ def _suppress_templated(value):
 
 
 @app.get("/api/pool/cards")
-def api_pool_cards(competitor_id: int = None, status: str = "pool", limit: int = 200, angle_id: int = None):
+def api_pool_cards(competitor_id: int = None, status: str = None, limit: int = 200, angle_id: int = None):
     """Flattened, judgeable-fields-only view of the pool for the Chunk 3
     browse-and-pick grid - deliberately a SEPARATE endpoint from GET /api/pool
     above (which stays a dumb raw_meta-in-full passthrough) rather than a query
@@ -780,6 +780,11 @@ def api_pool_cards(competitor_id: int = None, status: str = "pool", limit: int =
     different response shape from the same URL. This one derives exactly the
     fields the team judges an ad by from raw_meta SERVER-SIDE and ships only
     those to the browser - never the whole jsonb blob.
+
+    status defaults to None (no filter): scraped_ads.status is angle-agnostic
+    (moved off 'pool' by ANY generation, any angle), so filtering on it by
+    default hid an ad already generated for one angle from every other angle's
+    grid - the browse-everything contract this endpoint exists for.
 
     Sorted by days_running descending; ads with no parseable start_time sort
     last (never treated as 0 days - see _days_running). limit is explicit
@@ -952,7 +957,9 @@ async def api_generate(request: Request):
     regenerate = bool(body.get("regenerate", False))
     text_in_image = bool(body.get("text_in_image", False))
     include_product = bool(body.get("include_product", True))
+    print(f"[TRACE-A] api_generate raw body edit_mode = {body.get('edit_mode')!r} (type={type(body.get('edit_mode')).__name__})")
     edit_mode = bool(body.get("edit_mode", False))
+    print(f"[TRACE-A] api_generate parsed edit_mode = {edit_mode!r} (type={type(edit_mode).__name__})")
     check_output = bool(body.get("check_output", False))
     retheme_colours = bool(body.get("retheme_colours", True))
 
