@@ -87,10 +87,8 @@ def fetch_pool(competitor_id, cap=50, start_date_min=None, start_date_max=None, 
     Returns {"fetched": n_raw, "stored": n_stored, "skipped": {reason: n, ...}}.
     n_raw is every record Apify's dataset returned before the image/page filter;
     skipped breaks down by scrape.py's REJECT_* reason (not_image/wrong_page/
-    no_image_url) plus "duplicate" - the same ad_id appearing twice in ONE pull,
-    which only fetch_pool can detect (scrape.py classifies one record at a time,
-    with no visibility into the rest of the batch) - counted here, never upserted
-    twice."""
+    no_image_url), "duplicate" (same ad_id twice in ONE pull), and "already_present"
+    (ad_id already stored for this competitor from a prior fetch - not upserted again)."""
     competitor = next((c for c in dedupe.get_competitors() if c["id"] == competitor_id), None)
     if not competitor:
         raise ValueError(f"competitor {competitor_id} not found")
@@ -98,7 +96,8 @@ def fetch_pool(competitor_id, cap=50, start_date_min=None, start_date_max=None, 
     triples = scrape.scrape_ads_with_raw(competitor["name"], max_results=cap, page_id=competitor.get("page_id"),
                                           start_date_min=start_date_min, start_date_max=start_date_max,
                                           active_status=active_status)
-    skipped = {"not_image": 0, "wrong_page": 0, "no_image_url": 0, "duplicate": 0}
+    existing_ad_ids = dedupe.get_scraped_ad_ids(competitor_id)
+    skipped = {"not_image": 0, "wrong_page": 0, "no_image_url": 0, "duplicate": 0, "already_present": 0}
     seen_ad_ids = set()
     stored = 0
     for raw, mapped, reason in triples:
@@ -112,7 +111,10 @@ def fetch_pool(competitor_id, cap=50, start_date_min=None, start_date_max=None, 
         dedupe.upsert_scraped_ad(ad_id=mapped["ad_id"], competitor_id=competitor_id,
                                   media_type=mapped.get("media_type", ""),
                                   image_url=mapped["image_url"], raw_meta=raw)
-        stored += 1
+        if mapped["ad_id"] in existing_ad_ids:
+            skipped["already_present"] += 1
+        else:
+            stored += 1
     return {"fetched": len(triples), "stored": stored, "skipped": skipped}
 
 

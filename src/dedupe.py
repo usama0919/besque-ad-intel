@@ -763,6 +763,13 @@ def upsert_scraped_ad(ad_id, competitor_id, image_url, raw_meta, media_type=""):
         conn.commit()
 
 
+def get_scraped_ad_ids(competitor_id):
+    """Existing ad_ids already stored for this competitor, as a set."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT ad_id FROM scraped_ads WHERE competitor_id = %s", (competitor_id,))
+        return {r[0] for r in cur.fetchall()}
+
+
 def get_scraped_ads(competitor_id=None, status=None, limit=None, offset=0):
     """Return pool rows, newest first, AS STORED - callers get raw_meta back exactly
     as it was upserted, no derivation. Optional filters by competitor_id and/or

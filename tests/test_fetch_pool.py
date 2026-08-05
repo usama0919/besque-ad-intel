@@ -35,7 +35,7 @@ def test_fetch_pool_stores_survivors_and_reports_per_reason_skipped(monkeypatch)
         result = pipeline.fetch_pool(cid, cap=10)
         assert result == {
             "fetched": 4, "stored": 2,
-            "skipped": {"not_image": 1, "wrong_page": 1, "no_image_url": 0, "duplicate": 0},
+            "skipped": {"not_image": 1, "wrong_page": 1, "no_image_url": 0, "duplicate": 0, "already_present": 0},
         }
         rows = {r["ad_id"]: r for r in dedupe.get_scraped_ads(competitor_id=cid)}
         assert set(rows) == {ad_id_1, ad_id_2}
@@ -63,7 +63,7 @@ def test_fetch_pool_counts_and_skips_a_within_pull_duplicate(monkeypatch):
         result = pipeline.fetch_pool(cid, cap=10)
         assert result == {
             "fetched": 2, "stored": 1,
-            "skipped": {"not_image": 0, "wrong_page": 0, "no_image_url": 0, "duplicate": 1},
+            "skipped": {"not_image": 0, "wrong_page": 0, "no_image_url": 0, "duplicate": 1, "already_present": 0},
         }
         rows = dedupe.get_scraped_ads(competitor_id=cid)
         assert len(rows) == 1
@@ -86,6 +86,24 @@ def test_fetch_pool_upsert_refreshes_raw_meta_without_duplicating_row(monkeypatc
         rows = dedupe.get_scraped_ads(competitor_id=cid)
         assert len(rows) == 1
         assert rows[0]["raw_meta"]["impressions"] == {"lower_bound": "200"}
+    finally:
+        _cleanup(cid)
+
+
+def test_fetch_pool_second_fetch_counts_already_present_not_stored(monkeypatch):
+    cid = _make_competitor()
+    ad_id = f"FP_{uuid.uuid4().hex[:8]}"
+    triples = [({"ad_archive_id": ad_id, "impressions": {"lower_bound": "100"}},
+                {"ad_id": ad_id, "image_url": "http://x/1.jpg", "page_name": "brand"}, None)]
+    monkeypatch.setattr(scrape, "scrape_ads_with_raw", lambda name, max_results=None, page_id=None, **kwargs: triples)
+    try:
+        first = pipeline.fetch_pool(cid, cap=10)
+        assert first["stored"] == 1
+        assert first["skipped"]["already_present"] == 0
+
+        second = pipeline.fetch_pool(cid, cap=10)
+        assert second["stored"] == 0
+        assert second["skipped"]["already_present"] == 1
     finally:
         _cleanup(cid)
 
