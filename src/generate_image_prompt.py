@@ -983,7 +983,6 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
                     image_config=genai_types.ImageConfig(aspect_ratio=aspect_ratio)
                 )
 
-        print(f"[TRACE-A] generate_image building Gemini call: edit_mode={edit_mode!r} (type={type(edit_mode).__name__})")
         import time as _time
         response = None
         for _attempt in range(3):

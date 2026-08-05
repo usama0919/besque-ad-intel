@@ -192,8 +192,6 @@ def generate_from_selection(ad_ids, angle_id=None, body_area=None, offer_text=No
 
     Returns {"processed": n, "skipped": n, "failed": n, "already_generated": n,
     "by_ad": {ad_id: result}}."""
-    log.info("[TRACE-A] generate_from_selection received edit_mode=%r (type=%s)",
-              edit_mode, type(edit_mode).__name__)
     from src.config_check import validate_config
     validate_config()
     dedupe.init_db()
@@ -397,7 +395,6 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
     a delta to the artifact's own stored image_prompt, never a fresh deconstruct/copy/
     generate_image run from current form state; fails loudly if no prompt was stored."""
     ad_id = ad.get("ad_id")
-    log.info("[TRACE-A] process_ad top: edit_mode=%r (type=%s)", edit_mode, type(edit_mode).__name__)
     if not ad_id:
         return "failed"
     angle_id = messaging_angle["id"] if messaging_angle else None

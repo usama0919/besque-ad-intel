@@ -957,9 +957,7 @@ async def api_generate(request: Request):
     regenerate = bool(body.get("regenerate", False))
     text_in_image = bool(body.get("text_in_image", False))
     include_product = bool(body.get("include_product", True))
-    print(f"[TRACE-A] api_generate raw body edit_mode = {body.get('edit_mode')!r} (type={type(body.get('edit_mode')).__name__})")
     edit_mode = bool(body.get("edit_mode", False))
-    print(f"[TRACE-A] api_generate parsed edit_mode = {edit_mode!r} (type={type(edit_mode).__name__})")
     check_output = bool(body.get("check_output", False))
     retheme_colours = bool(body.get("retheme_colours", True))
 
