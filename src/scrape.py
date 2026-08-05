@@ -145,11 +145,11 @@ def _scrape_raw(search_term, max_results=None, image_only=True, page_id=None,
     observed in practice), and "this record can't produce a usable mapped ad" is
     the accurate characterization either way.
 
-    start_date_min/start_date_max (Chunk 6.2) map straight to the actor's own
-    startDateMin/startDateMax input fields (confirmed present in its real input
-    schema) - a date WINDOW, not a sort, so the pool can request the range that
-    actually matters instead of paging through relevance-ordered results the
-    actor gives no way to sort by recency. Both None (the default) omits them
+    start_date_min/start_date_max (Chunk 6.2) map to the actor's own top-level
+    startDateMin/startDateMax fields, AND to the view_all_page_id URL's own
+    start_date[min]/[max] query params when using the urls input path - the
+    actor was observed live ignoring the top-level fields in that path, the
+    same class of gap active_status had. Both None (the default) omits them
     entirely, matching today's behaviour exactly.
 
     active_status (Chunk 6.2) defaults to "active", matching today's behaviour -
@@ -172,6 +172,10 @@ def _scrape_raw(search_term, max_results=None, image_only=True, page_id=None,
         if "facebook.com" not in pid:
             pid = (f"https://www.facebook.com/ads/library/?active_status={active_status}"
                    f"&ad_type=all&country=ALL&view_all_page_id={pid}")
+            if start_date_min:
+                pid += f"&start_date%5Bmin%5D={start_date_min}"
+            if start_date_max:
+                pid += f"&start_date%5Bmax%5D={start_date_max}"
         run_input = {"urls": [{"url": pid}], "maxAds": fetch_cap, "mediaType": "image"}
     else:
         run_input = {"searchTerms": [search_term], "maxResults": fetch_cap, "maxAds": fetch_cap, "mediaType": "image"}
@@ -180,6 +184,7 @@ def _scrape_raw(search_term, max_results=None, image_only=True, page_id=None,
         run_input["startDateMin"] = start_date_min
     if start_date_max:
         run_input["startDateMax"] = start_date_max
+    log.info("Apify run_input: %s", run_input)
     run = _call_actor_with_heartbeat(client, APIFY_ACTOR, run_input)
 
     results = []

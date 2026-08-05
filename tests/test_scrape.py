@@ -200,6 +200,21 @@ def test_scrape_ads_with_raw_active_status_default_preserves_existing_url(monkey
     assert "active_status=active" in run_input["urls"][0]["url"]
 
 
+def test_scrape_ads_with_raw_date_window_reaches_the_page_url(monkeypatch):
+    capture = _patch_client(monkeypatch, [])
+    scrape.scrape_ads_with_raw("Brand", page_id="123456789",
+                                start_date_min="2026-07-27", start_date_max="2026-08-05")
+    url = capture[0]["urls"][0]["url"]
+    assert "start_date%5Bmin%5D=2026-07-27" in url
+    assert "start_date%5Bmax%5D=2026-08-05" in url
+
+
+def test_scrape_ads_with_raw_omits_date_window_from_url_when_not_given(monkeypatch):
+    capture = _patch_client(monkeypatch, [])
+    scrape.scrape_ads_with_raw("Brand", page_id="123456789")
+    assert "start_date%5B" not in capture[0]["urls"][0]["url"]
+
+
 def test_scrape_ads_threads_date_window_and_active_status_too(monkeypatch):
     """scrape_ads (run_once's own path) must accept and forward the same
     params, not just scrape_ads_with_raw."""
