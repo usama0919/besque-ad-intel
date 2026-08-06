@@ -396,9 +396,10 @@ def test_offer_substitution_does_not_remove_the_badge_container():
     instruction = generate_image_prompt._edit_mode_instruction(
         offer_text="20% off", text_in_image=False
     )
-    # text is suppressed (no headline given) but offer is NOT - opening should name only
-    # the text container as removed, never the offer one.
-    assert "any container holding text that's being suppressed this run" in instruction
+    # text is suppressed (no headline given) and efficacy is ALWAYS suppressed (Item E,
+    # 2026-08-06), but offer is NOT - opening should name text + efficacy as removed,
+    # never the offer container.
+    assert "any container holding text or an efficacy-claim badge that's being suppressed this run" in instruction
     assert "any container holding an offer that's being suppressed this run" not in instruction
     assert "any container holding text or an offer" not in instruction
 
@@ -619,30 +620,48 @@ def test_suppression_exception_names_every_container_type():
         assert container in instruction
 
 
-def test_suppression_exception_absent_when_neither_text_nor_offer_is_suppressed():
-    """No suppression happening AT ALL - a headline is shown AND a real offer is given -
-    opening must be byte-for-byte what it was before Item 6c/6d, the same additive-only
-    pattern as item 5. Both must be supplied: offer_text defaults to None (suppressed) -
-    supplying only headline still leaves the offer exception active (see
-    test_suppression_exception_present_when_only_offer_is_suppressed), which is exactly
-    the gap found and closed while building 6d."""
+def test_suppression_exception_names_every_container_type_for_efficacy_only_case():
+    """Item E (2026-08-06, PART B2): the SAME container-type list must apply to the new
+    third case too, not just text/offer - proven with text and offer BOTH unsuppressed
+    (a real headline shown, a real offer supplied), so efficacy is the ONLY active
+    category and this test can't accidentally pass via the text or offer wording instead.
+    Hardcoded literal, NOT _SUPPRESSIBLE_CONTAINER_TYPES - same reasoning as
+    test_suppression_exception_names_every_container_type above: a test that derives its
+    expectation from the constant under test passes vacuously if an entry is ever deleted
+    from it."""
+    instruction = generate_image_prompt._edit_mode_instruction(
+        text_in_image=True, headline="Firmer Skin By Friday", offer_text="free shipping this week",
+    )
+    assert "any container holding an efficacy-claim badge that's being suppressed this run" in instruction
+    for container in ("badge", "pill", "oval", "button", "banner", "ribbon", "starburst"):
+        assert container in instruction
+
+
+def test_suppression_exception_present_but_efficacy_only_when_neither_text_nor_offer_is_suppressed():
+    """A headline is shown AND a real offer is given - text/offer suppression are both
+    OFF - but Item E (2026-08-06) made efficacy-claim-badge suppression unconditional (no
+    approved_claims threading to images exists, so it's never toggled), so the exception
+    is never fully absent any more - only text/offer's OWN naming drops out. Renamed from
+    "_absent_..." (its pre-Item-E name, which is no longer true) rather than left
+    misleading."""
     instruction = generate_image_prompt._edit_mode_instruction(
         text_in_image=True, headline="Firmer Skin By Friday", offer_text="free shipping this week"
     )
-    assert "The ONE exception to full geometry preservation" not in instruction
+    assert "The ONE exception to full geometry preservation" in instruction
+    assert "any container holding an efficacy-claim badge that's being suppressed this run" in instruction
     assert "any container that held the suppressed text" not in instruction
 
 
 def test_suppression_exception_present_when_only_offer_is_suppressed():
     """The gap found during 6d: a headline IS shown (no text suppression) but no offer was
     given (offer suppression still active) - the exception must still fire, naming the
-    offer specifically, not text."""
+    offer and efficacy (Item E, always-on), never text."""
     instruction = generate_image_prompt._edit_mode_instruction(
         text_in_image=True, headline="Firmer Skin By Friday", offer_text=None,
     )
     assert "The ONE exception to full geometry preservation" in instruction
-    assert "any container holding an offer that's being suppressed this run" in instruction
-    assert "any container holding text that's being suppressed this run" not in instruction
+    assert "any container holding an offer or an efficacy-claim badge that's being suppressed this run" in instruction
+    assert "any container holding text" not in instruction
 
 
 def test_suppression_exception_present_when_only_text_is_suppressed():
@@ -650,13 +669,14 @@ def test_suppression_exception_present_when_only_text_is_suppressed():
         text_in_image=False, offer_text="free shipping this week",
     )
     assert "The ONE exception to full geometry preservation" in instruction
-    assert "any container holding text that's being suppressed this run" in instruction
-    assert "any container holding an offer that's being suppressed this run" not in instruction
+    assert "any container holding text or an efficacy-claim badge that's being suppressed this run" in instruction
+    assert "any container holding an offer" not in instruction
 
 
-def test_suppression_exception_names_both_when_both_suppressed():
+def test_suppression_exception_names_all_three_when_text_offer_and_efficacy_all_suppressed():
     instruction = generate_image_prompt._edit_mode_instruction(text_in_image=False, offer_text=None)
-    assert "any container holding text or an offer that's being suppressed this run" in instruction
+    assert ("any container holding text, an offer, or an efficacy-claim badge that's being "
+            "suppressed this run") in instruction
 
 
 def test_suppression_exception_present_by_default():
@@ -689,12 +709,15 @@ def test_build_image_prompt_edit_mode_forwards_suppression_exception():
     assert "the container shape itself does not survive" in prompt
 
 
-def test_build_image_prompt_edit_mode_neither_suppressed_omits_suppression_exception():
+def test_build_image_prompt_edit_mode_text_and_offer_unsuppressed_still_has_efficacy_exception():
+    """Renamed (was "..._neither_suppressed_omits_suppression_exception") - Item E
+    (2026-08-06) made efficacy-claim-badge suppression unconditional, so even with text
+    and offer both unsuppressed, the exception still fires for efficacy alone."""
     prompt = generate_image_prompt.build_image_prompt(
         _blueprint(), edit_mode=True, text_in_image=True, headline="Firmer Skin By Friday",
         offer_text="free shipping this week",
     )
-    assert "The ONE exception to full geometry preservation" not in prompt
+    assert "any container holding an efficacy-claim badge that's being suppressed this run" in prompt
 
 
 def test_build_image_prompt_edit_mode_text_shown_but_offer_absent_keeps_exception():
@@ -1022,10 +1045,20 @@ def test_register_clause_absent_when_no_style():
     assert generate_image_prompt._register_clause("") == ""
 
 
-def test_register_clause_uses_production_style_guidance():
+def test_register_clause_uses_style_guidance():
     instruction = generate_image_prompt._register_clause("illustrated")
-    assert "not a photograph" in instruction
+    assert "Pixar" in instruction
+    assert "photorealistic label detail" in instruction
     assert "hand-drawn bottle inside a photographic frame" in instruction
+
+
+def test_register_clause_states_faithful_reproduction_wins_over_style_vocabulary():
+    # Chunk 13 follow-up: the register vocabulary must never read as license to
+    # re-stage the reference's own composition/framing/lighting - the exception is
+    # folded into this same clause, not appended as a separate contradicting one.
+    instruction = generate_image_prompt._register_clause("ugc_native")
+    assert "faithful reproduction wins" in instruction
+    assert "reproduce-faithfully instruction above" in instruction
 
 
 def test_edit_mode_instruction_style_reaches_register_clause():
@@ -1038,7 +1071,7 @@ def test_build_image_prompt_edit_mode_uses_reference_style_by_default():
     bp = _blueprint()
     bp["production_style"] = {"style": "illustrated"}
     prompt = generate_image_prompt.build_image_prompt(bp, edit_mode=True)
-    assert "not a photograph" in prompt
+    assert "Pixar" in prompt
 
 
 def test_build_image_prompt_edit_mode_operator_realism_overrides_reference_style():
@@ -1046,7 +1079,7 @@ def test_build_image_prompt_edit_mode_operator_realism_overrides_reference_style
     bp["production_style"] = {"style": "illustrated"}
     prompt = generate_image_prompt.build_image_prompt(bp, edit_mode=True, realism="ugc_native")
     assert "phone" in prompt.lower()
-    assert "not a photograph" not in prompt
+    assert "Pixar" not in prompt
 
 
 def test_build_image_prompt_generate_mode_unaffected_by_realism_param():

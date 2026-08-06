@@ -76,6 +76,107 @@ def effective_body_area(blueprint, body_area):
     return (body_area or "").strip() or shown
 
 
+# Per-register guidance (Chunk 13), keyed by blueprint.production_style.style. This is now
+# the SINGLE source of truth for all three places register guidance reaches a model: the
+# writer's own prompt to Claude (below), the flat generate-mode template
+# (generate_image_prompt.build_image_prompt's no-angle branch), and edit mode's
+# _register_clause. A short-lived second dict, PRODUCTION_STYLE_GUIDANCE, existed here
+# briefly on the theory that "read by Claude" vs "assembled straight into the Gemini
+# prompt" were different enough consumers to need different text - collapsed the same day
+# once edit mode's _register_clause proved that theory wrong: raw STYLE_GUIDANCE prose
+# works directly in a Gemini-facing prompt exactly as well as in a Claude-facing one, so
+# keeping a thinner, separately-drifting dict for the flat-template branch had no real
+# justification left, only the risk of the two silently disagreeing on the same register.
+# Sourced from the marketing team's own style doc's framing phrases, lighting cues, and
+# hard-won negative knowledge - the concrete vocabulary that actually produces each look,
+# not just the register's name.
+#
+# The doc's own bottle/label text (amber glass, gold pump top, maroon label, gold serif
+# "BESQUE MAGIC") is NOT reproduced here - it's the disputed description; the verified
+# product is clear glass, black pump head, terracotta rust-red label, white sans-serif
+# capitals - and the doc's instruction to restate the full label in every prompt is also
+# not followed - the actual product record and build_image_prompt's bottle-fixed clause
+# already govern the bottle downstream of the writer, so hardcoding either description
+# here would just give the writer a second, competing source of truth for it. What IS kept
+# is the doc's underlying insight for "illustrated": label detail drifts into unreadable
+# scribbles unless the writer is explicitly told to preserve photorealistic label detail -
+# encoded below as a requirement, without naming what the label actually says or looks like.
+STYLE_GUIDANCE = {
+    "ugc_native": (
+        "Framing: extremely realistic UGC-style photograph, shot on a smartphone/phone front "
+        "camera, authentic phone-camera quality, not professionally staged or shot. Imperfection "
+        "cues are critical - without them the output skews too polished: slightly grainy, "
+        "authentic amateur photo quality, minor grain and imperfect exposure, slight natural lens "
+        "characteristics, casual and unposed like a genuine quick photo, natural imperfections, "
+        "raw and unpolished, no studio polish, no AI-smooth skin. Lighting: natural indoor or "
+        "window light for a daytime scene; for an evening or low-light scene, state the time of "
+        "day explicitly (e.g. warm artificial evening bathroom lighting only, no natural "
+        "daylight) - left unstated, the model defaults to bright even daylight regardless of what "
+        "the scene otherwise describes. Describe shadows as realistic, never as 'dramatic' or "
+        "'cinematic' - those two words push the look toward a studio production instead. Skin/"
+        "subject: realistic natural skin texture with visible fine lines, freckles, and authentic "
+        "detail, not overly airbrushed; genuine, unposed, candid framing; for an older/mature "
+        "subject specifically, describe the skin as authentic and dignified so the model doesn't "
+        "over-smooth it."
+    ),
+    "high_spec_studio": (
+        "Framing: high-end studio product photograph, professional editorial beauty-campaign "
+        "lighting, polished and editorial, premium beauty-brand aesthetic, ultra-realistic "
+        "high-end product photography. Lighting: soft diffused key light with subtle rim "
+        "lighting, sharp studio lighting with a clean reflection on the glass, gentle highlights, "
+        "shallow depth of field with the subject in sharp focus. 'Dramatic' and 'cinematic' both "
+        "belong here, not in ugc_native. Composition: clean and minimal, sophisticated and "
+        "luxurious, a high-end editorial skincare aesthetic matching a luxury brand campaign. "
+        "Describe only how the product is lit and shot, never its own geometry or label (fixed "
+        "elsewhere): realistic glass reflections, accurate light falloff, natural shadows, sharp "
+        "label detail, true-to-life material texture."
+    ),
+    "hybrid": (
+        "Framing: a realistic UGC-style photo of a physical object - whiteboard, notebook, "
+        "printed page - propped or resting on a real surface. The single most important "
+        "instruction for this register: state explicitly that the base layer IS a real "
+        "photograph and the illustrated/graphic element is drawn ON that real surface - without "
+        "this, the model treats the whole image as one flat illustration instead of a photo with "
+        "a graphic on it. Diagram/whiteboard cues: a hand-drawn marker diagram in a casual "
+        "explainer style, black marker with a colour accent marker for highlights, realistic "
+        "dry-erase marker smudges and slight unevenness in line thickness, authentic whiteboard "
+        "surface texture with soft reflections from natural light. Text-in-photo: specify the "
+        "handwriting look explicitly - casual natural handwriting with slightly uneven lines, or "
+        "authentic handwritten style, not a clean digital font; for pen/marker on skin or paper, "
+        "describe a black sketch pen or marker, casual handwriting, following the natural curve "
+        "of the surface. Physical realism bridge, the part most prone to breaking: resting "
+        "shadow, realistic paper texture, authentic curling or lifting at the corners, slight "
+        "bend around the bottle's curve - these are what make a graphic (sticky note, printed "
+        "page, taped photo) look physically present in the photographed scene rather than pasted "
+        "on top."
+    ),
+    "illustrated": (
+        "Framing: name the exact reference style, never a generic label - '3D Pixar/Disney "
+        "animated style illustration' (naming a specific animation studio produces far more "
+        "consistent results than generic 'cartoon'), 'vintage-style comic strip illustration, "
+        "retro pop-art aesthetic', or 'flat vector-style digital illustration'. Technical "
+        "vocabulary by sub-style: 3D/Pixar - polished 3D animated character rendering, soft "
+        "rounded Pixar aesthetic, stylized but realistic muscle/skin detail, cinematic lighting, "
+        "rim light, heroic low-angle framing. Vintage comic - bold black outlines, halftone "
+        "shading, warm nostalgic colour palette, 1960s-70s advertisement comic panel, thin black "
+        "border, halftone dot shading on skin. Flat vector - clean bold outlines, flat shading, "
+        "bright warm colour palette, playful and eye-catching, sticker-style aesthetic. Label "
+        "fidelity: illustrated styles tend to abstract the product's label into unreadable "
+        "scribbles unless told otherwise - explicitly state that the product keeps "
+        "photorealistic label detail, angled so the label reads clearly, even inside an "
+        "otherwise illustrated scene. Never describe what the label actually says or looks like "
+        "here - that comes from the product record and the bottle-fixed clause downstream."
+    ),
+}
+# A schema addition to production_style can't silently leave this dict (and every one of
+# its three consumers) with nothing to say about it.
+from src import validator as _validator
+assert set(_validator.production_styles()) <= set(STYLE_GUIDANCE), (
+    "STYLE_GUIDANCE is missing an entry for one of validator.production_styles()"
+)
+del _validator
+
+
 def _build_user_prompt(blueprint, product=None, angle=None, realism=None, body_area=None,
                         offer_text=None, reference_image_count=0, text_in_image=False,
                         include_product=True, headline=None, subtext=None,
@@ -240,6 +341,13 @@ def _build_user_prompt(blueprint, product=None, angle=None, realism=None, body_a
             f"{effective_realism} exactly - never mix a photographic scene with drawn "
             f"elements or vice versa."
         )
+        style_guidance = STYLE_GUIDANCE.get(effective_realism)
+        if style_guidance:
+            lines.append(
+                f"Style guidance for {effective_realism} (STRICT, overrides anything above - "
+                f"use this specific vocabulary and these cues, not generic substitutes): "
+                f"{style_guidance}"
+            )
     if offer_text:
         lines.append(
             f"Offer (STRICT, overrides anything above): describe exactly this offer, "

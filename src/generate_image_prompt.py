@@ -48,7 +48,7 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
                         creative_description: str = None, edit_mode: bool = False,
                         offer_text: str = None, operator_instruction: str = None,
                         retheme_colours: bool = True, brand_palette: str = None,
-                        realism: str = None) -> str:
+                        realism: str = None, critic_feedback: list = None) -> str:
     """Construct a Besque-adapted image generation prompt from the blueprint's visual notes.
     include_product=True, text_in_image=False, creative_description=None, edit_mode=False,
     offer_text=None, operator_instruction=None (today's defaults) reproduce the prior
@@ -167,6 +167,7 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
             brand_rules(include_product=effective_include_product, text_in_image=text_in_image,
                         headline=headline, subtext=subtext, edit_mode=True) +
             _operator_instruction_clause(operator_instruction) +
+            _critic_feedback_clause(critic_feedback) +
             # include_product here is the RAW operator toggle, not effective_include_product -
             # the two booleans (include_product, reference_has_product) independently select
             # one of three distinct explanations (substitute / nothing-to-substitute /
@@ -192,6 +193,7 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
             brand_rules(include_product=include_product, text_in_image=text_in_image,
                         headline=headline, subtext=subtext) +
             _operator_instruction_clause(operator_instruction) +
+            _critic_feedback_clause(critic_feedback) +
             creative_description.strip() + " "
             + product_clause
             + _bottle_fixed_clause() + _register_lighting_only_clause() +
@@ -203,13 +205,14 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
             brand_rules(include_product=include_product, text_in_image=text_in_image,
                         headline=headline, subtext=subtext) +
             _operator_instruction_clause(operator_instruction) +
+            _critic_feedback_clause(critic_feedback) +
             f"A premium skincare advertisement image for Besque, a natural body-oil brand for women 40+. "
             f"Composition and setting: {layout}. (If this implies a person, render them per compliance "
             f"rule C1 - a generic, non-identifiable model, never the specific individual described.) "
             + product_clause +
             f"Palette and mood: {palette}. Text placement: {text_placement}. "
             f"Square 1:1 aspect ratio composition. "
-            + PRODUCTION_STYLE_GUIDANCE.get(prod_style, DEFAULT_STYLE_GUIDANCE)
+            + generate_image_prompt_writer.STYLE_GUIDANCE.get(prod_style, DEFAULT_STYLE_GUIDANCE)
             + _bottle_fixed_clause() + _register_lighting_only_clause() +
             closing
         )
@@ -406,6 +409,32 @@ def _operator_instruction_clause(operator_instruction=None):
     )
 
 
+def _critic_feedback_clause(critic_feedback=None):
+    """The corrective-retry loop (2026-08-05): output_critic.check_draft's findings from
+    the PREVIOUS attempt at this exact (ad_id, angle_id), fed back as explicit corrections
+    for a single regeneration - see pipeline.process_ad's MAX_IMAGE_ATTEMPTS loop. Fixed
+    position, same reasoning as _operator_instruction_clause: right after brand_rules() +
+    operator instruction, before whatever supplies the scene text, so a correction can
+    never be read as competing with the rules it exists to enforce - it IS those rules,
+    restated against what the model actually did wrong last time.
+
+    critic_feedback is a list of short strings (typically "{category}: {description}" per
+    finding) - never the raw findings dicts, so this stays a plain string-formatting
+    concern with no knowledge of output_critic's JSON shape. Returns "" when empty/None,
+    same convention as every other optional clause here - a first-attempt generation (no
+    prior findings) produces byte-for-byte the same prompt as before this existed."""
+    if not critic_feedback:
+        return ""
+    bullets = " ".join(f"({i}) {item}" for i, item in enumerate(critic_feedback, start=1))
+    return (
+        f"CORRECTIONS FROM THE PREVIOUS ATTEMPT (STRICT, overrides anything above except "
+        f"the rules and compliance text above it): a reviewer inspected the last generation "
+        f"of this exact image and found it violated the following - every one of these is a "
+        f"real defect in what was actually rendered, not a hypothetical, and every one must "
+        f"be fixed this time, none may repeat in any form: {bullets} "
+    )
+
+
 def _substance_recolour_clause(substance_colour=None):
     """Item 6b (2026-08-04): a product-derived substance in frame (a drip, pour, pool,
     droplet, smear, texture swatch, or a smear on skin) must take OUR product's real
@@ -481,20 +510,42 @@ def _container_list_phrase():
 # explicitly, matching TEXT's own inheritance wording (Item C) - the badge is preserved
 # exactly, only its wording changes, same as a headline is preserved exactly, only its
 # wording changes.
-def _suppressed_container_exception(suppressing_text, suppressing_offer):
-    if not (suppressing_text or suppressing_offer):
+#
+# Item E (2026-08-06, PART B2): a THIRD suppressible category, not just a third partition
+# of an existing one - an efficacy-claim badge (e.g. a "+61% more supple skin" roundel) is
+# its own container, structurally distinct from both TEXT and OFFER (a reference's own
+# layout_detail.zone_positions can list "efficacy badge mid-left" and "offer + CTA banner
+# bottom-right" as two separate zones). The EFFICACY CLAIMS clause below already bans the
+# WORDING unconditionally (no approved_claims threading to images exists, so this is
+# always suppressed in edit mode, never toggled) - but nothing removed the badge SHAPE
+# itself, the exact empty-container failure 6c/6d already closed for TEXT/OFFER,
+# recurring for a third, structurally distinct category. Found by tracing a real
+# reference's blueprint against the assembled prompt, not by a live run.
+#
+# Generalized to any subset of the three categories rather than an if/elif chain, since a
+# fourth category later would otherwise mean enumerating 2**4-1 combinations by hand.
+def _suppressed_container_exception(suppressing_text, suppressing_offer, suppressing_efficacy):
+    active = []
+    if suppressing_text:
+        active.append("text")
+    if suppressing_offer:
+        active.append("an offer")
+    if suppressing_efficacy:
+        active.append("an efficacy-claim badge")
+    if not active:
         return ""
-    if suppressing_text and suppressing_offer:
-        removed = "any container holding text or an offer that's being suppressed this run"
-    elif suppressing_text:
-        removed = "any container holding text that's being suppressed this run"
+    if len(active) == 1:
+        joined = active[0]
+    elif len(active) == 2:
+        joined = f"{active[0]} or {active[1]}"
     else:
-        removed = "any container holding an offer that's being suppressed this run"
+        joined = f"{active[0]}, {active[1]}, or {active[2]}"
+    removed = f"any container holding {joined} that's being suppressed this run"
     return (
         f"The ONE exception to full geometry preservation: {removed} - "
         f"{_container_list_phrase()}, or a tiled promotional background pattern - is "
-        f"removed entirely, not preserved empty; see TEXT/OFFER below for exactly which "
-        f"elements this covers and how the freed area is healed. "
+        f"removed entirely, not preserved empty; see TEXT/OFFER/EFFICACY CLAIMS below for "
+        f"exactly which elements this covers and how the freed area is healed. "
     )
 
 
@@ -517,11 +568,30 @@ def _register_lighting_only_clause():
 
 
 def _register_clause(style):
+    """Edit-mode only - this is _edit_mode_instruction's single caller, appended straight
+    onto `opening` (Chunk 13 follow-up). generate_image_prompt_writer.STYLE_GUIDANCE is
+    written for two different jobs depending on mode: in generate mode (no reference) it
+    directs the writer freely; here, the reference image already IS the register, so the
+    same vocabulary may only describe HOW to render what's already in frame (grain,
+    lighting quality, linework, label handling) - never introduce a framing, lighting, or
+    composition choice the reference doesn't show. That exception is stated FIRST, folded
+    into this same clause before the vocabulary itself, rather than appended after it -
+    same shape as _suppressed_container_exception (6c/6d): one clause that never
+    contradicts `opening`'s reproduce-faithfully instruction, not two that could be read
+    as competing. If the vocabulary below and the reference ever disagree, the reference
+    wins - stated explicitly so a phrase like "casual and unposed" or "propped on a
+    surface" is read as texture, not as license to re-stage the shot."""
     if not style:
         return ""
-    guidance = PRODUCTION_STYLE_GUIDANCE.get(style, DEFAULT_STYLE_GUIDANCE)
+    guidance = generate_image_prompt_writer.STYLE_GUIDANCE.get(style, DEFAULT_STYLE_GUIDANCE)
     return (
-        f"REGISTER: match the reference image's own rendering register exactly - {guidance}"
+        f"REGISTER: the reference image is already shot in the {style} register - match "
+        f"its own rendering exactly. Use the vocabulary below only to describe how to "
+        f"render what the reference already shows; never let it introduce a framing, "
+        f"lighting, or composition choice the reference doesn't have - composition and "
+        f"framing are governed entirely by the reproduce-faithfully instruction above, and "
+        f"if this vocabulary ever conflicts with what the reference actually shows, "
+        f"faithful reproduction wins. {guidance} "
         + _bottle_fixed_clause()
         + _register_lighting_only_clause()
     )
@@ -611,7 +681,15 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
     other side."""
     suppressing_text = not (text_in_image and headline)
     suppressing_offer = not offer_text
-    exception_clause = _suppressed_container_exception(suppressing_text, suppressing_offer)
+    # Always True: the EFFICACY CLAIMS clause below bans efficacy-claim wording
+    # unconditionally (no approved_claims threading to images exists), so an
+    # efficacy-claim badge is always suppressed in edit mode - never toggled, unlike
+    # suppressing_text/suppressing_offer above. Named explicitly rather than inlined as a
+    # literal True at the call site, so this reads as a real category rather than a
+    # magic constant.
+    suppressing_efficacy = True
+    exception_clause = _suppressed_container_exception(suppressing_text, suppressing_offer,
+                                                         suppressing_efficacy)
     if retheme_colours:
         effective_palette = palette or "terracotta, maroon, gold, cream"
         opening = (
@@ -732,41 +810,6 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
     )
     return base
 
-# Per-production-style guidance, keyed by blueprint.production_style.style. Swapped in as a
-# single Style clause so ugc_native does not fight the studio-look wording it replaces.
-PRODUCTION_STYLE_GUIDANCE = {
-    "ugc_native": (
-        "Style: authentic user-generated content look — shot on a phone, natural available light, "
-        "casual real-life setting, slightly imperfect candid framing, relatable not polished. "
-        "The Besque product itself must stay sharp, in focus, and clearly lit by the available "
-        "light — never blurred, backlit, or lost in shadow. "
-    ),
-    "high_spec_studio": (
-        "Style: high-spec studio production — controlled premium lighting, deliberate composition, "
-        "crisp macro texture, editorial and aspirational. "
-    ),
-    "hybrid": (
-        "Style: studio-quality product rendering inside a casual, real-world setting — the product "
-        "is hero-lit with deliberate studio-grade lighting and polished, while the surrounding "
-        "scene feels natural and lived-in. "
-    ),
-    "illustrated": (
-        "Style: not a photograph - a whiteboard-style diagram, clean 3D render, or comic-strip/"
-        "illustrated panel, flat or lightly shaded colour, clear linework, diagrammatic labelling "
-        "where relevant. No photographic lighting, no camera grain, no realistic skin or material "
-        "texture - this is drawn or rendered, not shot. "
-    ),
-}
-# Every real production_style value must have an explicit entry above - assert it here so a
-# schema addition can't silently fall through to DEFAULT_STYLE_GUIDANCE unnoticed (that
-# fallback is only for blueprint.production_style being absent/null, not for a recognized
-# style someone forgot to add guidance for).
-from src import validator as _validator
-assert set(_validator.production_styles()) <= set(PRODUCTION_STYLE_GUIDANCE), (
-    "PRODUCTION_STYLE_GUIDANCE is missing an entry for one of validator.production_styles()"
-)
-del _validator
-
 # Used when production_style is absent/null/unknown — preserves the previous hardcoded look.
 DEFAULT_STYLE_GUIDANCE = "Style: clean, editorial, aspirational, natural light. "
 
@@ -877,12 +920,19 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
                     include_product=True, text_in_image=False, headline=None, subtext=None,
                     messaging_angle=None, realism=None, body_area=None, offer_text=None,
                     edit_mode=False, competitor_image_bytes=None, operator_instruction=None,
-                    retheme_colours=True):
+                    retheme_colours=True, critic_feedback=None):
     """Single-pass image generation from the blueprint. One image, no iteration.
     Saves to assets/<stem>_draft.png (stem = ad_id, or ad_id+angle if angle_slug is given)
     and returns the path. Returns None on failure. include_product/text_in_image/headline/
     subtext are forwarded to build_image_prompt/brand_rules - defaults reproduce today's
     behaviour exactly.
+
+    critic_feedback (2026-08-05, the corrective-retry loop): a list of short strings from
+    a PRIOR call's output_critic.check_draft findings, forwarded straight to
+    build_image_prompt's _critic_feedback_clause. None (the default) reproduces today's
+    prompt byte-for-byte - only pipeline.process_ad's retry (attempt 2 of
+    MAX_IMAGE_ATTEMPTS, and only when attempt 1 came back HIGH-confidence) ever passes
+    this. Same "the caller decides, this just forwards" pattern as offer_text/realism.
 
     messaging_angle (resolved angle dict) gates the Claude prompt-writer pass: only runs
     when an angle is selected AND edit_mode is off, matching every other angle-driven
@@ -947,7 +997,7 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
                                  creative_description=creative_description, edit_mode=edit_mode,
                                  offer_text=offer_text, operator_instruction=operator_instruction,
                                  retheme_colours=retheme_colours, brand_palette=brand_palette,
-                                 realism=realism)
+                                 realism=realism, critic_feedback=critic_feedback)
     stem = _draft_stem(ad_id, angle_slug)
     try:
         client = genai.Client(vertexai=True, project="besque-martech", location="global")

@@ -1,5 +1,5 @@
 """Tests for the image-prompt generator (no image API call)."""
-from src import generate_image_prompt
+from src import generate_image_prompt, generate_image_prompt_writer
 
 
 def _blueprint():
@@ -113,15 +113,17 @@ def test_illustrated_production_style_has_its_own_guidance_not_the_default():
     bp = _blueprint()
     bp["production_style"] = {"style": "illustrated"}
     prompt = generate_image_prompt.build_image_prompt(bp)
-    assert generate_image_prompt.PRODUCTION_STYLE_GUIDANCE["illustrated"] in prompt
+    assert generate_image_prompt_writer.STYLE_GUIDANCE["illustrated"] in prompt
     assert generate_image_prompt.DEFAULT_STYLE_GUIDANCE not in prompt
 
 
-def test_production_style_guidance_has_every_canonical_style():
-    """Mirrors the module-level assertion in generate_image_prompt.py - a schema addition
-    to validator.production_styles() can't silently ship without matching guidance text."""
+def test_style_guidance_has_every_canonical_style():
+    """Mirrors the module-level assertion in generate_image_prompt_writer.py - a schema
+    addition to validator.production_styles() can't silently ship without matching
+    guidance text, for any of STYLE_GUIDANCE's three consumers (writer, edit mode, and
+    this flat-template branch)."""
     from src import validator
-    assert set(validator.production_styles()) <= set(generate_image_prompt.PRODUCTION_STYLE_GUIDANCE)
+    assert set(validator.production_styles()) <= set(generate_image_prompt_writer.STYLE_GUIDANCE)
 
 
 # ---- Part 4: conditional brand_rules() ----
