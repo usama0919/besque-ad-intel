@@ -38,9 +38,10 @@ photographic reference images entirely when the register is `illustrated`
 of the prompt. The disclaimer leak has no structural fix yet and still relies on the
 critic/retry loop as the sole backstop. **The corollary this adds: when a wording-only
 fix keeps failing, look for a structural lever — an input you can withhold or change —
-before writing a ninth sentence.** See "fabricated testimonials render on the image"
-in Known gaps below for this exact violation class recurring, unfixed, on a different
-input (customer quotes rather than a disclaimer).
+before writing a ninth sentence.** See "fabricated testimonials" in Known gaps below for
+this exact violation class recurring on a different input (customer quotes rather than a
+disclaimer) — also fixed 2026-08-06, and also via a structural change (a real stored
+review or nothing), not more wording.
 
 ## `regenerate` froze an ad's prompt forever — fixed 2026-08-06, commit `45b183d`
 Until `45b183d`, `pipeline._regenerate_existing_draft` never called `build_image_prompt`
@@ -268,16 +269,21 @@ blueprint reused). Final failure is recorded via
 - No destructive DB or filesystem commands without asking; dry-run and show counts first.
 
 ## Known gaps (as of 2026-08-04, additions dated 2026-08-06 marked inline)
-- **OPEN, SEVERITY-CRITICAL, 2026-08-06: fabricated testimonials render on the IMAGE, not
-  just in copy.** Generated claims appear inside quotation marks with a star rating,
-  styled exactly like a real customer quote, despite `approved_testimonials` being empty
-  at every call site (see below) and compliance rule C2 supposedly banning this. This is
-  the EXACT violation category from the original six-violation sweep (top guardrails
-  note, leak #6) recurring on the image path specifically — and now that
-  `product_reviews` holds 18,920 real reviews (see 2026-08-06 note above), there's a real
-  legitimate alternative to fabricating one. **Fix must be: a REAL stored review or
-  nothing rendered — never a generated quote, never a fallback that invents one when no
-  real review matches.** Not yet fixed.
+- ~~**SEVERITY-CRITICAL: fabricated testimonials render on the IMAGE, not just in
+  copy.**~~ **FIXED 2026-08-06, commit `808ddee`.** Generated claims were appearing
+  inside quotation marks with a star rating, styled exactly like a real customer quote,
+  despite `approved_testimonials` being empty at every call site (see below) and
+  compliance rule C2 supposedly banning this — the EXACT violation category from the
+  original six-violation sweep (top guardrails note, leak #6), recurring on the image
+  path specifically. `pipeline.select_testimonial_review` now picks a REAL review from
+  `product_reviews` (18,920 imported, see 2026-08-06 note above) for a `social_proof`
+  `single_quote` zone — deterministic by `ad_id`, length-filtered, and excludes reviews
+  that read as complaints despite a high star rating (a genuine 5-star review reading "I
+  have not received it yet... it's been weeks since I ordered it" passed a naive
+  rating+length filter cleanly during testing — keyword heuristic, same limitation
+  `compliance.py` already accepts). No real review, or an `aggregate_bar` (no approved
+  count/average exists, held pending Harry): the zone is REMOVED entirely, never left for
+  Gemini to invent something — see `_structural_zones_clause`.
 - **OPEN, 2026-08-06: bottle rendering register only fixed in ONE direction.** `fc73058`
   stops a photorealistic bottle appearing in an illustrated scene (drops reference
   photos, describes the bottle natively when `style=="illustrated"` — see the top
