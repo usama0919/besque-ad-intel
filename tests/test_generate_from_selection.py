@@ -392,10 +392,12 @@ def test_generate_from_selection_already_generated_skip_spends_nothing(monkeypat
 
 
 def test_generate_from_selection_regenerate_versions_draft_and_applies_delta_to_stored_prompt(monkeypatch):
-    """regenerate=True applies operator_instruction as a delta to the artifact's OWN
-    stored image_prompt - never a fresh deconstruct/copy/generate_image run. Versions
-    the outgoing draft first (edit_image's scheme, reused), using REAL (unmocked)
-    save_artifact and version_current_draft to prove the file is preserved."""
+    """regenerate=True REBUILDS the image prompt from current code and the artifact's
+    stored inputs (2026-08-06 - see pipeline._regenerate_existing_draft), then applies
+    the operator's instruction as a delta on top - never a fresh deconstruct/copy run
+    (those stay reused from the existing artifact). Versions the outgoing draft first
+    (edit_image's scheme, reused), using REAL (unmocked) save_artifact and
+    version_current_draft to prove the file is preserved."""
     cid = _make_competitor()
     ad_id = _seed_scraped_ad(cid)
     dedupe.init_artifacts()
@@ -440,15 +442,82 @@ def test_generate_from_selection_regenerate_versions_draft_and_applies_delta_to_
         _cleanup(cid, [ad_id])
 
 
-def test_generate_from_selection_regenerate_fails_loudly_without_stored_prompt(monkeypatch):
-    """No image_prompt on the existing artifact must fail, never silently rebuild one
-    from current form state."""
+def test_generate_from_selection_regenerate_rebuilds_prompt_from_current_code(monkeypatch):
+    """THE property that was silently false until 2026-08-06: a rule present in CURRENT
+    build_image_prompt/brand_rules/compliance code must appear in a regenerated draft's
+    prompt, even though that rule postdates the draft's original generation. Proven by
+    storing a deliberately stale, rule-free image_prompt on the existing artifact, then
+    asserting the prompt actually handed to regenerate_from_stored_prompt is a fresh
+    rebuild containing real, current guardrail text the stale stored prompt never had -
+    discovered live when the Grüns GLP-1 illustrated-mode fix silently never reached an
+    ad that had already been regenerated once before the fix landed."""
     cid = _make_competitor()
     ad_id = _seed_scraped_ad(cid)
     dedupe.init_artifacts()
     dedupe.save_artifact(
         ad_id=ad_id, page_name="Brand", image_path="assets/x.jpg",
-        blueprint={"format": "hero"}, generated_copy={"headline": "Old"},
+        blueprint={"format": "hero", "production_style": {"style": "high_spec_studio"}},
+        generated_copy={"headline": "Old", "image_subtext": "Sub", "cta": "Shop"},
+        draft_image="assets/x_draft.png", metadata={"cta": "Shop", "destination_url": "http://x"},
+        image_prompt="STALE PROMPT TEXT WITH NONE OF THE CURRENT RULES IN IT",
+        text_in_image=True,
+    )
+    from src import generate_image_prompt
+    import tempfile
+    from pathlib import Path as _Path
+    tmp_asset_dir = _Path(tempfile.mkdtemp())
+    monkeypatch.setattr(generate_image_prompt, "ASSET_DIR", tmp_asset_dir)
+    (tmp_asset_dir / f"{ad_id}_draft.png").write_bytes(b"OLD-DRAFT-BYTES")
+
+    captured = {}
+
+    def fake_regenerate(current_image_bytes, stored_prompt, instruction, ad_id, angle_slug=None):
+        captured["prompt"] = stored_prompt
+        return str(tmp_asset_dir / f"{ad_id}_draft.png")
+
+    monkeypatch.setattr(pipeline.generate_image_prompt, "regenerate_from_stored_prompt", fake_regenerate)
+    try:
+        result = pipeline.generate_from_selection([ad_id], regenerate=True, instruction="fix the bottle")
+        assert result["by_ad"][ad_id] == "processed"
+        rebuilt = captured["prompt"]
+        assert "STALE PROMPT TEXT WITH NONE OF THE CURRENT RULES IN IT" not in rebuilt
+        assert "STRICT RULES - NEVER VIOLATE" in rebuilt  # brand_rules(), current code
+        assert "C1. NO REAL PEOPLE" in rebuilt  # COMPLIANCE_RULES, current code
+        assert "9) SOURCE IMAGE IS THE COMPETITOR'S OWN AD" in rebuilt  # edit-mode rule 9
+    finally:
+        _cleanup(cid, [ad_id])
+
+
+def test_generate_from_selection_regenerate_falls_back_to_normal_generation_when_no_artifact(monkeypatch):
+    """regenerate=True with NO existing artifact for this (ad_id, angle_id) must fall
+    back to a normal first generation - never fail an ad just for having no history.
+    2026-08-06 fix for the live error "regenerate requested but no existing artifact for
+    angle_id=None": same root cause as the frozen-prompt bug, this function assumed
+    history always exists once regenerate is requested."""
+    cid = _make_competitor()
+    ad_id = _seed_scraped_ad(cid)
+    dedupe.init_artifacts()
+    _mock_success(monkeypatch)  # deliberately no existing artifact at all
+    try:
+        result = pipeline.generate_from_selection([ad_id], regenerate=True)
+        assert result["by_ad"][ad_id] == "processed"
+        assert len(dedupe.get_artifacts(ad_id)) == 1
+        row = dedupe.get_scraped_ads(competitor_id=cid)[0]
+        assert row["status"] == "processed"
+    finally:
+        _cleanup(cid, [ad_id])
+
+
+def test_generate_from_selection_regenerate_fails_loudly_without_stored_blueprint(monkeypatch):
+    """No blueprint on the existing artifact must fail, never silently rebuild a prompt
+    from nothing - blueprint is the one truly required input for a rebuild (unlike
+    include_product/realism/etc, which have safe defaults)."""
+    cid = _make_competitor()
+    ad_id = _seed_scraped_ad(cid)
+    dedupe.init_artifacts()
+    dedupe.save_artifact(
+        ad_id=ad_id, page_name="Brand", image_path="assets/x.jpg",
+        blueprint=None, generated_copy={"headline": "Old"},
         draft_image="assets/x_draft.png", metadata={"cta": "Shop", "destination_url": "http://x"},
     )
     deconstruct_calls = []

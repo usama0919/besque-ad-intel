@@ -375,6 +375,66 @@ def test_get_artifact_returns_angle_id_and_text_in_image():
             conn.commit()
 
 
+def test_get_artifact_returns_stored_run_strip_inputs():
+    """2026-08-06: include_product/retheme_colours/realism/body_area/offer_text/product_id
+    must round-trip - pipeline._regenerate_existing_draft rebuilds a regenerated draft's
+    prompt from exactly these, so a value that doesn't survive the round trip would
+    silently corrupt every future regenerate of this ad."""
+    from src import dedupe
+    import uuid
+    dedupe.init_artifacts()
+    ad_id = f"ART_{uuid.uuid4().hex[:8]}"
+    try:
+        dedupe.save_artifact(
+            ad_id=ad_id, page_name="TestBrand", image_path="assets/x.jpg",
+            blueprint={"format": "hero"}, generated_copy={"headline": "H"},
+            draft_image="assets/x_draft.png",
+            metadata={"cta": "Shop", "destination_url": "http://x"},
+            include_product=False, retheme_colours=False, realism="illustrated",
+            body_area="legs", offer_text="20% off", product_id=1,
+        )
+        art = dedupe.get_artifact(ad_id)
+        assert art["include_product"] is False
+        assert art["retheme_colours"] is False
+        assert art["realism"] == "illustrated"
+        assert art["body_area"] == "legs"
+        assert art["offer_text"] == "20% off"
+        assert art["product_id"] == 1
+    finally:
+        with dedupe.get_conn() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM artifacts WHERE ad_id=%s", (ad_id,))
+            conn.commit()
+
+
+def test_get_artifact_run_strip_inputs_default_to_none_when_not_passed():
+    """None must mean "never recorded" distinctly from a real False/empty value -
+    pipeline._regenerate_existing_draft's missing-input logging depends on telling these
+    apart, so a caller that omits these (every pre-2026-08-06 save_artifact call) must
+    read back None, never a silently-assumed default."""
+    from src import dedupe
+    import uuid
+    dedupe.init_artifacts()
+    ad_id = f"ART_{uuid.uuid4().hex[:8]}"
+    try:
+        dedupe.save_artifact(
+            ad_id=ad_id, page_name="TestBrand", image_path="assets/x.jpg",
+            blueprint={"format": "hero"}, generated_copy={"headline": "H"},
+            draft_image="assets/x_draft.png",
+            metadata={"cta": "Shop", "destination_url": "http://x"},
+        )
+        art = dedupe.get_artifact(ad_id)
+        assert art["include_product"] is None
+        assert art["retheme_colours"] is None
+        assert art["realism"] is None
+        assert art["body_area"] is None
+        assert art["offer_text"] is None
+        assert art["product_id"] is None
+    finally:
+        with dedupe.get_conn() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM artifacts WHERE ad_id=%s", (ad_id,))
+            conn.commit()
+
+
 # ---- Prompt 4, Item 5: brand_settings - single-row, self-migrating, editable palette ----
 
 def test_brand_settings_defaults_to_besque_palette():

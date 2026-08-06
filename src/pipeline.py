@@ -301,26 +301,99 @@ def generate_from_selection(ad_ids, angle_id=None, body_area=None, offer_text=No
     return summary
 
 
-def _regenerate_existing_draft(ad, angle_id, angle_slug, operator_instruction, should_stop):
-    """Apply operator_instruction as a delta to the EXACT prompt that produced the
-    current draft - never a fresh pipeline re-run from current form state. Fails loudly
-    (returns "failed") if no prompt was stored, rather than rebuilding one."""
+def _regenerate_existing_draft(ad, angle_id, angle_slug, delta_instruction, should_stop):
+    """Apply delta_instruction as a targeted change to a prompt REBUILT from CURRENT code
+    (generate_image_prompt.build_image_prompt) and the artifact's own stored inputs - never
+    the artifact's frozen historical image_prompt text.
+
+    2026-08-06, the regenerate-freezes-the-prompt-forever fix: before this, every
+    regenerate replayed the artifact's stored image_prompt verbatim and just appended a
+    delta to it - meaning ANY rule, guardrail, or compliance change made after a draft's
+    FIRST generation could never reach that ad through regenerate again, no matter how
+    many times an operator clicked it. Discovered live: the Grüns GLP-1 illustrated-mode
+    fix silently never took effect on an ad that had already been regenerated once before
+    the fix landed, even after a full process restart - because regenerate never re-runs
+    build_image_prompt at all, by design, until now. Drafts an operator regenerates were
+    therefore the LEAST protected against a later fix, not the most.
+
+    Returns None (not "failed") when no artifact exists for this (ad_id, angle_id) yet -
+    signals the caller to fall through to a normal first generation instead of failing an
+    ad just for having no history (closes "regenerate requested but no existing artifact
+    for angle_id=None" too - the same root cause: this function assumed history always
+    exists once regenerate is requested)."""
     ad_id = ad.get("ad_id")
     _stop = should_stop or (lambda: False)
     existing = dedupe.get_artifact(ad_id, angle_id=angle_id)
     if existing is None:
-        log.error("Ad %s: regenerate requested but no existing artifact for angle_id=%s", ad_id, angle_id)
-        return "failed"
-    stored_prompt = (existing.get("image_prompt") or "").strip()
-    if not stored_prompt:
-        log.error("Ad %s: regenerate requested but the existing artifact has no stored image_prompt", ad_id)
+        log.info("Ad %s: regenerate requested but no existing artifact for angle_id=%s - "
+                 "falling back to a normal first generation instead of failing", ad_id, angle_id)
+        return None
+    blueprint = existing.get("blueprint") or {}
+    if not blueprint:
+        log.error("Ad %s: regenerate requested but the existing artifact has no stored blueprint", ad_id)
         dedupe.init_pipeline_warnings()
         dedupe.record_warning(
-            "regenerate_missing_stored_prompt",
-            f"Ad {ad_id} ({ad.get('page_name', '?')}): regenerate requested but no image_prompt "
-            f"was stored on the existing artifact - failed rather than rebuilding one from current inputs.",
+            "regenerate_missing_blueprint",
+            f"Ad {ad_id} ({ad.get('page_name', '?')}): regenerate requested but no blueprint "
+            f"was stored on the existing artifact - failed rather than rebuilding one from nothing.",
         )
         return "failed"
+
+    generated_copy = existing.get("generated_copy") or {}
+    text_in_image = bool(existing.get("text_in_image"))
+    stored_operator_instruction = existing.get("operator_instruction") or ""
+
+    # Every run-strip input process_ad's ORIGINAL call actually used, persisted on the
+    # artifact (2026-08-06) specifically so this rebuild can recover them. None means
+    # "never recorded" (a row from before this migration, or a caller that never passed
+    # it) - reported below, never silently treated the same as a real False/empty value.
+    missing = []
+    include_product = existing.get("include_product")
+    if include_product is None:
+        missing.append("include_product -> defaulted True")
+        include_product = True
+    retheme_colours = existing.get("retheme_colours")
+    if retheme_colours is None:
+        missing.append("retheme_colours -> defaulted True")
+        retheme_colours = True
+    # realism/body_area/offer_text are nullable free-text inputs where None is ALSO the
+    # normal, legitimate "operator left this blank" state on a post-migration row
+    # (dashboard.py normalises a blank field to None, never "") - so unlike the two
+    # booleans and product_id above, None here can't be told apart from a real migration
+    # gap. Logged anyway, worded to not overclaim a cause that isn't actually known.
+    realism = existing.get("realism")
+    if realism is None:
+        missing.append("realism -> not stored (blank, or predates this being recorded); "
+                        "defaulting to auto (the blueprint's own detected style)")
+    body_area = existing.get("body_area")
+    if body_area is None:
+        missing.append("body_area -> not stored (blank, or predates this being recorded); defaulting to none")
+    offer_text = existing.get("offer_text")
+    if offer_text is None:
+        missing.append("offer_text -> not stored (blank, or predates this being recorded); defaulting to none")
+    product_id = existing.get("product_id")
+    product = dedupe.get_product(product_id) if product_id is not None else None
+    if product is None:
+        fallback_id = next(iter(ENABLED_PRODUCT_IDS_FOR_GENERATION))
+        missing.append(f"product_id -> defaulted to the sole enabled product (id={fallback_id})")
+        product = dedupe.get_product(fallback_id)
+    if missing:
+        log.warning("Ad %s: regenerate rebuild missing stored input(s), defaulted rather than "
+                    "silently guessed: %s", ad_id, "; ".join(missing))
+
+    cta_text = generated_copy.get("cta") or None
+    panel_copy = generated_copy.get("panel_copy") or None
+    brand_palette = dedupe.get_brand_settings().get("palette") if retheme_colours else None
+
+    rebuilt_prompt = generate_image_prompt.build_image_prompt(
+        blueprint, product=product, include_product=include_product,
+        text_in_image=text_in_image, headline=generated_copy.get("headline"),
+        subtext=generated_copy.get("image_subtext") or None, edit_mode=True,
+        offer_text=offer_text, operator_instruction=stored_operator_instruction,
+        retheme_colours=retheme_colours, brand_palette=brand_palette,
+        realism=realism, cta_text=cta_text, panel_copy=panel_copy,
+    )
+
     draft_bytes = generate_image_prompt._current_draft_bytes(ad_id, angle_slug)
     if draft_bytes is None:
         log.error("Ad %s: regenerate requested but no current draft image could be read", ad_id)
@@ -328,11 +401,13 @@ def _regenerate_existing_draft(ad, angle_id, angle_slug, operator_instruction, s
     if _stop():
         log.info("Ad %s: stop requested, skipping before the paid regenerate call", ad_id)
         return "skipped"
-    versioned = generate_image_prompt.version_current_draft(ad_id, angle_slug, current_prompt=stored_prompt)
+    versioned = generate_image_prompt.version_current_draft(
+        ad_id, angle_slug, current_prompt=existing.get("image_prompt", ""),
+    )
     if versioned:
         log.info("Ad %s: versioned outgoing draft as %s before regenerating", ad_id, versioned)
     new_draft = generate_image_prompt.regenerate_from_stored_prompt(
-        draft_bytes, stored_prompt, operator_instruction or "", ad_id, angle_slug=angle_slug,
+        draft_bytes, rebuilt_prompt, delta_instruction or "", ad_id, angle_slug=angle_slug,
     )
     if not new_draft:
         log.error("Ad %s: regenerate failed - no draft image produced", ad_id)
@@ -341,18 +416,24 @@ def _regenerate_existing_draft(ad, angle_id, angle_slug, operator_instruction, s
     dedupe.save_artifact(
         ad_id=ad_id, page_name=ad.get("page_name", ""),
         image_path=existing.get("image_path", ""),
-        blueprint=existing.get("blueprint") or {},
-        generated_copy=existing.get("generated_copy") or {},
+        blueprint=blueprint,
+        generated_copy=generated_copy,
         draft_image=new_draft,
         image_prompt=img_prompt,
         copy_prompt=existing.get("copy_prompt", ""),
         model_info=existing.get("model_info", ""),
         metadata=existing.get("metadata") or {},
         angle_id=angle_id,
-        text_in_image=bool(existing.get("text_in_image")),
-        operator_instruction=operator_instruction or "",
+        text_in_image=text_in_image,
+        operator_instruction=delta_instruction or "",
         format_flag=existing.get("format_flag", ""),
         product_override_note=existing.get("product_override_note", ""),
+        include_product=include_product,
+        retheme_colours=retheme_colours,
+        realism=realism,
+        body_area=body_area,
+        offer_text=offer_text,
+        product_id=(product or {}).get("id"),
         regenerate=True,
     )
     dedupe.mark_seen(ad_id, ad.get("page_name", ""), angle_id)
@@ -455,9 +536,13 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
 
     regenerate: only meaningful when explicit_selection=True (run_once never regenerates).
     False (default) returns "already_generated" if an artifact exists, spending nothing.
-    True hands off entirely to _regenerate_existing_draft - applies operator_instruction as
-    a delta to the artifact's own stored image_prompt, never a fresh deconstruct/copy/
-    generate_image run from current form state; fails loudly if no prompt was stored."""
+    True hands off to _regenerate_existing_draft - REBUILDS the image prompt from current
+    code and the artifact's own stored inputs (2026-08-06 - never the artifact's frozen
+    historical image_prompt text, see that function's docstring for why), then applies
+    operator_instruction as a targeted delta on top. Never a fresh deconstruct/copy run -
+    those stay reused from the existing artifact. Falls back to a normal first generation
+    (this same function, from the top) when no artifact exists yet, rather than failing an
+    ad for having no history."""
     ad_id = ad.get("ad_id")
     if not ad_id:
         return "failed"
@@ -486,9 +571,16 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
                 return "already_generated"
 
         # Regenerate supersedes the rest of this pipeline entirely - no deconstruct, no
-        # fresh copy, no full generate_image rebuild from current form state.
+        # fresh copy - but the image PROMPT is rebuilt from current code (2026-08-06),
+        # never replayed frozen. Falls through to a normal first generation below when no
+        # artifact exists yet for this (ad_id, angle_id) - never fails an ad for having no
+        # history.
         if explicit_selection and regenerate:
-            return _regenerate_existing_draft(ad, angle_id, angle_slug, operator_instruction, should_stop)
+            regen_result = _regenerate_existing_draft(ad, angle_id, angle_slug, operator_instruction, should_stop)
+            if regen_result is not None:
+                return regen_result
+            # else: no existing artifact yet - fall through, exactly as if regenerate had
+            # never been requested.
 
         log.info("Ad %s (index %s/%s): deconstruct starting", ad_id, ad_index, total_ads)
         image_bytes = assets.download_image_bytes(ad["image_url"])
@@ -780,6 +872,18 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
             operator_instruction=operator_instruction or "",
             format_flag=format_flag,
             product_override_note=product_override_note,
+            # include_product is the RAW operator toggle (not effective_include_product) -
+            # a future regenerate rebuild must re-derive effective_include_product itself
+            # from the (also stored) blueprint, the same way this call did, not inherit an
+            # already-narrowed value. realism/body_area/offer_text/retheme_colours are the
+            # same run-strip inputs process_ad received, straight through - see
+            # _regenerate_existing_draft (2026-08-06) for why these are persisted now.
+            include_product=include_product,
+            retheme_colours=retheme_colours,
+            realism=realism,
+            body_area=body_area,
+            offer_text=offer_text,
+            product_id=(product or {}).get("id"),
             # None (not explicit_selection) preserves save_artifact's own
             # FORCE_REPROCESS-driven default exactly - only an explicit-selection
             # regenerate passes an explicit True, per Item 7b.

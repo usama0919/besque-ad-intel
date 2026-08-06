@@ -1627,9 +1627,15 @@ def edit_image(current_image_bytes, instruction, ad_id, aspect="1:1", angle_slug
 
 
 def _regenerate_delta_clause(instruction):
+    """2026-08-06: no longer claims the prompt above is "the EXACT prompt that produced
+    the attached image" - since pipeline._regenerate_existing_draft now REBUILDS that
+    prompt from current code and the artifact's stored inputs rather than replaying the
+    historical prompt verbatim, that claim would usually be false (the attached image was
+    produced by the OLD prompt; the one above it is a fresh rebuild). The instruction is
+    still a targeted delta on top of everything else stated above."""
     return (
-        " REGENERATE: the prompt above is the EXACT prompt that produced the attached "
-        "image - apply ONLY the following instruction as a targeted change to it; every "
+        " REGENERATE: the prompt above describes this image's current composition and "
+        "rules - apply ONLY the following instruction as a targeted change to it; every "
         "other element it describes (composition, text, colours, product) still applies "
         f"exactly as already stated. Instruction: {instruction}"
     )

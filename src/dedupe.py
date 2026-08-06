@@ -158,12 +158,32 @@ def init_artifacts():
         # is the actual defect this closes, same "surface, never gate" pattern as
         # format_flag above.
         cur.execute("ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS product_override_note TEXT DEFAULT ''")
+        # include_product/retheme_colours/realism/body_area/offer_text/product_id
+        # (2026-08-06, the regenerate-freezes-the-prompt-forever fix): every run-strip
+        # input process_ad actually used, deliberately left NULL-able (no DEFAULT) so a
+        # historical row predating this migration is visibly "never recorded" rather than
+        # indistinguishably "recorded as the default" - pipeline._regenerate_existing_draft
+        # checks for NULL specifically and logs which inputs it had to default, per the
+        # explicit requirement that a missing stored input is reported, not silently
+        # guessed. Needed because regenerate must REBUILD generate_image_prompt.build_image_prompt
+        # from these stored inputs (so current rules/guardrails/compliance apply) rather
+        # than replaying the artifact's own frozen historical image_prompt text forever -
+        # discovered live when the Grüns GLP-1 illustrated-mode fix silently never reached
+        # an ad that had already been regenerated once before the fix landed.
+        cur.execute("ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS include_product BOOLEAN")
+        cur.execute("ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS retheme_colours BOOLEAN")
+        cur.execute("ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS realism TEXT")
+        cur.execute("ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS body_area TEXT")
+        cur.execute("ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS offer_text TEXT")
+        cur.execute("ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS product_id INTEGER")
         conn.commit()
 
 
 def save_artifact(ad_id, page_name, image_path, blueprint, generated_copy, draft_image, metadata,
                    image_prompt="", copy_prompt="", model_info="", angle_id=None, text_in_image=False,
-                   operator_instruction="", format_flag="", product_override_note="", regenerate=None):
+                   operator_instruction="", format_flag="", product_override_note="", regenerate=None,
+                   include_product=None, retheme_colours=None, realism=None, body_area=None,
+                   offer_text=None, product_id=None):
     """Persist all artifacts for one (ad_id, angle_id) pair with a timestamp. Skips if that
     exact pair is already stored. angle_id=None reproduces the pre-angle behaviour exactly -
     one artifact per ad_id. A different angle_id for an already-processed ad is a distinct
@@ -189,7 +209,15 @@ def save_artifact(ad_id, page_name, image_path, blueprint, generated_copy, draft
     PER CALL instead: pipeline.process_ad's deliberate-regenerate path (an operator
     explicitly re-selecting an already-generated ad) passes this rather than requiring
     FORCE_REPROCESS=1 set for the whole process, which would also silently affect every
-    OTHER save_artifact call happening anywhere else in that same run."""
+    OTHER save_artifact call happening anywhere else in that same run.
+
+    include_product/retheme_colours/realism/body_area/offer_text/product_id (2026-08-06):
+    the run-strip inputs process_ad actually used, persisted so a FUTURE regenerate can
+    rebuild this exact generation's prompt from current code instead of replaying a frozen
+    historical one - see pipeline._regenerate_existing_draft. All default None/NULL, never
+    guessed at here - a caller that doesn't pass them (every pre-existing call site until
+    updated) reproduces today's schema exactly, and a regenerate reading NULL back knows
+    to log that it defaulted rather than assume a real recorded value."""
     effective_regenerate = FORCE_REPROCESS if regenerate is None else regenerate
     with get_conn() as conn, conn.cursor() as cur:
         if effective_regenerate:
@@ -202,13 +230,15 @@ def save_artifact(ad_id, page_name, image_path, blueprint, generated_copy, draft
             """INSERT INTO artifacts
                (ad_id, page_name, image_path, blueprint, generated_copy, draft_image, metadata,
                 image_prompt, copy_prompt, model_info, angle_id, text_in_image, operator_instruction,
-                format_flag, product_override_note)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                format_flag, product_override_note, include_product, retheme_colours, realism,
+                body_area, offer_text, product_id)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (ad_id, page_name, image_path,
              _json.dumps(blueprint), _json.dumps(generated_copy),
              draft_image, _json.dumps(metadata), image_prompt, copy_prompt, model_info,
              angle_id, text_in_image, operator_instruction or "", format_flag or "",
-             product_override_note or ""),
+             product_override_note or "", include_product, retheme_colours, realism,
+             body_area, offer_text, product_id),
         )
         conn.commit()
 
@@ -808,11 +838,19 @@ def get_artifact(ad_id, angle_id=None):
     api_edit_image) need these to restore the ORIGINAL generation's rule-6 mode rather
     than falling back to brand_rules()'s hardcoded defaults. Also returns image_path/
     metadata/image_prompt/copy_prompt/model_info/format_flag/product_override_note -
-    pipeline.py's regenerate path carries these forward unchanged onto the new row."""
+    pipeline.py's regenerate path carries these forward unchanged onto the new row.
+
+    Also returns include_product/retheme_colours/realism/body_area/offer_text/product_id
+    (2026-08-06) AS STORED - None for any of these means "never recorded" (a row from
+    before this migration, or a caller that didn't pass it), NOT "recorded as False/empty".
+    pipeline._regenerate_existing_draft relies on that distinction to know which stored
+    inputs it has to default and log, rather than treating None and a real False/empty
+    value as the same thing."""
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT ad_id, page_name, blueprint, generated_copy, draft_image, angle_id, text_in_image, "
-            "image_path, metadata, image_prompt, copy_prompt, model_info, format_flag, product_override_note "
+            "image_path, metadata, image_prompt, copy_prompt, model_info, format_flag, product_override_note, "
+            "include_product, retheme_colours, realism, body_area, offer_text, product_id "
             "FROM artifacts WHERE ad_id=%s AND angle_id IS NOT DISTINCT FROM %s ORDER BY id DESC LIMIT 1",
             (ad_id, angle_id),
         )
@@ -827,7 +865,9 @@ def get_artifact(ad_id, angle_id=None):
                 "draft_image": r[4], "angle_id": r[5], "text_in_image": r[6],
                 "image_path": r[7] or "", "metadata": meta, "image_prompt": r[9] or "",
                 "copy_prompt": r[10] or "", "model_info": r[11] or "",
-                "format_flag": r[12] or "", "product_override_note": r[13] or ""}
+                "format_flag": r[12] or "", "product_override_note": r[13] or "",
+                "include_product": r[14], "retheme_colours": r[15], "realism": r[16],
+                "body_area": r[17], "offer_text": r[18], "product_id": r[19]}
 
 
 def set_suggested_name(competitor_id, suggested):
