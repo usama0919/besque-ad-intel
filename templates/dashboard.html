@@ -183,6 +183,10 @@
   .pg-track { background:#1a1a1a; color:#fff; border:none; padding:7px 12px; border-radius:7px; font-size:12px; font-weight:600; cursor:pointer; flex-shrink:0; }
   .pg-track:hover { background:#333; }
   .pg-track:disabled { background:#e3f5e9; color:#1a7f42; cursor:default; }
+
+.split { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+.split .side { min-width:0; }
+.split .side img { width:100%; aspect-ratio:1/1; object-fit:contain; max-height:70vh; }
 </style>
 </head>
 <body>
