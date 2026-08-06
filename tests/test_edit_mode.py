@@ -1443,12 +1443,62 @@ def test_structural_zones_clause_always_removes_badge_disclaimer_price_callout()
     assert "STRUCTURAL ZONES - SUBSTITUTE" not in clause
 
 
-def test_structural_zones_clause_social_proof_generates_no_instruction():
+def test_structural_zones_clause_social_proof_aggregate_bar_always_removed():
+    """2026-08-06, fabricated-testimonials fix: an aggregate_bar (review count/star
+    average) has no approved figure to substitute (held pending Harry - see CLAUDE.md),
+    so it must always be REMOVED, never left for the general reproduce-faithfully
+    instruction to govern - that was the actual bug (Gemini invented a plausible count)."""
     clause, substituted = generate_image_prompt._structural_zones_clause(
         [_szone("social_proof", social_proof_kind="aggregate_bar")],
         zone_copy_text="text", cta_text="cta",
     )
-    assert clause == ""
+    assert "STRUCTURAL ZONES - REMOVE, SOCIAL PROOF" in clause
+    assert "NEVER invent a customer quote" in clause
+    assert substituted == set()
+
+
+def test_structural_zones_clause_social_proof_single_quote_removed_without_real_review():
+    """No real review supplied - the zone must be removed, never left as an invitation
+    for Gemini to invent one (the exact live bug this fix closes)."""
+    clause, substituted = generate_image_prompt._structural_zones_clause(
+        [_szone("social_proof", social_proof_kind="single_quote")],
+        testimonial=None,
+    )
+    assert "STRUCTURAL ZONES - REMOVE, SOCIAL PROOF" in clause
+    assert substituted == set()
+
+
+def test_structural_zones_clause_social_proof_single_quote_substituted_with_real_review():
+    clause, substituted = generate_image_prompt._structural_zones_clause(
+        [_szone("social_proof", social_proof_kind="single_quote", position="lower-third")],
+        testimonial={"quote": "This oil changed my skin.", "attribution": "Jane D."},
+    )
+    assert "STRUCTURAL ZONES - SUBSTITUTE" in clause
+    assert '"This oil changed my skin."' in clause
+    assert "Jane D." in clause
+    assert "REAL customer review" in clause
+    assert "rendered EXACTLY as given, never reworded" in clause
+    assert "social_proof" in substituted
+
+
+def test_structural_zones_clause_social_proof_missing_attribution_falls_back():
+    clause, substituted = generate_image_prompt._structural_zones_clause(
+        [_szone("social_proof", social_proof_kind="single_quote")],
+        testimonial={"quote": "Great oil.", "attribution": ""},
+    )
+    assert "a verified customer" in clause
+    assert "social_proof" in substituted
+
+
+def test_structural_zones_clause_social_proof_unrecognised_kind_removed():
+    """An unrecognised/missing social_proof_kind must be conservative (REMOVE), never
+    fall through to no-instruction-at-all, which is what let the original bug happen."""
+    clause, substituted = generate_image_prompt._structural_zones_clause(
+        [_szone("social_proof", social_proof_kind=None)],
+        testimonial={"quote": "Great oil.", "attribution": "Jane D."},
+    )
+    assert "STRUCTURAL ZONES - REMOVE, SOCIAL PROOF" in clause
+    assert "unspecified kind" in clause
     assert substituted == set()
 
 
@@ -1495,6 +1545,29 @@ def test_edit_mode_instruction_panel_copy_suppressed_when_text_in_image_off():
         panel_copy=[{"position": "upper-left-mid", "text": "Skin feeling looser?"}],
     )
     assert "Skin feeling looser?" not in instruction
+
+
+def test_edit_mode_instruction_forwards_testimonial_end_to_end():
+    instruction = generate_image_prompt._edit_mode_instruction(
+        text_in_image=True, headline="H",
+        structural_zones=[_szone("social_proof", social_proof_kind="single_quote")],
+        testimonial={"quote": "This oil changed my skin.", "attribution": "Jane D."},
+    )
+    assert '"This oil changed my skin."' in instruction
+    assert "Jane D." in instruction
+
+
+def test_edit_mode_instruction_testimonial_suppressed_when_text_in_image_off():
+    """Same gating rule as zone_copy_text/cta_text/panel_copy - a real review must never
+    leak into the prompt when the operator asked for no baked-in text this run; the zone
+    falls to removal instead."""
+    instruction = generate_image_prompt._edit_mode_instruction(
+        text_in_image=False,
+        structural_zones=[_szone("social_proof", social_proof_kind="single_quote")],
+        testimonial={"quote": "This oil changed my skin.", "attribution": "Jane D."},
+    )
+    assert "This oil changed my skin." not in instruction
+    assert "STRUCTURAL ZONES - REMOVE, SOCIAL PROOF" in instruction
 
 
 def test_edit_mode_instruction_gates_zone_copy_and_cta_on_text_in_image():

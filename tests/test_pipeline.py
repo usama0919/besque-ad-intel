@@ -1502,3 +1502,97 @@ def test_process_ad_failure_isolated(monkeypatch):
         raise RuntimeError("download failed")
     monkeypatch.setattr(pipeline.assets, "download_image", boom)
     assert pipeline.process_ad(ad) == "failed"
+
+
+# ---- select_testimonial_review (2026-08-06, fabricated-testimonials fix): real review
+# or nothing, never invented. Pure unit tests - dedupe.get_reviews_for_product is
+# monkeypatched, no DB connection at all. ----
+
+def _quote_blueprint():
+    return {"structural_zones": [
+        {"zone_type": "social_proof", "position": "lower-third", "social_proof_kind": "single_quote"},
+    ]}
+
+
+def _fake_review(id_, text, nickname="Jane D."):
+    return {"id": id_, "review_text": text, "char_length": len(text), "nickname": nickname}
+
+
+def test_select_testimonial_review_none_when_no_single_quote_zone(monkeypatch):
+    """No social_proof/single_quote zone at all - must skip the DB read entirely."""
+    calls = []
+    monkeypatch.setattr(pipeline.dedupe, "get_reviews_for_product", lambda *a, **k: calls.append(1) or [])
+    result = pipeline.select_testimonial_review({"structural_zones": []}, {"id": 1}, "AD1")
+    assert result is None
+    assert calls == []
+
+
+def test_select_testimonial_review_none_when_no_product_id(monkeypatch):
+    calls = []
+    monkeypatch.setattr(pipeline.dedupe, "get_reviews_for_product", lambda *a, **k: calls.append(1) or [])
+    result = pipeline.select_testimonial_review(_quote_blueprint(), None, "AD1")
+    assert result is None
+    assert calls == []
+
+
+def test_select_testimonial_review_none_when_no_reviews_exist(monkeypatch):
+    monkeypatch.setattr(pipeline.dedupe, "get_reviews_for_product", lambda *a, **k: [])
+    result = pipeline.select_testimonial_review(_quote_blueprint(), {"id": 1}, "AD1")
+    assert result is None
+
+
+def test_select_testimonial_review_excludes_reviews_too_long_for_an_image_line(monkeypatch):
+    long_review = _fake_review(1, "x" * 500)
+    monkeypatch.setattr(pipeline.dedupe, "get_reviews_for_product", lambda *a, **k: [long_review])
+    result = pipeline.select_testimonial_review(_quote_blueprint(), {"id": 1}, "AD1", max_chars=140)
+    assert result is None
+
+
+def test_select_testimonial_review_picks_a_real_review(monkeypatch):
+    reviews = [_fake_review(1, "This oil changed my skin.", "Jane D.")]
+    monkeypatch.setattr(pipeline.dedupe, "get_reviews_for_product", lambda *a, **k: reviews)
+    result = pipeline.select_testimonial_review(_quote_blueprint(), {"id": 1}, "AD1")
+    assert result == {"quote": "This oil changed my skin.", "attribution": "Jane D."}
+
+
+def test_select_testimonial_review_is_deterministic_for_the_same_ad(monkeypatch):
+    """The SAME ad must pick the SAME review every time - a real review disappearing and
+    reappearing on repeat runs would itself look like a bug."""
+    reviews = [_fake_review(i, f"Review number {i} is great.") for i in range(20)]
+    monkeypatch.setattr(pipeline.dedupe, "get_reviews_for_product", lambda *a, **k: reviews)
+    first = pipeline.select_testimonial_review(_quote_blueprint(), {"id": 1}, "SAME_AD_ID")
+    second = pipeline.select_testimonial_review(_quote_blueprint(), {"id": 1}, "SAME_AD_ID")
+    assert first == second
+
+
+def test_select_testimonial_review_excludes_reviews_that_read_as_complaints(monkeypatch):
+    """Found live 2026-08-06: a genuine 5-star, short-enough review whose TEXT is a
+    shipping complaint ("I have not received it yet and it's been weeks since I ordered
+    it") passed the rating+length filter cleanly - star rating alone doesn't mean the
+    text reads as a positive testimonial."""
+    complaint = _fake_review(
+        1, "Well I do love it but I have not received it yet and it's been weeks "
+           "since I ordered it", "Shannon R.",
+    )
+    positive = _fake_review(2, "This oil changed my skin.", "Jane D.")
+    monkeypatch.setattr(pipeline.dedupe, "get_reviews_for_product", lambda *a, **k: [complaint, positive])
+    result = pipeline.select_testimonial_review(_quote_blueprint(), {"id": 1}, "AD1")
+    assert result == {"quote": "This oil changed my skin.", "attribution": "Jane D."}
+
+
+def test_select_testimonial_review_falls_back_attribution_when_nickname_empty(monkeypatch):
+    review = _fake_review(1, "Great product.", nickname="")
+    monkeypatch.setattr(pipeline.dedupe, "get_reviews_for_product", lambda *a, **k: [review])
+    result = pipeline.select_testimonial_review(_quote_blueprint(), {"id": 1}, "AD1")
+    assert result == {"quote": "Great product.", "attribution": ""}
+
+
+def test_stable_index_is_stable_across_calls():
+    """Unlike builtin hash() on a string, which is randomised per-process - this must
+    give the identical answer every call, in every process."""
+    assert pipeline._stable_index("AD1", 10) == pipeline._stable_index("AD1", 10)
+    # A real cross-process guarantee can't be asserted in one test run, but a hardcoded
+    # sha256-based expectation pins the algorithm itself against silent drift.
+    import hashlib
+    digest = hashlib.sha256(b"AD1").hexdigest()
+    assert pipeline._stable_index("AD1", 10) == int(digest, 16) % 10

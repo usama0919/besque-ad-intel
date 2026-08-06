@@ -38,6 +38,83 @@ def effective_image_keys(product):
     return [product["image_key"]] if product.get("image_key") else []
 
 
+def _stable_index(key, modulus):
+    """A stable index for picking the SAME item for the SAME key, forever - unlike
+    builtin `hash()` on a string, which is randomised per-process (PYTHONHASHSEED) and
+    would pick a DIFFERENT review for the same ad on every restart."""
+    import hashlib
+    digest = hashlib.sha256(str(key).encode("utf-8")).hexdigest()
+    return int(digest, 16) % modulus
+
+
+# Keyword heuristic, not semantic understanding - same limitation this codebase's other
+# regex/keyword compliance checks (compliance.py) already accept. Found live 2026-08-06:
+# a real, genuine 5-star review ("Well I do love it but I have not received it yet and
+# it's been weeks since I ordered it") passed the rating+length filter cleanly - star
+# rating alone does NOT mean the TEXT itself reads as a positive testimonial; shipping/
+# service complaints often ride alongside a high rating for the product itself. A real
+# quote that reads as a complaint when presented as a testimonial is a different failure
+# mode from fabrication, but just as unusable.
+_TESTIMONIAL_COMPLAINT_SIGNALS = (
+    "not received", "never received", "haven't received", "have not received",
+    "never arrived", "still waiting", "since i ordered", "refund", "disappointed",
+    "broken", "damaged", "wrong item", "cancel", "customer service", "did not work",
+    "didn't work", "doesn't work", "does not work", "waste of money", "return it",
+    "complain",
+)
+
+
+def _reads_like_a_complaint(review_text):
+    lowered = (review_text or "").lower()
+    return any(signal in lowered for signal in _TESTIMONIAL_COMPLAINT_SIGNALS)
+
+
+def select_testimonial_review(blueprint, product, ad_id, max_chars=140):
+    """Pick a REAL, approved customer review to substitute into a social_proof
+    single_quote structural zone - real review or nothing, never fabricated (2026-08-06:
+    Gemini was inventing customer quotes wholesale for a testimonial-shaped zone it had
+    nothing real to fill, styled exactly like a genuine customer quote with a star
+    rating - see CLAUDE.md). Returns None (never a placeholder) when: the blueprint has
+    no single_quote zone at all (skips the DB read entirely), no product/product_id is
+    given, or no review both short enough to read as a single in-image line AND free of
+    complaint-shaped language (see _reads_like_a_complaint) exists for this product.
+    Callers must treat None as "remove the zone" - see
+    generate_image_prompt._structural_zones_clause.
+
+    Deterministic by ad_id, not random: the SAME ad picks the SAME review on every
+    regenerate (reproducible - a real review disappearing and reappearing on repeat runs
+    would itself look like a bug), while different ads spread across the pool.
+
+    No angle or reuse-cooldown matching yet - product_reviews has no angle tag and no
+    per-review "last used" tracking exists (the team's stated want for a future version
+    of this feature, not buildable with today's schema) - deferred rather than guessed
+    at; see CLAUDE.md 2026-08-06. max_chars keeps the pick short enough to read as a
+    single in-image line, the same "short line" constraint image_subtext/panel_copy
+    already apply - not a length pulled from nowhere."""
+    zones = (blueprint or {}).get("structural_zones") or []
+    wants_quote = any(
+        z.get("zone_type") == "social_proof" and z.get("social_proof_kind") == "single_quote"
+        for z in zones
+    )
+    if not wants_quote:
+        return None
+    product_id = (product or {}).get("id")
+    if product_id is None:
+        return None
+    reviews = dedupe.get_reviews_for_product(product_id)
+    candidates = [
+        r for r in reviews
+        if (r.get("char_length") or 10 ** 9) <= max_chars
+        and (r.get("review_text") or "").strip()
+        and not _reads_like_a_complaint(r.get("review_text"))
+    ]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda r: r["id"])
+    chosen = candidates[_stable_index(ad_id, len(candidates))]
+    return {"quote": chosen["review_text"].strip(), "attribution": chosen.get("nickname") or ""}
+
+
 def fetch_reference_images(product):
     """Fetch bytes for every effective reference image key of `product`. Returns
     (images, warning) where warning is None, or a (kind, detail) tuple describing
@@ -384,6 +461,10 @@ def _regenerate_existing_draft(ad, angle_id, angle_slug, delta_instruction, shou
     cta_text = generated_copy.get("cta") or None
     panel_copy = generated_copy.get("panel_copy") or None
     brand_palette = dedupe.get_brand_settings().get("palette") if retheme_colours else None
+    # Recomputed fresh, not read from the artifact - select_testimonial_review is
+    # deterministic by ad_id, so this reproduces the SAME pick a normal generation would
+    # make with this same blueprint/product, no separate storage needed (2026-08-06).
+    testimonial = select_testimonial_review(blueprint, product, ad_id)
 
     rebuilt_prompt = generate_image_prompt.build_image_prompt(
         blueprint, product=product, include_product=include_product,
@@ -392,6 +473,7 @@ def _regenerate_existing_draft(ad, angle_id, angle_slug, delta_instruction, shou
         offer_text=offer_text, operator_instruction=stored_operator_instruction,
         retheme_colours=retheme_colours, brand_palette=brand_palette,
         realism=realism, cta_text=cta_text, panel_copy=panel_copy,
+        testimonial=testimonial,
     )
 
     draft_bytes = generate_image_prompt._current_draft_bytes(ad_id, angle_slug)
@@ -700,6 +782,12 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
 
         log.info("Ad %s: image generation starting (edit_mode=%s)", ad_id, edit_mode)
 
+        # testimonial (2026-08-06, fabricated-testimonials fix): computed ONCE, outside
+        # the retry loop below - select_testimonial_review is deterministic by ad_id, so
+        # every attempt (including the corrective retry) gets the SAME real review, never
+        # a different one and never a fabricated one.
+        testimonial = select_testimonial_review(blueprint, product, ad_id)
+
         # Corrective-retry loop (2026-08-05): observe (generate) -> evaluate (critic) ->
         # correct (feed the specific findings back) -> re-generate, capped at ONE retry.
         # Only engages when check_output is on AND the critic returns a HIGH-confidence
@@ -755,6 +843,7 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
                     # - only consumed by structural_zones' sub_line/body_copy routing in edit
                     # mode, a no-op everywhere else, same forwarding pattern as cta_text.
                     panel_copy=copy.get("panel_copy") or None,
+                    testimonial=testimonial,
                     **gen_kwargs,
                 )
             except Exception as e:

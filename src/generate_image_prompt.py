@@ -49,7 +49,8 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
                         offer_text: str = None, operator_instruction: str = None,
                         retheme_colours: bool = True, brand_palette: str = None,
                         realism: str = None, critic_feedback: list = None,
-                        cta_text: str = None, panel_copy: list = None) -> str:
+                        cta_text: str = None, panel_copy: list = None,
+                        testimonial: dict = None) -> str:
     """Construct a Besque-adapted image generation prompt from the blueprint's visual notes.
     include_product=True, text_in_image=False, creative_description=None, edit_mode=False,
     offer_text=None, operator_instruction=None (today's defaults) reproduce the prior
@@ -184,7 +185,7 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
                                    typography_zones=blueprint.get("typography_zones"),
                                    structural_zones=blueprint.get("structural_zones"),
                                    cta_text=cta_text, product_name=(product or {}).get("name"),
-                                   panel_copy=panel_copy) +
+                                   panel_copy=panel_copy, testimonial=testimonial) +
             product_clause +
             closing
         )
@@ -566,7 +567,8 @@ def _suppressed_container_exception(suppressing_text, suppressing_offer, suppres
 _STRUCTURAL_ZONE_REMOVE_TYPES = ("badge", "price_anchor", "product_callout")
 
 
-def _structural_zones_clause(structural_zones, zone_copy_text=None, cta_text=None, panel_copy=None):
+def _structural_zones_clause(structural_zones, zone_copy_text=None, cta_text=None, panel_copy=None,
+                              testimonial=None):
     """Wires blueprint.structural_zones (2026-08-06 schema addition) into edit mode, for
     only the zone types we have a real Besque value for today:
     - brand_wordmark: ALWAYS substituted with BESQUE, same position/container, never
@@ -587,8 +589,15 @@ def _structural_zones_clause(structural_zones, zone_copy_text=None, cta_text=Non
       belonging to the reference brand is never Besque's for ANY product - the removal
       instruction also explicitly takes any pointing asterisk/footnote marker with it, so
       no dangling reference is left behind (2026-08-06, Grüns GLP-1 leak).
-    - social_proof: no instruction generated - left exactly as the general
-      reproduce-faithfully instruction above already governs it.
+    - social_proof (2026-08-06, fabricated-testimonials fix): a single_quote zone is
+      substituted with `testimonial` ONLY when a real one was supplied (a REAL customer
+      review, selected from dedupe.get_reviews_for_product - see
+      pipeline.select_testimonial_review) - rendered verbatim, never reworded or invented.
+      No real review available, or an aggregate_bar (review-count/star-average - held
+      pending approval, see CLAUDE.md), or any other/unrecognised social_proof_kind: ALWAYS
+      REMOVED, never left for the general reproduce-faithfully instruction to govern -
+      that was the actual bug (Gemini invented a plausible-sounding customer quote to fill
+      a testimonial-shaped space it had nothing real to put there).
 
     Returns (clause_text, substituted_zone_types) - the second value lets the TEXT
     clause's "entire text budget" ban adjust itself so it never bans a category this
@@ -603,7 +612,11 @@ def _structural_zones_clause(structural_zones, zone_copy_text=None, cta_text=Non
     many there were or what each one's own detail described; this routes each zone to its
     OWN text instead, by position, and falls back to zone_copy_text only for a
     position panel_copy doesn't cover (or when panel_copy is absent entirely - every
-    existing single-panel blueprint sees byte-for-byte the same behaviour as before)."""
+    existing single-panel blueprint sees byte-for-byte the same behaviour as before).
+
+    testimonial, when given, is {"quote": str, "attribution": str} - a single real review,
+    already selected and length-filtered by the caller (pipeline.py); this function never
+    picks or rewrites it, only decides whether to render it here or remove the zone."""
     substituted_zone_types = set()
     if not structural_zones:
         return "", substituted_zone_types
@@ -616,6 +629,7 @@ def _structural_zones_clause(structural_zones, zone_copy_text=None, cta_text=Non
     substitute_lines = []
     remove_lines = []
     disclaimer_lines = []
+    social_proof_remove_lines = []
     for z in structural_zones:
         zt = z.get("zone_type")
         pos = z.get("position") or "its shown position"
@@ -648,9 +662,25 @@ def _structural_zones_clause(structural_zones, zone_copy_text=None, cta_text=Non
                 remove_lines.append(f"- cta at {pos} (container: {container})")
         elif zt == "disclaimer":
             disclaimer_lines.append(f"- disclaimer at {pos} (container: {container})")
+        elif zt == "social_proof":
+            kind = z.get("social_proof_kind")
+            if kind == "single_quote" and testimonial and testimonial.get("quote"):
+                attribution = testimonial.get("attribution") or "a verified customer"
+                substitute_lines.append(
+                    f"- social_proof (single_quote) at {pos} (container: {container}): "
+                    f"replace with this REAL customer review, rendered EXACTLY as given, "
+                    f"never reworded, shortened, or invented: \"{testimonial['quote']}\" "
+                    f"— attributed to {attribution}. No star rating, age, or timeframe "
+                    f"unless the review text itself states one."
+                )
+                substituted_zone_types.add(zt)
+            else:
+                social_proof_remove_lines.append(
+                    f"- social_proof ({kind or 'unspecified kind'}) at {pos} (container: {container})"
+                )
         elif zt in _STRUCTURAL_ZONE_REMOVE_TYPES:
             remove_lines.append(f"- {zt} at {pos} (container: {container})")
-        # else: social_proof, or an unrecognised zone_type - no instruction either way.
+        # else: an unrecognised zone_type - no instruction either way.
 
     parts = []
     if substitute_lines:
@@ -675,6 +705,15 @@ def _structural_zones_clause(structural_zones, zone_copy_text=None, cta_text=Non
             "must be removed with it - a dangling asterisk with no referent left behind is "
             "its own defect, just as bad as the disclaimer text itself: "
             + " ".join(disclaimer_lines)
+        )
+    if social_proof_remove_lines:
+        parts.append(
+            "STRUCTURAL ZONES - REMOVE, SOCIAL PROOF (STRICT): no real, approved customer "
+            "review or review count/rating exists for this run - remove these containers "
+            "entirely, not left as an empty shape. NEVER invent a customer quote, name, "
+            "star rating, or review count to fill this space - a fabricated testimonial is "
+            "a compliance violation, not a stylistic choice: "
+            + " ".join(social_proof_remove_lines)
         )
     clause = (" ".join(parts) + " ") if parts else ""
     return clause, substituted_zone_types
@@ -774,7 +813,7 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
                             retheme_colours=True, palette=None,
                             substance_colour=None, style=None, typography_zones=None,
                             structural_zones=None, cta_text=None, product_name=None,
-                            panel_copy=None):
+                            panel_copy=None, testimonial=None):
     """EDIT MODE (2026-08-01): Gemini receives the competitor's own ad as an input image
     Part, not just a text description of it - the reference image IS the creative brief,
     so no template scene/layout/palette description is assembled here (see
@@ -951,9 +990,10 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
     zone_copy_text = eff_subtext if text_in_image else None
     zone_cta_text = cta_text if text_in_image else None
     zone_panel_copy = panel_copy if text_in_image else None
+    zone_testimonial = testimonial if text_in_image else None
     structural_clause, substituted_zone_types = _structural_zones_clause(
         structural_zones, zone_copy_text=zone_copy_text, cta_text=zone_cta_text,
-        panel_copy=zone_panel_copy,
+        panel_copy=zone_panel_copy, testimonial=zone_testimonial,
     )
     if eff_headline:
         permitted = f'the headline "{eff_headline}"'
@@ -1159,7 +1199,8 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
                     include_product=True, text_in_image=False, headline=None, subtext=None,
                     messaging_angle=None, realism=None, body_area=None, offer_text=None,
                     edit_mode=False, competitor_image_bytes=None, operator_instruction=None,
-                    retheme_colours=True, critic_feedback=None, cta_text=None, panel_copy=None):
+                    retheme_colours=True, critic_feedback=None, cta_text=None, panel_copy=None,
+                    testimonial=None):
     """Single-pass image generation from the blueprint. One image, no iteration.
     Saves to assets/<stem>_draft.png (stem = ad_id, or ad_id+angle if angle_slug is given)
     and returns the path. Returns None on failure. include_product/text_in_image/headline/
@@ -1251,7 +1292,7 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
                                  offer_text=offer_text, operator_instruction=operator_instruction,
                                  retheme_colours=retheme_colours, brand_palette=brand_palette,
                                  realism=realism, critic_feedback=critic_feedback, cta_text=cta_text,
-                                 panel_copy=panel_copy)
+                                 panel_copy=panel_copy, testimonial=testimonial)
     stem = _draft_stem(ad_id, angle_slug)
     try:
         client = genai.Client(vertexai=True, project="besque-martech", location="global")
