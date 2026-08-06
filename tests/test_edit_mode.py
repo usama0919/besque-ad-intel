@@ -1086,3 +1086,91 @@ def test_build_image_prompt_generate_mode_unaffected_by_realism_param():
     bp = _blueprint()
     assert (generate_image_prompt.build_image_prompt(bp)
             == generate_image_prompt.build_image_prompt(bp, realism="ugc_native"))
+
+
+# ---- PART B3b (2026-08-06): per-zone typographic TREATMENT, not just per-zone content -
+# a real reference with 4 distinct typographic levels produced a draft with only 2, because
+# nothing named the other two levels explicitly and Gemini defaulted to one style everywhere.
+
+def _zone(**overrides):
+    z = {"zone": "headline upper-right", "typeface_class": "serif", "weight": "bold",
+         "case": "title", "letter_spacing": "normal", "colour": "white",
+         "size_relative": "large", "decorative_elements": [], "line_count": 2}
+    z.update(overrides)
+    return z
+
+
+def test_typography_zones_clause_empty_for_blank_input():
+    for blank in (None, []):
+        assert generate_image_prompt._typography_zones_clause(blank) == ""
+
+
+def test_typography_zones_clause_states_every_field_per_zone():
+    clause = generate_image_prompt._typography_zones_clause([
+        _zone(zone="headline upper-right", typeface_class="serif", weight="bold",
+              case="title", letter_spacing="normal", colour="white", size_relative="large",
+              decorative_elements=[], line_count=2),
+        _zone(zone="ingredient sub-copy mid-right", typeface_class="sans", weight="light",
+              case="sentence", letter_spacing="wide", colour="gold", size_relative="small",
+              decorative_elements=["pipe divider between clauses"], line_count=3),
+    ])
+    assert "TYPOGRAPHIC LEVELS" in clause
+    assert "2 distinct typographic level(s)" in clause
+    assert "never collapsing two into one" in clause
+    # First zone
+    assert "headline upper-right" in clause
+    assert "serif typeface" in clause
+    assert "bold weight" in clause
+    assert "title case" in clause
+    assert "normal letter-spacing" in clause
+    assert "colour white" in clause
+    assert "large relative to the frame" in clause
+    assert "2 line(s)" in clause
+    # Second zone - distinct treatment, not collapsed into the first's
+    assert "ingredient sub-copy mid-right" in clause
+    assert "sans typeface" in clause
+    assert "wide letter-spacing" in clause
+    assert "colour gold" in clause
+    assert "pipe divider between clauses" in clause
+    assert "3 line(s)" in clause
+
+
+def test_typography_zones_clause_never_raises_on_missing_fields():
+    """A partially-filled zone (an older blueprint, or a field Claude omitted) must
+    degrade to "?" placeholders, never crash the prompt assembly."""
+    clause = generate_image_prompt._typography_zones_clause([{"zone": "headline"}])
+    assert "headline" in clause
+    assert "? typeface" in clause
+    assert "? line(s)" in clause
+
+
+def test_edit_mode_instruction_forwards_typography_zones():
+    instruction = generate_image_prompt._edit_mode_instruction(
+        typography_zones=[_zone(zone="CTA button", typeface_class="sans")]
+    )
+    assert "TYPOGRAPHIC LEVELS" in instruction
+    assert "CTA button" in instruction
+
+
+def test_edit_mode_instruction_no_typography_zones_section_when_absent():
+    instruction = generate_image_prompt._edit_mode_instruction()
+    assert "TYPOGRAPHIC LEVELS" not in instruction
+
+
+def test_build_image_prompt_edit_mode_reads_typography_zones_from_blueprint():
+    bp = _blueprint()
+    bp["typography_zones"] = [_zone(zone="offer banner bottom-right")]
+    prompt = generate_image_prompt.build_image_prompt(bp, edit_mode=True)
+    assert "TYPOGRAPHIC LEVELS" in prompt
+    assert "offer banner bottom-right" in prompt
+
+
+def test_build_image_prompt_generate_mode_unaffected_by_typography_zones():
+    """typography_zones is edit-mode only (per _edit_mode_instruction) - the flat template/
+    writer paths never read it, so a blueprint carrying it must produce byte-for-byte the
+    same generate-mode prompt as one without it."""
+    bp_plain = _blueprint()
+    bp_with_zones = _blueprint()
+    bp_with_zones["typography_zones"] = [_zone()]
+    assert (generate_image_prompt.build_image_prompt(bp_plain)
+            == generate_image_prompt.build_image_prompt(bp_with_zones))

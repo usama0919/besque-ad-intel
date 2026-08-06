@@ -78,6 +78,48 @@
         "case_treatment": { "type": "string" }
       }
     },
+    "typography_zones": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "zone": { "type": "string" },
+          "typeface_class": { "type": "string" },
+          "weight": { "type": "string" },
+          "case": { "type": "string" },
+          "letter_spacing": { "type": "string" },
+          "colour": { "type": "string" },
+          "size_relative": { "type": "string" },
+          "decorative_elements": { "type": "array", "items": { "type": "string" } },
+          "line_count": { "type": "number" }
+        }
+      }
+    },
+    "structural_zones": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "zone_type": {
+            "type": "string",
+            "enum": [
+              "brand_wordmark", "sub_line", "body_copy", "cta", "price_anchor",
+              "product_callout", "badge", "social_proof", "disclaimer"
+            ]
+          },
+          "position": { "type": "string" },
+          "container": {
+            "type": "string",
+            "enum": ["none", "oval", "rect", "banner", "ribbon", "other"]
+          },
+          "detail": { "type": "string" },
+          "social_proof_kind": {
+            "type": ["string", "null"],
+            "enum": ["aggregate_bar", "single_quote", null]
+          }
+        }
+      }
+    },
     "production_style": {
       "type": "object",
       "properties": {

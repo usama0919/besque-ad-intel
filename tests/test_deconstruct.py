@@ -86,6 +86,49 @@ def test_build_prompt_includes_new_creative_fields_without_format_error():
     assert "frame_division" in prompt
 
 
+def test_build_prompt_includes_typography_zones_without_format_error():
+    """PART B3b (2026-08-06): typography_zones was added to BLUEPRINT_PROMPT, itself run
+    through .format() in build_prompt() - same KeyError risk as the Part B fields above if
+    a literal brace in the new text weren't escaped."""
+    prompt = deconstruct.build_prompt("AD1", "PageX", "2026-01-01")
+    assert "typography_zones" in prompt
+    assert "letter_spacing" in prompt
+    assert "decorative_elements" in prompt
+    assert "line_count" in prompt
+
+
+def test_deconstruct_response_with_typography_zones_passes_schema():
+    """Optional field (2026-08-06 schema addition) - present and well-formed must validate."""
+    payload = json.loads(_fake_claude_json())
+    payload["typography_zones"] = [
+        {"zone": "headline upper-right", "typeface_class": "serif", "weight": "bold",
+         "case": "title", "letter_spacing": "normal", "colour": "white",
+         "size_relative": "large", "decorative_elements": [], "line_count": 2},
+    ]
+    bp = deconstruct.deconstruct_from_response(json.dumps(payload))
+    assert bp["typography_zones"][0]["zone"] == "headline upper-right"
+
+
+def test_deconstruct_response_without_typography_zones_still_passes_schema():
+    """Optional means optional - every blueprint deconstructed before this field existed
+    must still validate with no typography_zones key at all."""
+    raw = _fake_claude_json()
+    assert "typography_zones" not in json.loads(raw)
+    bp = deconstruct.deconstruct_from_response(raw)
+    assert "typography_zones" not in bp
+
+
+def test_build_prompt_instructs_omitting_absent_zones_never_describing_absence():
+    """A real live case (CeraVe, 2026-08-06): the model returned a sub_line entry whose
+    detail read 'No explicit sub-line; headline stands alone' - an entry describing its
+    own absence still reads downstream as a zone that EXISTS, which the generator would
+    then try to substitute into. The prompt must say explicitly: omit the zone entirely,
+    never add a placeholder entry explaining that it's missing."""
+    prompt = deconstruct.build_prompt("AD1", "PageX", "2026-01-01")
+    assert "OMIT it entirely" in prompt
+    assert "do not add an entry for it just to say it is absent" in prompt
+
+
 def test_deconstruct_image_scraped_ad_copy_with_braces_does_not_raise(monkeypatch):
     """ad_text/cta are passed to Claude as a SEPARATE content block, never through
     .format() - confirmed end to end: literal { and } in scraped ad copy must not raise

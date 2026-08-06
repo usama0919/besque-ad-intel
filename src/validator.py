@@ -27,6 +27,14 @@ def production_styles() -> list[str]:
     )
 
 
+def structural_zone_types() -> list[str]:
+    """The structural_zones[].zone_type enum (2026-08-06), read from the schema for the
+    same reason as production_styles()/creative_formats() above - whatever eventually
+    consumes this (the generator is NOT wired to it yet, deliberately) must check its own
+    coverage against this list, not repeat the nine names as a separate literal."""
+    return list(_SCHEMA["properties"]["structural_zones"]["items"]["properties"]["zone_type"]["enum"])
+
+
 def creative_formats() -> list[str]:
     """The creative_format enum, read from the schema for the same reason as
     production_styles() above - generate_image_prompt_writer.py's TYPOGRAPHY_GUIDANCE

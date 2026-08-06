@@ -179,7 +179,8 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
                                    reference_has_product=reference_has_product,
                                    retheme_colours=retheme_colours, palette=brand_palette,
                                    substance_colour=(product or {}).get("substance_colour"),
-                                   style=(realism or "").strip() or prod_style) +
+                                   style=(realism or "").strip() or prod_style,
+                                   typography_zones=blueprint.get("typography_zones")) +
             product_clause +
             closing
         )
@@ -549,6 +550,47 @@ def _suppressed_container_exception(suppressing_text, suppressing_offer, suppres
     )
 
 
+def _typography_zones_clause(typography_zones):
+    """PART B3b (2026-08-06): per-zone typographic TREATMENT, not just per-zone content.
+    The TEXT clause below already says "same size, position, weight, casing, and text
+    colour" as ONE blanket instruction covering whichever zone gets the headline/subtext -
+    fine when the reference has one typographic level, but a real reference with four
+    distinct levels (a large serif headline, a gold small-caps accent line with a pipe
+    divider, small sans body copy, a CTA button label) produced a draft with only two
+    (serif headline, plain white body) - nothing named the other two levels explicitly, so
+    Gemini defaulted to applying one style everywhere.
+
+    Content substitution - which words land in which zone, and whether a zone survives at
+    all - is governed elsewhere (rule 6, TEXT, OFFER, the container-removal exception
+    above); this clause states HOW each zone that DOES survive is dressed, so distinct
+    levels can't collapse into one by default. blueprint.typography_zones is optional
+    (schema addition, 2026-08-06) - blueprints without it (every one deconstructed before
+    this existed) produce "" here, same as every other optional clause in this module."""
+    if not typography_zones:
+        return ""
+    lines = []
+    for z in typography_zones:
+        parts = [
+            f"{z.get('typeface_class') or '?'} typeface", f"{z.get('weight') or '?'} weight",
+            f"{z.get('case') or '?'} case", f"{z.get('letter_spacing') or '?'} letter-spacing",
+            f"colour {z.get('colour') or '?'}", f"{z.get('size_relative') or '?'} relative to the frame",
+        ]
+        deco = z.get("decorative_elements") or []
+        if deco:
+            parts.append("with " + ", ".join(deco))
+        lines.append(f"- {z.get('zone') or 'unnamed zone'}: {', '.join(parts)}, "
+                     f"{z.get('line_count') if z.get('line_count') is not None else '?'} line(s)")
+    zone_list = " ".join(lines)
+    return (
+        f"TYPOGRAPHIC LEVELS (STRICT): the reference has {len(typography_zones)} distinct "
+        f"typographic level(s) below, each with its OWN treatment - reproduce every one of "
+        f"them exactly as described, never collapsing two into one and never rendering "
+        f"every zone in the same style. Whatever wording each zone actually receives is "
+        f"governed by the rules above (TEXT/OFFER) - this only states HOW that zone is "
+        f"dressed, for whichever zones survive: {zone_list} "
+    )
+
+
 def _bottle_fixed_clause():
     return (
         "The Besque bottle's geometry, proportions, and label text/layout are FIXED - "
@@ -600,7 +642,7 @@ def _register_clause(style):
 def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, offer_text=None,
                             include_product=True, reference_has_product=True,
                             retheme_colours=True, palette=None,
-                            substance_colour=None, style=None):
+                            substance_colour=None, style=None, typography_zones=None):
     """EDIT MODE (2026-08-01): Gemini receives the competitor's own ad as an input image
     Part, not just a text description of it - the reference image IS the creative brief,
     so no template scene/layout/palette description is assembled here (see
@@ -770,6 +812,7 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             f"headline, or competitor wording rendered there either. That space will be "
             f"filled later as a separate HTML overlay. "
         )
+    base += _typography_zones_clause(typography_zones)
     if offer_text:
         base += (
             f"OFFER: if the reference shows an offer, discount, price, or CTA badge, "
