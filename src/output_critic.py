@@ -31,6 +31,7 @@ log = logging.getLogger("output_critic")
 # default these to high confidence rather than hedge.
 HIGH_CONFIDENCE_BY_DEFAULT = (
     "unauthorised offer", "scarcity claim", "promo code", "efficacy claim", "testimonial",
+    "product category mismatch",
 )
 
 CRITIC_SYSTEM = (
@@ -43,7 +44,19 @@ CRITIC_SYSTEM = (
     "\"high\"|\"medium\"|\"low\"}, ...]} - an empty violations array if you find nothing.\n\n"
     "Check specifically for:\n"
     "- a competitor logo, seal, badge, or brand mark anywhere in the image (rule 9)\n"
-    "- a competitor brand or product name in any rendered text (rules 1-2)\n"
+    "- a competitor brand or product name in any rendered text (rules 1-2). If the "
+    "Besque product's own documented label/bottle design is supplied below, judge the "
+    "product's label text against THAT, not against rule 1's bare wording alone: label "
+    "text/sub-lines/claims that match the documented design are the REAL label, not a "
+    "violation, even if they say more than just the bare product name - only label text "
+    "matching NEITHER the exact product name NOR the documented design is a genuine "
+    "violation of this category\n"
+    "- a prop, ingredient, or scene element carried over from the competitor's reference "
+    "that visibly implies an ingredient or property this Besque product does not have or "
+    "claim - e.g. the reference's almonds, citrus fruit, or another named ingredient shown "
+    "in the scene when the product's actual ingredients (supplied below, if given) don't "
+    "include it. This is a NEW, flag-only category: nothing in the generator's own prompt "
+    "bans this yet, so report it for a human to weigh, don't assume it's necessarily wrong\n"
     "- an unauthorised offer, price, discount, promo code, scarcity, or stock-count claim "
     "(the OFFER instruction)\n"
     "- a quantified efficacy claim (a percentage, ratio, or \"X% more\"-style claim) not "
@@ -51,6 +64,13 @@ CRITIC_SYSTEM = (
     "- a testimonial, quote, or star rating (C2)\n"
     "- a Besque product present when none was authorised, or more than one product where "
     "only one was authorised (rule 7)\n"
+    "- the product shown or described as any category OTHER than a body oil - a mist, "
+    "spray, cream, serum, lotion, gel, balm, or any other non-oil category, on the label, "
+    "the packaging shape, or in any rendered text - regardless of what category the "
+    "competitor's OWN reference ad sells (rule 5). The reference supplies composition, "
+    "layout, and styling only, never product identity: whatever the competitor sells, this "
+    "is always a Besque body oil ad, and a mismatched reference category is never a reason "
+    "to relax this or read it as intentional\n"
     "- a product-derived substance (a drip, pour, pool, or smear) in the wrong colour for "
     "the actual Besque product described below (the product-substance instruction)\n"
     "- an empty graphic container (a badge, oval, bubble, banner, or ribbon) with no "
@@ -60,8 +80,8 @@ CRITIC_SYSTEM = (
     "(rule 6)\n\n"
     "Treat a hit in these categories as HIGH confidence by default unless you are quite "
     "sure it's a false read: unauthorised offer, scarcity claim, promo code, efficacy "
-    "claim, testimonial. These are the exact categories that have shipped in real drafts "
-    "before this check existed."
+    "claim, testimonial, product category mismatch. These are the exact categories that "
+    "have shipped in real drafts before this check existed."
 )
 
 # CRITIC_SYSTEM is an INDEPENDENTLY hand-written checklist, not generated from
@@ -71,11 +91,23 @@ CRITIC_SYSTEM = (
 # tripwire, not a fix for that risk - it only catches the citation disappearing from
 # CRITIC_SYSTEM's own text, not the cited rule drifting out of sync with brand_rules()
 # itself. See test_output_critic.py's rule-citation tests.
-CITED_RULE_IDS = ("rule 9", "rules 1-2", "C3", "C2", "rule 7", "rule 6")
+CITED_RULE_IDS = ("rule 9", "rules 1-2", "C3", "C2", "rule 7", "rule 5", "rule 6")
 assert all(rule_id in CRITIC_SYSTEM for rule_id in CITED_RULE_IDS), (
     "CRITIC_SYSTEM no longer cites one of CITED_RULE_IDS - the checklist and the actual "
     "rule numbering have drifted apart"
 )
+
+
+def has_high_confidence(findings):
+    """True if any finding in `findings` (the list check_draft returns) is HIGH
+    confidence. The single gate condition the retry loop and the "failed review" card
+    state both key off - added 2026-08-05 after a real draft (L'Occitane edit-mode leak:
+    competitor headline, body copy, CTA, and product category all survived verbatim) was
+    correctly flagged at HIGH confidence on 8/8 findings and still saved as an ordinary,
+    unflagged-looking pending draft - the critic was reporting, not gating. No new column
+    needed: `confidence` is already on every finding, so this is the only signal a caller
+    (pipeline.process_ad's retry loop, or a template deciding how to badge a card) needs."""
+    return any((f.get("confidence") or "").lower() == "high" for f in (findings or []))
 
 
 def _sniff_mime_type(data):
@@ -92,8 +124,18 @@ def _sniff_mime_type(data):
 
 
 def _build_user_prompt(brand_rules_text, headline=None, subtext=None, offer_text=None,
-                        include_product=True):
-    """Pure and side-effect free so it's directly testable without mocking the API."""
+                        include_product=True, visual_description=None, ingredients=None):
+    """Pure and side-effect free so it's directly testable without mocking the API.
+
+    visual_description/ingredients (2026-08-06, PART 1G): the product's OWN documented
+    facts - the same fields build_image_prompt's product_clause already hands the
+    generator - now also handed to the critic, closing a real false positive: the
+    original L'Occitane run's critic flagged the Besque bottle's real, documented label
+    sub-lines ("LUXURY BODY OIL", "NOURISH, HYDRATE & SMOOTH SKIN", ...) as an invented
+    violation of rule 1's bare "name only" wording, because the critic had never been told
+    what the real label actually says beyond the name. Both are optional and additive -
+    omitting them (every pre-existing caller, until pipeline.py is updated alongside this)
+    reproduces today's prompt byte-for-byte."""
     if headline:
         text_line = f'headline {headline!r}' + (f', subtext {subtext!r}' if subtext else '')
     else:
@@ -101,9 +143,22 @@ def _build_user_prompt(brand_rules_text, headline=None, subtext=None, offer_text
     offer_line = repr(offer_text) if offer_text else "NONE - no offer was authorised for this image"
     product_line = ("exactly one Besque product" if include_product
                      else "NONE - this was a deliberately productless image")
+    visual_line = (
+        f"The Besque product's own documented label/bottle design (judge label text "
+        f"against THIS, not rule 1's bare wording alone - see the rule-9/rules-1-2 "
+        f"instruction above): {visual_description}\n"
+        if visual_description else ""
+    )
+    ingredients_line = (
+        f"The Besque product's actual ingredients (for judging the new carried-over-prop "
+        f"category above): {ingredients}\n"
+        if ingredients else ""
+    )
     return (
         "RULES THIS IMAGE WAS GENERATED UNDER:\n"
         f"{brand_rules_text.strip()}\n\n"
+        f"{visual_line}"
+        f"{ingredients_line}"
         f"Authorised text_in_image content: {text_line}.\n"
         f"Authorised offer: {offer_line}.\n"
         f"Product presence authorised: {product_line}.\n\n"
@@ -113,7 +168,7 @@ def _build_user_prompt(brand_rules_text, headline=None, subtext=None, offer_text
 
 
 def check_draft(image_bytes, brand_rules_text, headline=None, subtext=None, offer_text=None,
-                 include_product=True):
+                 include_product=True, visual_description=None, ingredients=None):
     """Ask Claude to inspect a GENERATED draft image for rule violations.
 
     Returns a list of {"category", "description", "confidence"} dicts, medium/high
@@ -122,7 +177,8 @@ def check_draft(image_bytes, brand_rules_text, headline=None, subtext=None, offe
     Never raises: callers must treat None as "the check did not run", not as "no
     violations found" - see this module's docstring."""
     user_prompt = _build_user_prompt(brand_rules_text, headline=headline, subtext=subtext,
-                                      offer_text=offer_text, include_product=include_product)
+                                      offer_text=offer_text, include_product=include_product,
+                                      visual_description=visual_description, ingredients=ingredients)
     try:
         import base64
         media_type = _sniff_mime_type(image_bytes)

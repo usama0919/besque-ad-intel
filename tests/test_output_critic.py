@@ -40,10 +40,30 @@ def test_build_user_prompt_states_product_presence():
     assert "NONE - this was a deliberately productless image" in prompt2
 
 
+def test_build_user_prompt_states_documented_visual_description_for_label_judgment():
+    # PART 1G (2026-08-06): the critic must judge label text against the product's OWN
+    # documented design, not rule 1's bare wording alone - the exact gap that produced a
+    # false positive on the L'Occitane run's real, correct label ("LUXURY BODY OIL",
+    # "NOURISH, HYDRATE & SMOOTH SKIN", ...), which the critic had never been told about.
+    prompt = critic._build_user_prompt(
+        "rules", visual_description="Clear bottle, 'LUXURY BODY OIL' beneath the name.",
+        ingredients="Almond, Rosehip, Vitamin E",
+    )
+    assert "Clear bottle, 'LUXURY BODY OIL' beneath the name." in prompt
+    assert "Almond, Rosehip, Vitamin E" in prompt
+    assert "judge label text" in prompt.lower() or "judge the" in prompt.lower()
+
+    # Omitting both (every pre-existing caller) must not add empty sections.
+    prompt_without = critic._build_user_prompt("rules")
+    assert "documented label" not in prompt_without.lower()
+    assert "actual ingredients" not in prompt_without.lower()
+
+
 # ---- The prompt-fixed instruction: proven-shipped categories default to high confidence ----
 
 def test_critic_system_states_high_confidence_defaults_for_shipped_categories():
-    for cat in ("unauthorised offer", "scarcity claim", "promo code", "efficacy claim", "testimonial"):
+    for cat in ("unauthorised offer", "scarcity claim", "promo code", "efficacy claim",
+                "testimonial", "product category mismatch"):
         assert cat in critic.CRITIC_SYSTEM
 
 
@@ -54,6 +74,15 @@ def test_critic_system_lists_every_required_check():
               "text rendered when none was authorised"]
     for c in checks:
         assert c in critic.CRITIC_SYSTEM
+
+
+def test_critic_system_checks_product_category_regardless_of_reference():
+    # 2026-08-05: a real draft rendered a hair & body mist (the competitor's own category)
+    # instead of the authorised body oil - the reference supplies composition/styling only,
+    # never product identity, and a mismatched reference category is never a reason to
+    # relax this or read the drift as intentional.
+    assert "OTHER than a body oil" in critic.CRITIC_SYSTEM
+    assert "regardless of what category the competitor's OWN reference ad sells" in critic.CRITIC_SYSTEM
 
 
 # ---- Rule-ID coverage (drift guard): the checklist is hand-written, not generated from
@@ -71,6 +100,10 @@ def test_critic_system_cites_rule_9_next_to_competitor_marks():
 
 def test_critic_system_cites_rule_7_next_to_product_count():
     assert "(rule 7)" in critic.CRITIC_SYSTEM
+
+
+def test_critic_system_cites_rule_5_next_to_product_category():
+    assert "(rule 5)" in critic.CRITIC_SYSTEM
 
 
 def test_critic_system_cites_rule_6_next_to_text_state():
@@ -147,3 +180,27 @@ def test_check_draft_never_raises_even_on_malformed_violation_entries(monkeypatc
     monkeypatch.setattr(critic.anthropic, "Anthropic", lambda *a, **k: _FakeClient(response))
     findings = critic.check_draft(b"fake-bytes", "rules")
     assert findings == []
+
+
+# ---- has_high_confidence: the single gate condition the retry loop and the
+# "failed review" card state both key off (2026-08-05) ----
+
+def test_has_high_confidence_true_when_any_finding_is_high():
+    findings = [{"category": "x", "description": "y", "confidence": "medium"},
+                {"category": "a", "description": "b", "confidence": "high"}]
+    assert critic.has_high_confidence(findings) is True
+
+
+def test_has_high_confidence_false_when_only_medium_or_low():
+    findings = [{"category": "x", "description": "y", "confidence": "medium"}]
+    assert critic.has_high_confidence(findings) is False
+
+
+def test_has_high_confidence_false_for_empty_or_none():
+    assert critic.has_high_confidence([]) is False
+    assert critic.has_high_confidence(None) is False
+
+
+def test_has_high_confidence_case_insensitive_and_never_raises_on_malformed_entries():
+    assert critic.has_high_confidence([{"confidence": "HIGH"}]) is True
+    assert critic.has_high_confidence([{"category": "x"}]) is False

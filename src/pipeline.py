@@ -346,11 +346,25 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
 
     check_output (Prompt 4, Item 1) gates the output critic - a SAFETY control, not a
     quality feature, since every guardrail up to this point is prompt-only and nothing
-    has ever inspected what Gemini actually produced. Runs strictly AFTER save_artifact
-    (never blocks or risks losing a draft) and never fails the run: any critic failure is
-    caught, recorded as a pipeline_warning, and the card is left unflagged - never treated
-    as a finding of its own. Defaults to False - this is an extra vision call per ad, real
-    cost that multiplies across a sweep, so it's opt-in per run.
+    inspected what Gemini actually produced before this existed. Defaults to False - this
+    is an extra vision call per ad, real cost that multiplies across a sweep, so it's
+    opt-in per run.
+
+    Corrective-retry loop (2026-08-05): a HIGH-confidence critic finding on the first
+    attempt triggers exactly ONE regeneration, with the specific findings fed back into
+    the image prompt as corrections (generate_image_prompt's critic_feedback). This closes
+    the gap a real leak exposed - a draft that reproduced a competitor's product name, body
+    copy, CTA, and product category verbatim was correctly flagged at HIGH confidence on
+    every count and still saved as an ordinary-looking pending draft, because nothing ever
+    read critic_findings to decide anything. save_artifact now runs ONCE, after the loop
+    resolves (still never before generation, same "can't lose a draft" guarantee) - with
+    the retry's draft if it came back clean, or with the still-flagged draft if the retry
+    didn't fix it (never discarded, but also never left indistinguishable from a clean
+    pending draft: see output_critic.has_high_confidence, the single signal both this loop
+    and the card's "Failed Review" state key off - no new column, critic_findings' own
+    per-finding confidence is the only signal needed). A critic failure or timeout at any
+    point still can never lose a draft: it stops the loop and keeps whatever was already
+    generated, unflagged, same as the pre-retry behaviour.
 
     retheme_colours (Prompt 4, Item 5) only affects edit_mode - defaults to True, since
     the team's own doc calls for re-theming the reference's palette to Besque's on every
@@ -543,29 +557,146 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
             return "skipped"
 
         log.info("Ad %s: image generation starting (edit_mode=%s)", ad_id, edit_mode)
-        try:
-            draft_image = generate_image_prompt.generate_image(
-                blueprint, ad_id, product=product, reference_images=reference_images, angle_slug=angle_slug,
-                include_product=include_product, text_in_image=text_in_image,
-                # subtext MUST be the short image_subtext field, never primary_text: primary_text
-                # is long-form Facebook post body copy (~80 words) - passing it as subtext meant
-                # rule 6 permitted rendering the ENTIRE thing as in-scene typography against
-                # references that carried 10-20 words. image_subtext missing/empty (older copy,
-                # or Claude omitted it) falls back to headline-only, never to the paragraph.
-                headline=copy.get("headline"), subtext=copy.get("image_subtext") or None,
-                messaging_angle=messaging_angle, realism=realism,
-                body_area=body_area, offer_text=offer_text,
-                edit_mode=edit_mode, competitor_image_bytes=(image_bytes if edit_mode else None),
-                operator_instruction=operator_instruction, retheme_colours=retheme_colours,
-            )
-        except Exception as e:
-            log.error("Ad %s failed: image generation raised: %s", ad_id, e)
-            draft_image = None
-        if not draft_image:
-            log.error("Ad %s failed: no draft image produced - not saving a half-complete artifact", ad_id)
-            return "failed"
 
-        img_prompt = getattr(generate_image_prompt.generate_image, "last_prompt", "")
+        # Corrective-retry loop (2026-08-05): observe (generate) -> evaluate (critic) ->
+        # correct (feed the specific findings back) -> re-generate, capped at ONE retry.
+        # Only engages when check_output is on AND the critic returns a HIGH-confidence
+        # finding - check_output=False, or a clean/medium-only first attempt, is exactly
+        # one generate_image call, byte-for-byte today's behaviour. save_artifact now runs
+        # ONCE, after this loop resolves, with whichever attempt is final - never the
+        # pre-retry draft when a retry cleaned it up, and never silently discarding a
+        # still-flagged draft either (see the HIGH-after-retry branch below, which keeps
+        # and marks it rather than losing it). A critic failure/timeout at any point still
+        # can never lose a draft - it just stops the loop and keeps whatever was already
+        # generated, unflagged, same fallback as before this loop existed.
+        MAX_IMAGE_ATTEMPTS = 2
+        draft_image, img_prompt, findings = None, "", None
+        for image_attempt in range(1, MAX_IMAGE_ATTEMPTS + 1):
+            gen_kwargs = {}
+            if image_attempt > 1:
+                # Fail-soft, same shape as the copy retry above: feed the SPECIFIC prior
+                # violations back as corrections, not a generic "try again" - the critic's
+                # descriptions are concrete enough to be actionable (e.g. "the headline
+                # reads the competitor's product name, not the authorised one").
+                gen_kwargs["critic_feedback"] = [
+                    f"{f.get('category', '')}: {f.get('description', '')}" for f in findings
+                ]
+                log.warning(
+                    "Ad %s: output critic found high-confidence issue(s), retrying image "
+                    "generation once with corrections: %s", ad_id, findings,
+                )
+                if _stop():
+                    log.info("Ad %s: stop requested, skipping the corrective retry", ad_id)
+                    break
+            try:
+                new_draft_image = generate_image_prompt.generate_image(
+                    blueprint, ad_id, product=product, reference_images=reference_images, angle_slug=angle_slug,
+                    include_product=include_product, text_in_image=text_in_image,
+                    # subtext MUST be the short image_subtext field, never primary_text: primary_text
+                    # is long-form Facebook post body copy (~80 words) - passing it as subtext meant
+                    # rule 6 permitted rendering the ENTIRE thing as in-scene typography against
+                    # references that carried 10-20 words. image_subtext missing/empty (older copy,
+                    # or Claude omitted it) falls back to headline-only, never to the paragraph.
+                    headline=copy.get("headline"), subtext=copy.get("image_subtext") or None,
+                    messaging_angle=messaging_angle, realism=realism,
+                    body_area=body_area, offer_text=offer_text,
+                    edit_mode=edit_mode, competitor_image_bytes=(image_bytes if edit_mode else None),
+                    operator_instruction=operator_instruction, retheme_colours=retheme_colours,
+                    **gen_kwargs,
+                )
+            except Exception as e:
+                log.error("Ad %s failed: image generation raised (attempt %s/%s): %s",
+                          ad_id, image_attempt, MAX_IMAGE_ATTEMPTS, e)
+                new_draft_image = None
+            if not new_draft_image:
+                if draft_image:
+                    # The retry itself produced nothing - keep the pre-retry draft rather
+                    # than losing it; its (already HIGH) findings still stand.
+                    break
+                log.error("Ad %s failed: no draft image produced - not saving a half-complete artifact", ad_id)
+                return "failed"
+            draft_image = new_draft_image
+            img_prompt = getattr(generate_image_prompt.generate_image, "last_prompt", "")
+
+            if not check_output:
+                break  # critic disabled - one generation, no findings, today's behaviour
+
+            # Strictly after generation - the draft already exists in memory/on disk
+            # before this ever runs. Wrapped in its own try/except (on top of
+            # check_draft's own internal never-raises contract) as defense in depth: even
+            # a bug in this block (e.g. the draft file missing on disk) must never fail an
+            # otherwise-successful run or cost this ad its draft.
+            try:
+                from pathlib import Path as _Path
+                draft_bytes = _Path(draft_image).read_bytes()
+                # effective_include_product, not the raw operator toggle - the critic must
+                # be told the SAME product-presence rule the generator was actually given
+                # (build_image_prompt resolved this identically for this blueprint), never
+                # the pre-override value. Same asymmetry class as the text_in_image fix
+                # below - this was the OTHER live false positive ("Missing authorised
+                # product" on a run where none was ever authorised).
+                brand_rules_text = generate_image_prompt.brand_rules(
+                    include_product=effective_include_product, text_in_image=text_in_image,
+                    headline=copy.get("headline"), subtext=copy.get("image_subtext") or None,
+                    edit_mode=edit_mode,
+                )
+                # The critic must never be told something the generator wasn't told (a
+                # real HIGH "Missing authorised text" false positive, 2026-08-04): rule 6
+                # above gates the headline/subtext it permits on text_in_image via
+                # effective_authorised_text - the critic's own authorised-text line must
+                # be built from the SAME call, not a second, independent truthy check on
+                # copy.get("headline") alone (which is always truthy regardless of
+                # text_in_image - generate_copy_live produces a headline whether or not
+                # the operator asked for it in-image).
+                critic_headline, critic_subtext = generate_image_prompt.effective_authorised_text(
+                    text_in_image, copy.get("headline"), copy.get("image_subtext") or None,
+                )
+                log.info("Ad %s: output critic starting (attempt %s/%s)", ad_id, image_attempt, MAX_IMAGE_ATTEMPTS)
+                findings = output_critic.check_draft(
+                    draft_bytes, brand_rules_text, headline=critic_headline,
+                    subtext=critic_subtext, offer_text=offer_text,
+                    include_product=effective_include_product,
+                    # PART 1G (2026-08-06): the critic must be told the SAME documented
+                    # bottle facts build_image_prompt's product_clause already gives the
+                    # generator - without this, it has no way to tell the real, verified
+                    # label sub-lines from invented/leaked text and judges purely off rule
+                    # 1's bare "name only" wording, which is exactly what produced a false
+                    # positive on the L'Occitane run's own (correct) label.
+                    visual_description=(product or {}).get("visual_description"),
+                    ingredients=(product or {}).get("ingredients"),
+                )
+            except Exception as e:
+                log.warning("Ad %s: output critic block raised (%s: %s), draft left unflagged",
+                            ad_id, type(e).__name__, e)
+                findings = None
+
+            if findings is None:
+                dedupe.init_pipeline_warnings()
+                dedupe.record_warning(
+                    "critic_failed",
+                    f"Ad {ad_id} ({ad.get('page_name', '?')}): output critic check "
+                    f"failed or was unparseable - draft saved and shown unflagged, "
+                    f"not automatically re-checked.",
+                )
+                break
+            if not output_critic.has_high_confidence(findings):
+                break  # clean, or medium/low only - keep this draft
+            if image_attempt >= MAX_IMAGE_ATTEMPTS:
+                # Retry exhausted and still HIGH: never discard the draft, but it must
+                # never sit in the pending queue looking clean either - findings (already
+                # holding the HIGH entries) is exactly what dashboard.html's card keys off
+                # to show "Failed Review" instead of a normal pending card.
+                dedupe.init_pipeline_warnings()
+                dedupe.record_warning(
+                    "critic_high_after_retry",
+                    f"Ad {ad_id} ({ad.get('page_name', '?')}): output critic still found "
+                    f"high-confidence issue(s) after one corrective retry - draft saved "
+                    f"but marked failed review: {findings}",
+                )
+                break
+            # HIGH finding(s), and a retry remains - loop continues into the next
+            # attempt, which feeds `findings` back as gen_kwargs["critic_feedback"] above.
+
         cp_prompt = getattr(generate_copy.generate_copy_live, "last_prompt", "")
         dedupe.save_artifact(
             ad_id=ad_id,
@@ -593,57 +724,11 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
             # regenerate passes an explicit True, per Item 7b.
             regenerate=(regenerate if explicit_selection else None),
         )
-
-        if check_output:
-            # Strictly AFTER save_artifact - the draft is already safely persisted before
-            # this ever runs, so nothing here can lose it. Wrapped in its own try/except
-            # (on top of check_draft's own internal never-raises contract) as defense in
-            # depth: even a bug in THIS block (e.g. the draft file missing on disk) must
-            # never fail an otherwise-successful run.
-            try:
-                from pathlib import Path as _Path
-                draft_bytes = _Path(draft_image).read_bytes()
-                # effective_include_product, not the raw operator toggle - the critic must
-                # be told the SAME product-presence rule the generator was actually given
-                # (build_image_prompt resolved this identically for this blueprint), never
-                # the pre-override value. Same asymmetry class as the text_in_image fix
-                # below - this was the OTHER live false positive ("Missing authorised
-                # product" on a run where none was ever authorised).
-                brand_rules_text = generate_image_prompt.brand_rules(
-                    include_product=effective_include_product, text_in_image=text_in_image,
-                    headline=copy.get("headline"), subtext=copy.get("image_subtext") or None,
-                    edit_mode=edit_mode,
-                )
-                # The critic must never be told something the generator wasn't told (a
-                # real HIGH "Missing authorised text" false positive, 2026-08-04): rule 6
-                # above gates the headline/subtext it permits on text_in_image via
-                # effective_authorised_text - the critic's own authorised-text line must
-                # be built from the SAME call, not a second, independent truthy check on
-                # copy.get("headline") alone (which is always truthy regardless of
-                # text_in_image - generate_copy_live produces a headline whether or not
-                # the operator asked for it in-image).
-                critic_headline, critic_subtext = generate_image_prompt.effective_authorised_text(
-                    text_in_image, copy.get("headline"), copy.get("image_subtext") or None,
-                )
-                log.info("Ad %s: output critic starting", ad_id)
-                findings = output_critic.check_draft(
-                    draft_bytes, brand_rules_text, headline=critic_headline,
-                    subtext=critic_subtext, offer_text=offer_text,
-                    include_product=effective_include_product,
-                )
-                if findings is None:
-                    dedupe.init_pipeline_warnings()
-                    dedupe.record_warning(
-                        "critic_failed",
-                        f"Ad {ad_id} ({ad.get('page_name', '?')}): output critic check "
-                        f"failed or was unparseable - draft saved and shown unflagged, "
-                        f"not automatically re-checked.",
-                    )
-                else:
-                    dedupe.update_artifact_findings(ad_id, findings, angle_id=angle_id)
-            except Exception as e:
-                log.warning("Ad %s: output critic block raised (%s: %s), draft left unflagged",
-                            ad_id, type(e).__name__, e)
+        # findings is None when check_output was off, or the critic never produced a
+        # verdict (failure/timeout) - distinct from an empty list (checked, clean), which
+        # still needs writing so critic_findings reflects an actual clean check.
+        if findings is not None:
+            dedupe.update_artifact_findings(ad_id, findings, angle_id=angle_id)
 
         dedupe.mark_seen(ad_id, ad.get("page_name", ""), angle_id)
 

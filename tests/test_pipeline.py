@@ -940,6 +940,216 @@ def test_process_ad_warns_when_text_in_image_requested_but_headline_missing(monk
     assert any(kind == "text_in_image_no_headline" for kind, detail in warnings)
 
 
+# ---- Corrective-retry loop (2026-08-05/06): observe (generate) -> evaluate (critic) ->
+# correct (feed findings back) -> re-generate, capped at ONE retry. Real bug this closes:
+# a real draft reproduced a competitor's product name, body copy, CTA, and product
+# category verbatim, was correctly flagged HIGH on all 8 counts, and was still saved as an
+# ordinary-looking pending draft - the critic was reporting, not gating.
+#
+# These 5 tests stub every dedupe DB touchpoint (not just save_artifact, unlike
+# _mock_all_stages above) so they give real signal about pipeline.py's control flow with
+# no live Postgres reachable - this sandbox has none, and chunk 7's real test-db is out of
+# scope for today. Nothing here talks to a database, real or fake.
+
+def _mock_dedupe_db(monkeypatch):
+    monkeypatch.setattr(pipeline.dedupe, "init_db", lambda: None)
+    monkeypatch.setattr(pipeline.dedupe, "init_artifacts", lambda: None)
+    monkeypatch.setattr(pipeline.dedupe, "init_pipeline_warnings", lambda: None)
+    monkeypatch.setattr(pipeline.dedupe, "is_new", lambda ad_id, angle_id=None: True)
+    monkeypatch.setattr(pipeline.dedupe, "mark_seen", lambda *a, **k: None)
+
+
+def _mock_ad_and_early_stages(monkeypatch):
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+          "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    monkeypatch.setattr(pipeline.assets, "download_image", lambda url, aid: "fake.jpg")
+    monkeypatch.setattr(pipeline.assets, "download_image_bytes", lambda url: b"fake-bytes")
+    monkeypatch.setattr(pipeline.deconstruct, "deconstruct_image", lambda **k: {"format": "hero", "angle": "a"})
+    monkeypatch.setattr(pipeline.generate_copy, "generate_copy_live",
+                        lambda bp, product=None, **k: {"headline": "H", "primary_text": "P",
+                                                         "image_subtext": "S", "cta": "C"})
+    monkeypatch.setattr(pipeline.compliance, "check_compliance", lambda copy, name, text, **k: (True, []))
+    return ad_id, ad
+
+
+# Test 1/5: one HIGH finding -> exactly one regenerate call, and the critic's own
+# findings are present in the corrections passed to that regenerate call. Deliberately
+# does NOT use _mock_all_stages - generate_image is a custom fake that distinguishes the
+# pre-retry vs post-retry call by inspecting critic_feedback itself, which a blanket stub
+# returning one fixed value could never prove.
+def test_process_ad_one_high_finding_triggers_exactly_one_retry_with_corrections(monkeypatch, tmp_path):
+    _mock_dedupe_db(monkeypatch)
+    ad_id, ad = _mock_ad_and_early_stages(monkeypatch)
+    saved = {}
+    monkeypatch.setattr(pipeline.dedupe, "save_artifact", lambda **k: saved.update(k))
+    findings_calls = []
+    monkeypatch.setattr(pipeline.dedupe, "update_artifact_findings",
+                        lambda ad_id, findings, angle_id=None: findings_calls.append(findings))
+
+    draft_v1 = tmp_path / "draft_v1.png"
+    draft_v1.write_bytes(b"\x89PNG\r\n\x1a\nv1")
+    draft_v2 = tmp_path / "draft_v2.png"
+    draft_v2.write_bytes(b"\x89PNG\r\n\x1a\nv2")
+
+    gen_calls = []
+    def fake_generate_image(bp, aid, product=None, reference_images=None, **k):
+        gen_calls.append(k)
+        return str(draft_v2) if k.get("critic_feedback") else str(draft_v1)
+    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image", fake_generate_image)
+
+    check_calls = []
+    def fake_check_draft(image_bytes, brand_rules_text, **k):
+        check_calls.append(image_bytes)
+        if len(check_calls) == 1:
+            return [{"category": "product category mismatch",
+                     "description": "rendered a mist instead of the authorised body oil",
+                     "confidence": "high"}]
+        return []  # the retry came back clean
+    monkeypatch.setattr(pipeline.output_critic, "check_draft", fake_check_draft)
+
+    assert pipeline.process_ad(ad, check_output=True) == "processed"
+    assert len(gen_calls) == 2  # attempt 1 + exactly one retry
+    assert gen_calls[0].get("critic_feedback") is None
+    assert gen_calls[1]["critic_feedback"] == [
+        "product category mismatch: rendered a mist instead of the authorised body oil"
+    ]
+    assert saved["draft_image"] == str(draft_v2)  # the clean retry, not the flagged v1
+    assert findings_calls == [[]]  # final findings are the clean retry's
+
+
+# Test 2/5: the retry still comes back HIGH -> the draft is saved (never discarded) but
+# must not look like a normal pending draft - proven both by its persisted
+# critic_findings AND by its actual absence from dedupe.get_pending_artifacts, exercised
+# for real against an in-memory fake table, not asserted by reading the source.
+def test_process_ad_retry_still_high_persists_as_failed_review_and_excluded_from_pending(monkeypatch, tmp_path):
+    _mock_dedupe_db(monkeypatch)
+    ad_id, ad = _mock_ad_and_early_stages(monkeypatch)
+    warnings = []
+    monkeypatch.setattr(pipeline.dedupe, "record_warning", lambda kind, detail: warnings.append((kind, detail)))
+
+    draft_path = tmp_path / "draft.png"
+    draft_path.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image",
+                        lambda bp, aid, product=None, reference_images=None, **k: str(draft_path))
+
+    high_finding = [{"category": "unauthorised text", "description": "competitor headline survived",
+                      "confidence": "high"}]
+    monkeypatch.setattr(pipeline.output_critic, "check_draft", lambda *a, **k: high_finding)
+
+    fake_rows = {}
+    def fake_save_artifact(**k):
+        fake_rows[k["ad_id"]] = {**k, "critic_findings": [], "decision": None}
+    def fake_update_artifact_findings(aid, findings, angle_id=None):
+        fake_rows[aid]["critic_findings"] = findings
+    monkeypatch.setattr(pipeline.dedupe, "save_artifact", fake_save_artifact)
+    monkeypatch.setattr(pipeline.dedupe, "update_artifact_findings", fake_update_artifact_findings)
+    monkeypatch.setattr(dedupe, "get_artifacts_full", lambda limit=500: list(fake_rows.values()))
+
+    assert pipeline.process_ad(ad, check_output=True) == "processed"
+    assert fake_rows[ad_id]["draft_image"] == str(draft_path)  # saved, never discarded
+    assert fake_rows[ad_id]["critic_findings"] == high_finding
+    assert any(kind == "critic_high_after_retry" for kind, detail in warnings)
+
+    pending = dedupe.get_pending_artifacts()
+    assert all(a["ad_id"] != ad_id for a in pending)  # absent from the real pending-queue query
+
+
+# Test 3/5: the retry succeeding persists a normal, unflagged draft - no different from a
+# draft that was clean on the first attempt.
+def test_process_ad_retry_comes_back_clean_persists_normally(monkeypatch, tmp_path):
+    _mock_dedupe_db(monkeypatch)
+    ad_id, ad = _mock_ad_and_early_stages(monkeypatch)
+    saved = {}
+    monkeypatch.setattr(pipeline.dedupe, "save_artifact", lambda **k: saved.update(k))
+    findings_calls = []
+    monkeypatch.setattr(pipeline.dedupe, "update_artifact_findings",
+                        lambda ad_id, findings, angle_id=None: findings_calls.append(findings))
+    warnings = []
+    monkeypatch.setattr(pipeline.dedupe, "record_warning", lambda kind, detail: warnings.append((kind, detail)))
+
+    draft_path = tmp_path / "draft.png"
+    draft_path.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image",
+                        lambda bp, aid, product=None, reference_images=None, **k: str(draft_path))
+
+    check_calls = []
+    def fake_check_draft(*a, **k):
+        check_calls.append(1)
+        if len(check_calls) == 1:
+            return [{"category": "efficacy claim", "description": "unapproved percentage", "confidence": "high"}]
+        return []
+    monkeypatch.setattr(pipeline.output_critic, "check_draft", fake_check_draft)
+
+    assert pipeline.process_ad(ad, check_output=True) == "processed"
+    assert len(check_calls) == 2  # first attempt flagged, retry re-checked
+    assert findings_calls == [[]]
+    assert not any(kind == "critic_high_after_retry" for kind, detail in warnings)
+    assert saved["draft_image"] == str(draft_path)
+
+
+# Test 4/5: a HIGH finding on the RETRY's own output must never trigger a second retry -
+# the cap is exactly one, proven by call COUNT on both generate_image and check_draft, not
+# by reading MAX_IMAGE_ATTEMPTS in the source.
+def test_process_ad_retry_still_high_never_triggers_a_second_retry(monkeypatch, tmp_path):
+    _mock_dedupe_db(monkeypatch)
+    ad_id, ad = _mock_ad_and_early_stages(monkeypatch)
+    monkeypatch.setattr(pipeline.dedupe, "save_artifact", lambda **k: None)
+    monkeypatch.setattr(pipeline.dedupe, "update_artifact_findings", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline.dedupe, "record_warning", lambda *a, **k: None)
+
+    draft_path = tmp_path / "draft.png"
+    draft_path.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+    gen_calls = []
+    def fake_generate_image(bp, aid, product=None, reference_images=None, **k):
+        gen_calls.append(1)
+        return str(draft_path)
+    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image", fake_generate_image)
+
+    check_calls = []
+    high = [{"category": "unauthorised text", "description": "still wrong", "confidence": "high"}]
+    def fake_check_draft(*a, **k):
+        check_calls.append(1)
+        return high
+    monkeypatch.setattr(pipeline.output_critic, "check_draft", fake_check_draft)
+
+    assert pipeline.process_ad(ad, check_output=True) == "processed"
+    assert len(gen_calls) == 2    # attempt 1 + exactly one retry, never a third
+    assert len(check_calls) == 2  # both attempts checked, never a third check
+
+
+# Test 5/5: a critic EXCEPTION (not check_draft's normal None-on-failure return, an actual
+# raise reaching pipeline's own try/except around the call) must never lose the draft or
+# trigger a retry it has no verdict to justify.
+def test_process_ad_critic_exception_saves_draft_without_retrying(monkeypatch, tmp_path):
+    _mock_dedupe_db(monkeypatch)
+    ad_id, ad = _mock_ad_and_early_stages(monkeypatch)
+    saved = {}
+    monkeypatch.setattr(pipeline.dedupe, "save_artifact", lambda **k: saved.update(k))
+    findings_calls = []
+    monkeypatch.setattr(pipeline.dedupe, "update_artifact_findings", lambda *a, **k: findings_calls.append(1))
+    warnings = []
+    monkeypatch.setattr(pipeline.dedupe, "record_warning", lambda kind, detail: warnings.append((kind, detail)))
+
+    draft_path = tmp_path / "draft.png"
+    draft_path.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+    gen_calls = []
+    def fake_generate_image(bp, aid, product=None, reference_images=None, **k):
+        gen_calls.append(1)
+        return str(draft_path)
+    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image", fake_generate_image)
+
+    def boom(*a, **k):
+        raise RuntimeError("critic API unavailable")
+    monkeypatch.setattr(pipeline.output_critic, "check_draft", boom)
+
+    assert pipeline.process_ad(ad, check_output=True) == "processed"
+    assert len(gen_calls) == 1  # no retry - the critic never returned a verdict to correct against
+    assert saved["draft_image"] == str(draft_path)  # nothing lost
+    assert findings_calls == []  # never flagged - a failed check is not a finding
+    assert any(kind == "critic_failed" for kind, detail in warnings)
+
+
 def test_effective_image_keys_prefers_multi_image_set():
     product = {"image_key": "legacy.png", "image_keys": ["a.png", "b.png"]}
     assert pipeline.effective_image_keys(product) == ["a.png", "b.png"]

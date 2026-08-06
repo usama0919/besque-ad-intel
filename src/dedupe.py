@@ -317,6 +317,19 @@ def get_artifacts_full(limit=50):
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
+def get_pending_artifacts(limit=500):
+    """The actual pending-review queue - get_artifacts_full's rows, minus any draft the
+    critic retry loop (pipeline.process_ad's MAX_IMAGE_ATTEMPTS) still found HIGH-confidence
+    after its one corrective retry. No new column: output_critic.has_high_confidence reads
+    the same critic_findings every other caller already does, so a still-flagged draft is
+    excluded here purely in Python, in-process - it's never presented as clean, but it's
+    also never lost; a reviewer can still find it (it's in get_artifacts_full, just not
+    here)."""
+    from src import output_critic
+    return [a for a in get_artifacts_full(limit=limit)
+            if not output_critic.has_high_confidence(a.get("critic_findings") or [])]
+
+
 # ---- Products library ----
 
 def init_products():
