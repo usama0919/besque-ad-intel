@@ -116,6 +116,12 @@
     </select>
   </div>
   <div class="field-group">
+    <label class="field-label" for="realismSelect" title="Constrained to validator.production_styles() - the same enum a blueprint's production_style.style and STYLE_GUIDANCE's keys are checked against. Pre-filled from the selected angle's default_realism; the operator can override per run.">Realism</label>
+    <select id="realismSelect">
+      <option value="">(auto)</option>
+    </select>
+  </div>
+  <div class="field-group">
     <label class="field-label" for="bodyAreaInput">Body area (per-run)</label>
     <input type="text" id="bodyAreaInput" list="bodyAreaSuggestions" placeholder="varies per run">
     <datalist id="bodyAreaSuggestions">
@@ -246,15 +252,29 @@ async function loadAngles(){
   if(data.some(a => String(a.id) === prev)){ sel.value = prev; }
 }
 
-// angle.body_area is a UI PRE-FILL SUGGESTION ONLY (same rule as the main
-// dashboard's onAngleChange) - changing the angle re-suggests it, but the
-// operator can freely overwrite the input afterward, and Generate always reads
-// whatever's in the box at click time, never the angle's stored value directly
-// (Chunk 5, Item 2 - process_ad never reads messaging_angle["body_area"] either).
+// item 2 (2026-08-06): the realism dropdown itself - constrained to
+// validator.production_styles() via GET /api/production_styles, never free text,
+// so a typo or a stale value can't reach the generator as something a blueprint's
+// production_style.style/STYLE_GUIDANCE could never match.
+async function loadProductionStyles(){
+  const r = await fetch('/api/production_styles');
+  const styles = await r.json();
+  const sel = document.getElementById('realismSelect');
+  sel.innerHTML = '<option value="">(auto)</option>'
+    + styles.map(s => `<option value="${s}">${s}</option>`).join('');
+}
+
+// angle.body_area/default_realism are UI PRE-FILL SUGGESTIONS ONLY (same rule as
+// the main dashboard's onAngleChange) - changing the angle re-suggests both, but
+// the operator can freely overwrite either input afterward, and Generate always
+// reads whatever's in the box/select at click time, never the angle's stored
+// value directly (Chunk 5, Item 2 - process_ad never reads
+// messaging_angle["body_area"]/["default_realism"] either).
 function onAngleChange(){
   const sel = document.getElementById('angleSelect');
   const angle = _anglesCache.find(a => String(a.id) === sel.value);
   document.getElementById('bodyAreaInput').value = angle ? (angle.body_area || '') : '';
+  document.getElementById('realismSelect').value = angle ? (angle.default_realism || '') : '';
   loadGrid();  // already_generated is angle-specific - re-check the new angle
 }
 
@@ -476,6 +496,7 @@ async function generateSelection(){
   const editMode = document.getElementById('editModeToggle').checked;
   const checkOutput = document.getElementById('checkOutputToggle').checked;
   const rethemeColours = document.getElementById('rethemeColoursToggle').checked;
+  const realism = document.getElementById('realismSelect').value;
 
   _generateRunning = true;
   document.getElementById('generateBtn').disabled = true;
@@ -490,7 +511,7 @@ async function generateSelection(){
       offer_text: offerText || null, instruction: instruction || null,
       product_id: selectedProductId, regenerate,
       text_in_image: textInImage, include_product: includeProduct, edit_mode: editMode,
-      check_output: checkOutput, retheme_colours: rethemeColours,
+      check_output: checkOutput, retheme_colours: rethemeColours, realism: realism || null,
     }),
   });
   const body = await r.json();
@@ -557,6 +578,7 @@ function loadOperatorInstruction(){
 loadCompetitors().then(restoreSelectedCompetitor);
 loadProducts();
 loadAngles();
+loadProductionStyles();
 loadOperatorInstruction();
 </script>
 </body>

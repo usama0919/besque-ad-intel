@@ -172,6 +172,65 @@ def test_api_generate_toggle_defaults_match_dashboard_run_strip(monkeypatch):
         _cleanup(cid, [ad_id])
 
 
+# ---- item 2 (2026-08-06): realism reaches generate_from_selection, constrained to
+# validator.production_styles() - the pool run-strip dropdown's whole point ----
+
+def test_api_generate_realism_reaches_generate_from_selection(monkeypatch):
+    cid = _make_competitor()
+    ad_id = _seed_scraped_ad(cid)
+    captured = {}
+
+    def fake_generate_from_selection(ad_ids, **kwargs):
+        captured.update(kwargs)
+        return {"processed": 0, "skipped": 0, "failed": 0, "already_generated": 0, "by_ad": {}}
+    monkeypatch.setattr(pipeline, "generate_from_selection", fake_generate_from_selection)
+    try:
+        client = TestClient(dashboard.app)
+        r = client.post("/api/generate", json={"ad_ids": [ad_id], "realism": "illustrated"})
+        assert r.status_code == 200
+        _join_generate_thread()
+        assert captured["realism"] == "illustrated"
+    finally:
+        _cleanup(cid, [ad_id])
+
+
+def test_api_generate_realism_omitted_defaults_to_none(monkeypatch):
+    cid = _make_competitor()
+    ad_id = _seed_scraped_ad(cid)
+    captured = {}
+
+    def fake_generate_from_selection(ad_ids, **kwargs):
+        captured.update(kwargs)
+        return {"processed": 0, "skipped": 0, "failed": 0, "already_generated": 0, "by_ad": {}}
+    monkeypatch.setattr(pipeline, "generate_from_selection", fake_generate_from_selection)
+    try:
+        client = TestClient(dashboard.app)
+        r = client.post("/api/generate", json={"ad_ids": [ad_id]})
+        assert r.status_code == 200
+        _join_generate_thread()
+        assert captured["realism"] is None
+    finally:
+        _cleanup(cid, [ad_id])
+
+
+def test_api_generate_rejects_invalid_realism():
+    """Constrained dropdown, not free text - an unrecognised value must never reach
+    generate_from_selection/process_ad, where it would silently fail to match any
+    STYLE_GUIDANCE key and produce (auto) behaviour with no signal why."""
+    client = TestClient(dashboard.app)
+    r = client.post("/api/generate", json={"ad_ids": ["X"], "realism": "cartoonish"})
+    assert r.status_code == 400
+    assert "realism" in r.json()["error"]
+
+
+def test_api_production_styles_matches_validator():
+    client = TestClient(dashboard.app)
+    r = client.get("/api/production_styles")
+    assert r.status_code == 200
+    from src import validator
+    assert r.json() == validator.production_styles()
+
+
 def test_api_generate_product_scoping_respected(monkeypatch):
     """product_id must reach generate_from_selection (and from there, process_ad's
     product/reference_images) - a real product row, not a constant."""

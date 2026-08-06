@@ -89,6 +89,118 @@ def test_generate_from_selection_toggle_defaults_match_process_ad():
     assert sig.parameters["edit_mode"].default is False
     assert sig.parameters["check_output"].default is False
     assert sig.parameters["retheme_colours"].default is True
+    assert sig.parameters["realism"].default is None
+
+
+# ---- item 2 (2026-08-06): realism reaches process_ad - every draft generated through
+# this path previously ran with realism=None regardless of what pool.html's operator
+# picked, because pool.html had no control for it at all ----
+
+def test_generate_from_selection_forwards_realism_to_process_ad(monkeypatch):
+    cid = _make_competitor()
+    ad_id = _seed_scraped_ad(cid)
+    captured = {}
+
+    def fake_process_ad(ad, **kwargs):
+        captured.update(kwargs)
+        return "processed"
+    monkeypatch.setattr(pipeline, "process_ad", fake_process_ad)
+    try:
+        pipeline.generate_from_selection([ad_id], realism="illustrated")
+        assert captured["realism"] == "illustrated"
+    finally:
+        _cleanup(cid, [ad_id])
+
+
+def test_generate_from_selection_realism_omitted_forwards_none(monkeypatch):
+    cid = _make_competitor()
+    ad_id = _seed_scraped_ad(cid)
+    captured = {}
+
+    def fake_process_ad(ad, **kwargs):
+        captured.update(kwargs)
+        return "processed"
+    monkeypatch.setattr(pipeline, "process_ad", fake_process_ad)
+    try:
+        pipeline.generate_from_selection([ad_id])
+        assert captured["realism"] is None
+    finally:
+        _cleanup(cid, [ad_id])
+
+
+# ---- item 4 (2026-08-06): product scope guard - refused BEFORE any paid call, for the
+# WHOLE selection, with a clear reason - never a silent per-ad skip. Fully DB-independent
+# (every dedupe touchpoint stubbed) so this gives real signal with no Postgres reachable. ----
+
+def _mock_dedupe_for_scope_guard(monkeypatch, product=None):
+    monkeypatch.setattr(pipeline.dedupe, "init_db", lambda: None)
+    monkeypatch.setattr(pipeline.dedupe, "init_artifacts", lambda: None)
+    monkeypatch.setattr(pipeline.dedupe, "init_scraped_ads", lambda: None)
+    monkeypatch.setattr(pipeline.dedupe, "init_angles", lambda: None)
+    monkeypatch.setattr(pipeline.dedupe, "init_products", lambda: None)
+    monkeypatch.setattr(pipeline.dedupe, "init_pipeline_warnings", lambda: None)
+    monkeypatch.setattr(pipeline.dedupe, "get_product", lambda pid: product)
+    monkeypatch.setattr(pipeline.dedupe, "get_angle", lambda aid: None)
+    # validate_config is imported LOCALLY inside generate_from_selection
+    # (from src.config_check import validate_config), re-resolved from the module's
+    # namespace at call time - patching the module attribute here is what actually
+    # reaches it, not patching a (nonexistent) pipeline.validate_config.
+    from src import config_check
+    monkeypatch.setattr(config_check, "validate_config", lambda: None)
+
+
+def test_generate_from_selection_refuses_out_of_scope_product(monkeypatch):
+    warnings = []
+    monkeypatch.setattr(pipeline.dedupe, "record_warning", lambda kind, detail: warnings.append((kind, detail)))
+    _mock_dedupe_for_scope_guard(monkeypatch, product={"id": 2, "name": "Besque Shower Oil"})
+    process_ad_calls = []
+    monkeypatch.setattr(pipeline, "process_ad", lambda *a, **k: process_ad_calls.append(1) or "processed")
+
+    result = pipeline.generate_from_selection(["AD1", "AD2"], product_id=2)
+
+    assert result["failed"] == 2
+    assert result["processed"] == 0
+    assert result["by_ad"] == {"AD1": "failed", "AD2": "failed"}
+    assert "error" in result and "Besque Shower Oil" in result["error"]
+    assert process_ad_calls == []  # refused before any paid call, not one ad even attempted
+    assert warnings and warnings[0][0] == "product_scope_refused"
+    assert "Besque Shower Oil" in warnings[0][1]
+
+
+def test_generate_from_selection_reports_refusal_per_ad_via_on_ad_done(monkeypatch):
+    """Never a silent skip - the SAME on_ad_done callback dashboard.py's job-progress
+    polling relies on must fire "failed" for every ad, not just the aggregate counts."""
+    monkeypatch.setattr(pipeline.dedupe, "record_warning", lambda *a, **k: None)
+    _mock_dedupe_for_scope_guard(monkeypatch, product={"id": 2, "name": "Besque Shower Oil"})
+    seen = []
+    pipeline.generate_from_selection(["AD1"], product_id=2, on_ad_done=lambda aid, r: seen.append((aid, r)))
+    assert seen == [("AD1", "failed")]
+
+
+def test_generate_from_selection_allows_enabled_product(monkeypatch):
+    """product_id=1 (Magic Body Oil) must pass the guard and reach the real selection
+    loop - proven by get_scraped_ads_by_ad_ids actually being called, not just the
+    absence of a refusal."""
+    monkeypatch.setattr(pipeline.dedupe, "record_warning", lambda *a, **k: None)
+    _mock_dedupe_for_scope_guard(monkeypatch, product={"id": 1, "name": "Besque Magic Body Oil"})
+    calls = []
+    monkeypatch.setattr(pipeline.dedupe, "get_scraped_ads_by_ad_ids", lambda ad_ids: calls.append(ad_ids) or {})
+
+    result = pipeline.generate_from_selection(["AD1"], product_id=1)
+    assert calls == [["AD1"]]
+    assert result["failed"] == 1  # AD1 not found in scraped_ads (mocked empty) - a
+    # different, unrelated failure reason, proving the guard itself didn't fire
+
+
+def test_generate_from_selection_no_product_id_is_unaffected(monkeypatch):
+    """product_id=None (no product selected at all) must never trip the guard."""
+    monkeypatch.setattr(pipeline.dedupe, "record_warning", lambda *a, **k: None)
+    _mock_dedupe_for_scope_guard(monkeypatch, product=None)
+    calls = []
+    monkeypatch.setattr(pipeline.dedupe, "get_scraped_ads_by_ad_ids", lambda ad_ids: calls.append(ad_ids) or {})
+
+    pipeline.generate_from_selection(["AD1"])
+    assert calls == [["AD1"]]
 
 
 # ---- Item 8: selection of one ad generates exactly one ----

@@ -10,6 +10,16 @@ from src.retry import with_retry
 
 FORCE_REPROCESS = os.getenv("FORCE_REPROCESS") == "1"
 
+# Product scope guard (2026-08-06, item 4): Magic Body Oil (id 1) is the only product
+# live for generation today - Besque Shower Oil (id 2) is a DIFFERENT product with its
+# own cutout and its own visual_description, has no image_keys/visual_description
+# configured yet, and must never be selectable as a reference for a Magic Body Oil ad.
+# Scoped by product_id, never a name/category match - pool.html's product picker listed
+# every product with nothing stopping an operator from selecting the wrong one, and
+# nothing downstream validated it either. Expansion is a config change (add the id to
+# this set) once a product is genuinely ready, never a code change or a name check.
+ENABLED_PRODUCT_IDS_FOR_GENERATION = {1}
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("pipeline")
 log.info("FORCE_REPROCESS=%s", FORCE_REPROCESS)
@@ -122,7 +132,7 @@ def generate_from_selection(ad_ids, angle_id=None, body_area=None, offer_text=No
                              instruction=None, product_id=None, should_stop=None,
                              regenerate=False, on_ad_done=None,
                              text_in_image=False, include_product=True, edit_mode=False,
-                             check_output=False, retheme_colours=True):
+                             check_output=False, retheme_colours=True, realism=None):
     """Generate drafts for an EXPLICIT list of already-fetched ads, rather than
     driving generation off scrape order. No Apify call - fetch_pool already
     stored the pool; this only reads scraped_ads and calls process_ad per
@@ -147,8 +157,15 @@ def generate_from_selection(ad_ids, angle_id=None, body_area=None, offer_text=No
     same names and same defaults as process_ad/run_once already use - a live run
     produced images with no baked-in copy because this function silently fell
     back to process_ad's text_in_image=False default with no way for the
-    operator to override it (pool.html had no toggle for it at all). realism is
-    still NOT threaded - no pool.html control for it yet.
+    operator to override it (pool.html had no toggle for it at all).
+
+    realism (2026-08-06, item 2): every one of the four STYLE_GUIDANCE registers exists
+    and is reachable in the generator - the actual gap was that pool.html had no control
+    for it at all, so every draft generated through this path ran with realism=None.
+    With an angle selected, that falls back to the reference's own detected
+    production_style (the writer's effective_realism logic), never to silence - but an
+    operator could never override it. Forwarded straight through to process_ad, same
+    name, same default.
 
     should_stop, if given, is checked BETWEEN ads (same as run_once) AND is
     forwarded into process_ad, which checks it once more immediately before the
@@ -165,6 +182,14 @@ def generate_from_selection(ad_ids, angle_id=None, body_area=None, offer_text=No
     "surface per-ad progress" requirement. Exceptions from this callback are
     swallowed (logged, not raised) - a progress-reporting bug must never abort an
     otherwise-successful generation.
+
+    product_id is checked against ENABLED_PRODUCT_IDS_FOR_GENERATION (item 4, 2026-08-06)
+    before anything else runs - an out-of-scope product refuses the WHOLE selection with
+    every ad marked "failed" and a "product_scope_refused" pipeline_warning naming why,
+    never a silent per-ad skip. Found unguarded: pool.html's product picker lists every
+    product with nothing stopping an operator selecting Besque Shower Oil (a different
+    product, its own cutout/visual_description, not yet configured) for what's meant to
+    be a Magic Body Oil ad.
 
     Explicit selection deliberately overrides the seen_ads skip
     (process_ad(explicit_selection=True)) - the operator picked this ad on
@@ -200,7 +225,41 @@ def generate_from_selection(ad_ids, angle_id=None, body_area=None, offer_text=No
     dedupe.init_angles()
     dedupe.init_products()
 
+    def _report(ad_id, result):
+        if on_ad_done is None:
+            return
+        try:
+            on_ad_done(ad_id, result)
+        except Exception as e:
+            log.warning("generate_from_selection: on_ad_done callback raised for %s (%s: %s), ignored",
+                        ad_id, type(e).__name__, e)
+
     product = dedupe.get_product(product_id) if product_id else None
+
+    # Product scope guard (item 4): refused BEFORE any paid call, for the WHOLE
+    # selection - every ad in a batch shares the same product_id, so one check here
+    # covers all of them rather than each ad failing individually with no visible
+    # reason. Ahead of fetch_reference_images deliberately: an out-of-scope product
+    # must not even trigger a GCS reference-photo lookup. A pipeline_warning is the
+    # reason a human actually sees (dashboard.py doesn't read this function's return
+    # value for anything but counts - see the pipeline_warnings note elsewhere in
+    # this file), never a silent skip.
+    if product_id is not None and product_id not in ENABLED_PRODUCT_IDS_FOR_GENERATION:
+        reason = (
+            f"product_id={product_id} ({product.get('name') if product else 'unknown product'}) "
+            f"is not enabled for generation - only {sorted(ENABLED_PRODUCT_IDS_FOR_GENERATION)} "
+            f"is live today. Refused before any paid call; nothing was generated."
+        )
+        log.warning("generate_from_selection refused: %s", reason)
+        dedupe.init_pipeline_warnings()
+        dedupe.record_warning("product_scope_refused", reason)
+        summary = {"processed": 0, "skipped": 0, "failed": len(ad_ids), "already_generated": 0,
+                   "by_ad": {}, "error": reason}
+        for ad_id in ad_ids:
+            summary["by_ad"][ad_id] = "failed"
+            _report(ad_id, "failed")
+        return summary
+
     messaging_angle = dedupe.get_angle(angle_id) if angle_id else None
     reference_images = []
     if product:
@@ -211,15 +270,6 @@ def generate_from_selection(ad_ids, angle_id=None, body_area=None, offer_text=No
             dedupe.init_pipeline_warnings()
             dedupe.record_warning(kind, detail)
     _stop = should_stop or (lambda: False)
-
-    def _report(ad_id, result):
-        if on_ad_done is None:
-            return
-        try:
-            on_ad_done(ad_id, result)
-        except Exception as e:
-            log.warning("generate_from_selection: on_ad_done callback raised for %s (%s: %s), ignored",
-                        ad_id, type(e).__name__, e)
 
     rows_by_ad_id = dedupe.get_scraped_ads_by_ad_ids(ad_ids)
     summary = {"processed": 0, "skipped": 0, "failed": 0, "already_generated": 0, "by_ad": {}}
@@ -240,7 +290,7 @@ def generate_from_selection(ad_ids, angle_id=None, body_area=None, offer_text=No
             ad, product=product, reference_images=reference_images, messaging_angle=messaging_angle,
             body_area=body_area, offer_text=offer_text, operator_instruction=instruction,
             text_in_image=text_in_image, include_product=include_product, edit_mode=edit_mode,
-            check_output=check_output, retheme_colours=retheme_colours,
+            check_output=check_output, retheme_colours=retheme_colours, realism=realism,
             should_stop=should_stop, explicit_selection=True, regenerate=regenerate,
         )
         dedupe.update_scraped_ad_status(ad_id, row["competitor_id"], result)

@@ -683,6 +683,16 @@ def api_angles():
     return JSONResponse(dedupe.get_angles())
 
 
+@app.get("/api/production_styles")
+def api_production_styles():
+    """The realism/production_style enum (item 2, 2026-08-06) - read from the schema via
+    validator.production_styles(), same source deconstruct.py's classifier prompt and
+    STYLE_GUIDANCE's coverage assertion already use, so the pool run-strip dropdown can
+    never drift from what a blueprint can actually contain or what the generator can
+    actually act on."""
+    return JSONResponse(validator.production_styles())
+
+
 @app.post("/api/angles")
 async def api_add_angle(request: Request):
     body = await request.json()
@@ -1037,6 +1047,12 @@ async def api_generate(request: Request):
     edit_mode = bool(body.get("edit_mode", False))
     check_output = bool(body.get("check_output", False))
     retheme_colours = bool(body.get("retheme_colours", True))
+    realism = (body.get("realism") or "").strip() or None
+    if realism is not None and realism not in validator.production_styles():
+        return JSONResponse(
+            {"ok": False, "error": f"realism must be one of {validator.production_styles()}, or omitted"},
+            status_code=400,
+        )
 
     job_id = uuid.uuid4().hex
     dedupe.init_generate_jobs()
@@ -1057,7 +1073,7 @@ async def api_generate(request: Request):
                 ad_ids, angle_id=angle_id, body_area=body_area, offer_text=offer_text,
                 instruction=instruction, product_id=product_id, regenerate=regenerate,
                 text_in_image=text_in_image, include_product=include_product, edit_mode=edit_mode,
-                check_output=check_output, retheme_colours=retheme_colours,
+                check_output=check_output, retheme_colours=retheme_colours, realism=realism,
                 should_stop=_job_should_stop, on_ad_done=_on_ad_done,
             )
             dedupe.finish_generate_job(job_id, result=result)
