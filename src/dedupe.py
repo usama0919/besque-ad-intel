@@ -347,7 +347,8 @@ def init_products():
                 category TEXT DEFAULT '',
                 image_keys JSONB DEFAULT '[]'::jsonb,
                 visual_description TEXT DEFAULT '',
-                substance_colour TEXT DEFAULT ''
+                substance_colour TEXT DEFAULT '',
+                shopify_product_ids JSONB DEFAULT '[]'::jsonb
             )"""
         )
         # Self-migrating (Item 6b, 2026-08-04), same pattern as artifacts' operator_instruction/
@@ -359,17 +360,30 @@ def init_products():
         # prose, not reliably parseable. Empty by default: omit the colour phrase entirely
         # rather than inventing one, see generate_image_prompt._substance_recolour_clause.
         cur.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS substance_colour TEXT DEFAULT ''")
+        # shopify_product_ids (2026-08-06, C1 build item 3): the Shopify export's productId
+        # values that belong to this internal product - a DIFFERENT id namespace from this
+        # table's own `id` (e.g. Magic Body Oil's real Shopify variant ids are
+        # 13-digit-ish strings, not our small integer). This is the one mapping the reviews
+        # importer reads instead of a hardcoded Python set, so scoping reviews to a product
+        # is a config change (edit this JSONB array) never a code change. Same shape as
+        # image_keys (a JSONB array on this same table) rather than a separate mapping
+        # table, deliberately - there's no need for a join, just a per-product list.
+        # Present in CREATE TABLE too (not just this ALTER) - several existing columns on
+        # this table are ALTER-only and not reproducible from code against a fresh DB; this
+        # one shouldn't join that list.
+        cur.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS shopify_product_ids JSONB DEFAULT '[]'::jsonb")
         conn.commit()
 
 
 _PRODUCT_COLS = ("id, name, description, ingredients, hero_claim, image_key, category, "
-                  "image_keys, visual_description, substance_colour")
+                  "image_keys, visual_description, substance_colour, shopify_product_ids")
 
 
 def _product_row_to_dict(r):
     return {"id": r[0], "name": r[1], "description": r[2], "ingredients": r[3], "hero_claim": r[4],
             "image_key": r[5] or "", "category": r[6] or "", "image_keys": r[7] or [],
-            "visual_description": r[8] or "", "substance_colour": r[9] or ""}
+            "visual_description": r[8] or "", "substance_colour": r[9] or "",
+            "shopify_product_ids": r[10] or []}
 
 
 def get_products():
@@ -447,6 +461,111 @@ def remove_product_image(product_id, key):
         keys = [k for k in (r[0] or []) if k != key]
         cur.execute("UPDATE products SET image_keys=%s WHERE id=%s", (_json.dumps(keys), product_id))
         conn.commit()
+
+
+def set_shopify_product_ids(product_id, shopify_product_ids):
+    """Targeted single-column UPDATE - deliberately not update_product(), which is a
+    read-modify-write over every product field and has already wiped verified data once
+    for a different table (competitors.page_id) from exactly this shape of call. Replaces
+    the whole list (like set, not append) - the caller is expected to pass the complete,
+    reviewed set of Shopify productIds for this product, not one to add."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT id FROM products WHERE id=%s", (product_id,))
+        if cur.fetchone() is None:
+            raise ValueError(f"product {product_id} not found")
+        cur.execute("UPDATE products SET shopify_product_ids=%s WHERE id=%s",
+                    (_json.dumps(list(shopify_product_ids)), product_id))
+        conn.commit()
+
+
+# ---- Product reviews (Chunk 9, C1 - 2026-08-06). Imported from a Shopify review-app
+# export, scoped to whichever products.shopify_product_ids the import script resolves each
+# raw row against - never a hardcoded product assumption here or in the importer. nickname
+# only: full_name and email are never read from the source file, let alone stored - see
+# import_reviews.py's own field list. medical_flag is a STORED marker (the matched
+# content_safety.MEDICAL_KEYWORDS term, or NULL), not a pre-import exclusion - a review
+# mentioning a medical term is still real, still imported, just excluded from generation
+# by default via get_reviews_for_product's own filter, so it stays visible/auditable
+# rather than silently vanishing from the corpus. ----
+
+def init_product_reviews():
+    """Create the product_reviews table if missing. review_id (the source export's own
+    review id) is UNIQUE so re-running the importer is idempotent - see import_reviews.py,
+    which checks existing review_ids before inserting rather than relying on this
+    constraint to reject duplicates as an error path."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """CREATE TABLE IF NOT EXISTS product_reviews (
+                id SERIAL PRIMARY KEY,
+                review_id TEXT NOT NULL UNIQUE,
+                product_id INTEGER NOT NULL REFERENCES products(id),
+                shopify_product_id TEXT NOT NULL,
+                handle TEXT DEFAULT '',
+                variant TEXT DEFAULT '',
+                nickname TEXT DEFAULT '',
+                rating INTEGER,
+                review_date TIMESTAMPTZ,
+                review_text TEXT NOT NULL,
+                char_length INTEGER NOT NULL,
+                medical_flag TEXT,
+                imported_at TIMESTAMPTZ DEFAULT NOW()
+            )"""
+        )
+        conn.commit()
+
+
+_REVIEW_COLS = ("id, review_id, product_id, shopify_product_id, handle, variant, nickname, "
+                "rating, review_date, review_text, char_length, medical_flag, imported_at")
+
+
+def _review_row_to_dict(r):
+    return {"id": r[0], "review_id": r[1], "product_id": r[2], "shopify_product_id": r[3],
+            "handle": r[4], "variant": r[5], "nickname": r[6], "rating": r[7],
+            "review_date": r[8], "review_text": r[9], "char_length": r[10],
+            "medical_flag": r[11], "imported_at": r[12]}
+
+
+def get_existing_review_ids():
+    """Every review_id already imported - the importer's own idempotency check (fetched
+    once, up front, rather than a per-row existence query against ~19k rows)."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT review_id FROM product_reviews")
+        return {r[0] for r in cur.fetchall()}
+
+
+def insert_product_reviews(rows):
+    """Bulk insert - rows is a list of dicts with exactly this table's own columns (minus
+    id/imported_at). ON CONFLICT (review_id) DO NOTHING as a second idempotency layer
+    underneath get_existing_review_ids's own pre-filter, never an error on a re-run."""
+    if not rows:
+        return 0
+    with get_conn() as conn, conn.cursor() as cur:
+        for row in rows:
+            cur.execute(
+                """INSERT INTO product_reviews
+                   (review_id, product_id, shopify_product_id, handle, variant, nickname,
+                    rating, review_date, review_text, char_length, medical_flag)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                   ON CONFLICT (review_id) DO NOTHING""",
+                (row["review_id"], row["product_id"], row["shopify_product_id"], row["handle"],
+                 row["variant"], row["nickname"], row["rating"], row["review_date"],
+                 row["review_text"], row["char_length"], row["medical_flag"]),
+            )
+        conn.commit()
+    return len(rows)
+
+
+def get_reviews_for_product(product_id, exclude_medical_flag=True):
+    """The actual product-agnostic query point: filters by OUR internal product_id, never
+    a Shopify id or a hardcoded assumption about which product is being asked for.
+    exclude_medical_flag=True (the default) matches today's "usable for generation" set -
+    pass False to see everything stored, including medically-flagged rows, for audit."""
+    with get_conn() as conn, conn.cursor() as cur:
+        query = f"SELECT {_REVIEW_COLS} FROM product_reviews WHERE product_id=%s"
+        if exclude_medical_flag:
+            query += " AND medical_flag IS NULL"
+        cur.execute(query, (product_id,))
+        return [_review_row_to_dict(r) for r in cur.fetchall()]
 
 
 # ---- Messaging angles (operator-curated, not a Python enum - the set has already

@@ -94,6 +94,139 @@ def test_substance_colour_defaults_to_empty_string():
         dedupe.delete_product(pid)
 
 
+# ---- shopify_product_ids (Chunk 9, C1, 2026-08-06): the ONLY mapping the reviews
+# importer resolves product scope from - never a hardcoded Python set. ----
+
+def test_set_shopify_product_ids_defaults_to_empty_list():
+    pid = _make_product()
+    try:
+        assert dedupe.get_product(pid)["shopify_product_ids"] == []
+    finally:
+        dedupe.delete_product(pid)
+
+
+def test_set_shopify_product_ids_is_a_targeted_update_not_read_modify_write():
+    """Setting shopify_product_ids must never touch any other column - same
+    read-modify-write hazard update_product/update_competitor already have a documented
+    incident for, just proven here for the new column specifically."""
+    pid = _make_product(hero_claim="original hero claim", category="body_oil")
+    try:
+        dedupe.set_shopify_product_ids(pid, ["111", "222"])
+        product = dedupe.get_product(pid)
+        assert product["shopify_product_ids"] == ["111", "222"]
+        assert product["hero_claim"] == "original hero claim"
+        assert product["category"] == "body_oil"
+    finally:
+        dedupe.delete_product(pid)
+
+
+def test_set_shopify_product_ids_replaces_the_whole_list():
+    pid = _make_product()
+    try:
+        dedupe.set_shopify_product_ids(pid, ["111", "222"])
+        dedupe.set_shopify_product_ids(pid, ["333"])
+        assert dedupe.get_product(pid)["shopify_product_ids"] == ["333"]
+    finally:
+        dedupe.delete_product(pid)
+
+
+def test_set_shopify_product_ids_raises_for_unknown_product():
+    import pytest
+    with pytest.raises(ValueError):
+        dedupe.set_shopify_product_ids(999999999, ["1"])
+
+
+# ---- product_reviews (Chunk 9, C1, 2026-08-06) ----
+
+def _make_review(product_id, **overrides):
+    row = {
+        "review_id": f"__test_{uuid.uuid4().hex[:12]}__",
+        "product_id": product_id,
+        "shopify_product_id": "8094699356313",
+        "handle": "magic-body-oil",
+        "variant": "1 Bottle",
+        "nickname": "Test T.",
+        "rating": 5,
+        "review_date": "2026-01-01T00:00:00.000Z",
+        "review_text": "A perfectly ordinary test review with enough characters.",
+        "char_length": 58,
+        "medical_flag": None,
+    }
+    row.update(overrides)
+    return row
+
+
+def test_insert_and_get_reviews_for_product():
+    dedupe.init_product_reviews()
+    pid = _make_product()
+    try:
+        row = _make_review(pid)
+        dedupe.insert_product_reviews([row])
+        reviews = dedupe.get_reviews_for_product(pid)
+        assert len(reviews) == 1
+        assert reviews[0]["review_id"] == row["review_id"]
+        assert reviews[0]["nickname"] == "Test T."
+        # nickname stored, full_name/email never even columns on this table
+        assert "full_name" not in reviews[0]
+        assert "email" not in reviews[0]
+    finally:
+        with dedupe.get_conn() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM product_reviews WHERE product_id=%s", (pid,))
+            conn.commit()
+        dedupe.delete_product(pid)
+
+
+def test_insert_product_reviews_is_idempotent_via_on_conflict():
+    dedupe.init_product_reviews()
+    pid = _make_product()
+    try:
+        row = _make_review(pid)
+        dedupe.insert_product_reviews([row])
+        dedupe.insert_product_reviews([row])  # same review_id again
+        reviews = dedupe.get_reviews_for_product(pid)
+        assert len(reviews) == 1
+    finally:
+        with dedupe.get_conn() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM product_reviews WHERE product_id=%s", (pid,))
+            conn.commit()
+        dedupe.delete_product(pid)
+
+
+def test_get_reviews_for_product_excludes_medical_flag_by_default():
+    dedupe.init_product_reviews()
+    pid = _make_product()
+    try:
+        clean = _make_review(pid, medical_flag=None)
+        flagged = _make_review(pid, medical_flag="surgery")
+        dedupe.insert_product_reviews([clean, flagged])
+
+        usable = dedupe.get_reviews_for_product(pid)
+        assert [r["review_id"] for r in usable] == [clean["review_id"]]
+
+        everything = dedupe.get_reviews_for_product(pid, exclude_medical_flag=False)
+        assert len(everything) == 2
+    finally:
+        with dedupe.get_conn() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM product_reviews WHERE product_id=%s", (pid,))
+            conn.commit()
+        dedupe.delete_product(pid)
+
+
+def test_get_existing_review_ids_reflects_stored_rows():
+    dedupe.init_product_reviews()
+    pid = _make_product()
+    try:
+        row = _make_review(pid)
+        assert row["review_id"] not in dedupe.get_existing_review_ids()
+        dedupe.insert_product_reviews([row])
+        assert row["review_id"] in dedupe.get_existing_review_ids()
+    finally:
+        with dedupe.get_conn() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM product_reviews WHERE product_id=%s", (pid,))
+            conn.commit()
+        dedupe.delete_product(pid)
+
+
 def test_pipeline_warnings_record_and_fetch_recent():
     dedupe.init_pipeline_warnings()
     marker = uuid.uuid4().hex[:8]
