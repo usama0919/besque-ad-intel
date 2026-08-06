@@ -117,3 +117,82 @@ def test_generate_copy_live_forwards_offer_text_to_prompt(monkeypatch):
     monkeypatch.setattr(generate_copy.anthropic, "Anthropic", FakeClient)
     generate_copy.generate_copy_live({"angle": "x"}, offer_text="free shipping this week")
     assert "free shipping this week" in captured["prompt"]
+
+
+# ---- comparison_panels / panel_copy (2026-08-06, Grüns GLP-1 leak: a two-panel before/
+# after joke rendered the SAME headline text in both panels) ----
+
+def _comparison_blueprint():
+    return {
+        "angle": "loose skin",
+        "structural_zones": [
+            {"zone_type": "sub_line", "position": "upper-left-mid", "container": "none",
+             "detail": "negative outcome - hair loss"},
+            {"zone_type": "sub_line", "position": "upper-right-mid", "container": "none",
+             "detail": "positive outcome - keeping hair"},
+        ],
+    }
+
+
+def test_comparison_panels_absent_for_ordinary_blueprint():
+    assert generate_copy.comparison_panels({"angle": "x"}) == []
+
+
+def test_comparison_panels_absent_for_single_sub_line():
+    """One sub_line is an ordinary accent line, not a comparison - the whole point is
+    TWO OR MORE distinct panels."""
+    bp = {"structural_zones": [
+        {"zone_type": "sub_line", "position": "top-center", "detail": "a tagline"},
+    ]}
+    assert generate_copy.comparison_panels(bp) == []
+
+
+def test_comparison_panels_detected_for_two_sub_lines():
+    panels = generate_copy.comparison_panels(_comparison_blueprint())
+    assert len(panels) == 2
+    assert {p["position"] for p in panels} == {"upper-left-mid", "upper-right-mid"}
+
+
+def test_comparison_panels_counts_body_copy_too():
+    bp = {"structural_zones": [
+        {"zone_type": "sub_line", "position": "left", "detail": "before"},
+        {"zone_type": "body_copy", "position": "right", "detail": "after"},
+    ]}
+    assert len(generate_copy.comparison_panels(bp)) == 2
+
+
+def test_comparison_panels_ignores_cta_and_other_zone_types():
+    """A comparison ad has one CTA, not one per panel - cta must never count toward the
+    panel total."""
+    bp = {"structural_zones": [
+        {"zone_type": "sub_line", "position": "left", "detail": "before"},
+        {"zone_type": "cta", "position": "bottom", "detail": "shop now"},
+    ]}
+    assert generate_copy.comparison_panels(bp) == []
+
+
+def test_build_copy_prompt_unaffected_when_no_comparison_panels():
+    """Byte-for-byte the same prompt as before this feature existed, for every ordinary
+    single-panel blueprint - the overwhelming majority."""
+    with_zones_but_no_comparison = generate_copy.build_copy_prompt(
+        {"angle": "x", "structural_zones": [{"zone_type": "badge", "position": "top"}]}
+    )
+    without_zones = generate_copy.build_copy_prompt({"angle": "x"})
+    assert "MULTI-PANEL COMPARISON" not in with_zones_but_no_comparison
+    assert "MULTI-PANEL COMPARISON" not in without_zones
+
+
+def test_build_copy_prompt_states_multi_panel_instruction_when_detected():
+    prompt = generate_copy.build_copy_prompt(_comparison_blueprint())
+    assert "MULTI-PANEL COMPARISON" in prompt
+    assert "panel_copy" in prompt
+    assert "upper-left-mid" in prompt
+    assert "upper-right-mid" in prompt
+    assert "negative outcome - hair loss" in prompt
+    assert "positive outcome - keeping hair" in prompt
+
+
+def test_build_copy_prompt_panel_instruction_states_exact_count():
+    prompt = generate_copy.build_copy_prompt(_comparison_blueprint())
+    assert "2 distinct text panels" in prompt
+    assert "EXACTLY 2 objects" in prompt

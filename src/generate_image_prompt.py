@@ -49,7 +49,7 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
                         offer_text: str = None, operator_instruction: str = None,
                         retheme_colours: bool = True, brand_palette: str = None,
                         realism: str = None, critic_feedback: list = None,
-                        cta_text: str = None) -> str:
+                        cta_text: str = None, panel_copy: list = None) -> str:
     """Construct a Besque-adapted image generation prompt from the blueprint's visual notes.
     include_product=True, text_in_image=False, creative_description=None, edit_mode=False,
     offer_text=None, operator_instruction=None (today's defaults) reproduce the prior
@@ -183,7 +183,8 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
                                    style=(realism or "").strip() or prod_style,
                                    typography_zones=blueprint.get("typography_zones"),
                                    structural_zones=blueprint.get("structural_zones"),
-                                   cta_text=cta_text) +
+                                   cta_text=cta_text, product_name=(product or {}).get("name"),
+                                   panel_copy=panel_copy) +
             product_clause +
             closing
         )
@@ -565,17 +566,19 @@ def _suppressed_container_exception(suppressing_text, suppressing_offer, suppres
 _STRUCTURAL_ZONE_REMOVE_TYPES = ("badge", "price_anchor", "product_callout")
 
 
-def _structural_zones_clause(structural_zones, zone_copy_text=None, cta_text=None):
+def _structural_zones_clause(structural_zones, zone_copy_text=None, cta_text=None, panel_copy=None):
     """Wires blueprint.structural_zones (2026-08-06 schema addition) into edit mode, for
     only the zone types we have a real Besque value for today:
     - brand_wordmark: ALWAYS substituted with BESQUE, same position/container, never
       removed - its absence is the single biggest reason a clone reads as unbranded next
       to the reference, so this doesn't wait on text_in_image the way the others do.
-    - sub_line / body_copy: substituted with zone_copy_text when supplied, same
-      position/container, matching the reference's own line count where possible.
-      Callers must pass None here (not the raw subtext) when text_in_image is off -
-      otherwise these fall to REMOVAL, same as the container-removal exception already
-      does for headline/subtext - never left showing the reference's own words.
+    - sub_line / body_copy: substituted with text matching THIS zone specifically -
+      panel_copy (generate_copy.comparison_panels' per-panel output) wins by exact
+      position-string match when given; zone_copy_text is the fallback, used for every
+      such zone when panel_copy is absent or doesn't cover this position. Callers must
+      pass None for both (not the raw subtext) when text_in_image is off - otherwise these
+      fall to REMOVAL, same as the container-removal exception already does for
+      headline/subtext - never left showing the reference's own words.
     - cta: substituted with cta_text when supplied, same button shape/position - same
       None-when-suppressed rule as above.
     - badge/price_anchor/product_callout: always REMOVED - container gone entirely, not
@@ -590,10 +593,25 @@ def _structural_zones_clause(structural_zones, zone_copy_text=None, cta_text=Non
     Returns (clause_text, substituted_zone_types) - the second value lets the TEXT
     clause's "entire text budget" ban adjust itself so it never bans a category this
     function is simultaneously authorising, the same class of writer/rule6 contradiction
-    this codebase has already hit more than once."""
+    this codebase has already hit more than once.
+
+    panel_copy (2026-08-06, Grüns GLP-1 leak: a two-panel before/after joke rendered the
+    SAME headline text in both panels) is a list of {"position", "text"} dicts, one per
+    comparison panel, keyed by the EXACT position string generate_copy.comparison_panels
+    echoed back from this same structural_zones list - see _panel_copy_clause. Before this
+    existed, every sub_line/body_copy zone got the SAME zone_copy_text regardless of how
+    many there were or what each one's own detail described; this routes each zone to its
+    OWN text instead, by position, and falls back to zone_copy_text only for a
+    position panel_copy doesn't cover (or when panel_copy is absent entirely - every
+    existing single-panel blueprint sees byte-for-byte the same behaviour as before)."""
     substituted_zone_types = set()
     if not structural_zones:
         return "", substituted_zone_types
+
+    panel_copy_by_position = {
+        p.get("position"): p.get("text") for p in (panel_copy or [])
+        if isinstance(p, dict) and p.get("position") and p.get("text")
+    }
 
     substitute_lines = []
     remove_lines = []
@@ -609,10 +627,11 @@ def _structural_zones_clause(structural_zones, zone_copy_text=None, cta_text=Non
             )
             substituted_zone_types.add(zt)
         elif zt in ("sub_line", "body_copy"):
-            if zone_copy_text:
+            text_for_zone = panel_copy_by_position.get(z.get("position")) or zone_copy_text
+            if text_for_zone:
                 substitute_lines.append(
                     f"- {zt} at {pos} (container: {container}): replace its wording with "
-                    f"\"{zone_copy_text}\" - same position, same container, matching the "
+                    f"\"{text_for_zone}\" - same position, same container, matching the "
                     f"reference's own line count for this zone where possible, our words only."
                 )
                 substituted_zone_types.add(zt)
@@ -754,7 +773,8 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
                             include_product=True, reference_has_product=True,
                             retheme_colours=True, palette=None,
                             substance_colour=None, style=None, typography_zones=None,
-                            structural_zones=None, cta_text=None):
+                            structural_zones=None, cta_text=None, product_name=None,
+                            panel_copy=None):
     """EDIT MODE (2026-08-01): Gemini receives the competitor's own ad as an input image
     Part, not just a text description of it - the reference image IS the creative brief,
     so no template scene/layout/palette description is assembled here (see
@@ -832,7 +852,19 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
     TYPOGRAPHY_GUIDANCE/DEFAULT_TYPOGRAPHY_GUIDANCE are removed as dead code, not left
     unused. Must not contradict Item B: text colour is explicitly named as INHERITED, never
     re-themed - see B's palette-remap sentence, which now says the same thing from the
-    other side."""
+    other side.
+
+    style=="illustrated" (2026-08-06, Grüns GLP-1 leak - the cause was structural, not
+    textual): the include_product branch below stops pointing at "the reference photo(s)
+    that follow" for this style, because generate_image() no longer attaches any this run
+    (see its own docstring) - passing a photographic reference AND demanding faithful
+    substitution is exactly what made Gemini render a photograph and composite it into a
+    drawing. Instead the bottle is described briefly in the scene's own visual language:
+    recognisable by silhouette, colour, and product_name, drawn natively flat rather than
+    substituted from a photo. product_name falls back to "Besque" when not given, the same
+    fallback rule 4 already states for the unbranded case. Every other style is
+    byte-for-byte unaffected - reference photos are still attached and still demanded for
+    every photographic register."""
     suppressing_text = not (text_in_image and headline)
     suppressing_offer = not offer_text
     # Always True: the EFFICACY CLAIMS clause below bans efficacy-claim wording
@@ -872,7 +904,23 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
         )
     opening += _register_clause(style)
 
-    if include_product and reference_has_product:
+    if include_product and reference_has_product and style == "illustrated":
+        name = product_name or "Besque"
+        base = opening + (
+            "Changing ONLY the product. Remove the competitor's product entirely and draw "
+            f"the Besque product NATIVELY in this scene's own illustrated visual language - "
+            f"flat, matching the surrounding artwork's own line weight and shading, never a "
+            f"photograph or photorealistic render composited into the drawing. No product "
+            f"reference photo is attached this run, on purpose: work from silhouette, "
+            f"colour, and the label name alone - \"{name}\". Secondary label content "
+            f"(sub-lines, certification icons, fine print) does not need to be legible at "
+            f"this scale in this style; name and colour accuracy matter, secondary-text "
+            f"legibility does not. "
+            + _substance_recolour_clause(substance_colour) +
+            "Everything else in the scene stays exactly as it "
+            "appears in the source image. "
+        )
+    elif include_product and reference_has_product:
         base = opening + (
             "Changing ONLY the product. Remove the competitor's product entirely and "
             "place the Besque product (shown in the reference photo(s) that follow, if "
@@ -902,8 +950,10 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
     # operator asked for no baked-in text this run.
     zone_copy_text = eff_subtext if text_in_image else None
     zone_cta_text = cta_text if text_in_image else None
+    zone_panel_copy = panel_copy if text_in_image else None
     structural_clause, substituted_zone_types = _structural_zones_clause(
         structural_zones, zone_copy_text=zone_copy_text, cta_text=zone_cta_text,
+        panel_copy=zone_panel_copy,
     )
     if eff_headline:
         permitted = f'the headline "{eff_headline}"'
@@ -1041,6 +1091,15 @@ def _sniff_mime_type(data):
     return "image/jpeg"
 
 
+# ImageConfig.image_size defaults to "1K" whenever it's left unset, which is every call
+# before 2026-08-06 - confirmed live (Grüns GLP-1 run, artifact 1083): a 1080x1920
+# reference produced a 768x1376 draft, well under Meta's 1080x1350 minimum for a 4:5 feed
+# image. "2K" is the next tier up (image_size also accepts "4K"); set explicitly on every
+# ImageConfig this module builds, in EVERY branch including the ones that omit
+# aspect_ratio entirely (the model-infers-aspect-ratio fallback) - resolution and aspect
+# ratio are independent knobs, and omitting one must never mean omitting the other.
+IMAGE_SIZE = "2K"
+
 # Item 6a (2026-08-04): edit mode must clone the reference ad's own shape, not a hardcoded
 # square - a portrait reference cloned to a hardcoded 1:1 isn't a clone. google.genai.types.
 # ImageConfig.aspect_ratio's own field description only lists "1:1", "2:3", "3:2", "3:4",
@@ -1100,7 +1159,7 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
                     include_product=True, text_in_image=False, headline=None, subtext=None,
                     messaging_angle=None, realism=None, body_area=None, offer_text=None,
                     edit_mode=False, competitor_image_bytes=None, operator_instruction=None,
-                    retheme_colours=True, critic_feedback=None, cta_text=None):
+                    retheme_colours=True, critic_feedback=None, cta_text=None, panel_copy=None):
     """Single-pass image generation from the blueprint. One image, no iteration.
     Saves to assets/<stem>_draft.png (stem = ad_id, or ad_id+angle if angle_slug is given)
     and returns the path. Returns None on failure. include_product/text_in_image/headline/
@@ -1157,7 +1216,21 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
     couldn't decode them (still attached as the input Part either way); forcing "1:1"
     would have been guaranteed-wrong for a portrait/landscape reference in exactly that
     case. Generate mode is unaffected - it keeps stating "Square 1:1" in prompt text only,
-    no config passed."""
+    no config passed.
+
+    Illustrated register (2026-08-06, Grüns GLP-1 leak): reference_images (the product's
+    OWN photos) are dropped entirely - never attached to Gemini at all - whenever the
+    effective style resolves to "illustrated", the SAME resolution build_image_prompt's
+    edit_mode branch uses (realism override, else the blueprint's own detected
+    production_style). Passing a photographic reference while simultaneously demanding
+    faithful substitution is what produced a photorealistic bottle composited into an
+    otherwise hand-drawn scene - dropping the photo and describing the bottle in the
+    scene's own visual language instead (see _edit_mode_instruction's style=="illustrated"
+    branch) fixes it structurally rather than with more prompt wording. Applies in every
+    mode, not just edit_mode - reference_images are attached the same way regardless."""
+    effective_style = (realism or "").strip() or (blueprint.get("production_style") or {}).get("style", "")
+    if effective_style == "illustrated":
+        reference_images = []
     operator_instruction = generate_image_prompt_writer.clip_operator_instruction(operator_instruction)
     creative_description = None
     if messaging_angle and not edit_mode:
@@ -1177,7 +1250,8 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
                                  creative_description=creative_description, edit_mode=edit_mode,
                                  offer_text=offer_text, operator_instruction=operator_instruction,
                                  retheme_colours=retheme_colours, brand_palette=brand_palette,
-                                 realism=realism, critic_feedback=critic_feedback, cta_text=cta_text)
+                                 realism=realism, critic_feedback=critic_feedback, cta_text=cta_text,
+                                 panel_copy=panel_copy)
     stem = _draft_stem(ad_id, angle_slug)
     try:
         client = genai.Client(vertexai=True, project="besque-martech", location="global")
@@ -1232,13 +1306,23 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
                 _dedupe.record_warning(
                     "edit_mode_aspect_ratio_fallback",
                     f"ad_id={ad_id}: could not derive aspect ratio from the reference "
-                    f"image (missing or unreadable); omitting image_config so the model "
-                    f"infers aspect ratio from the attached reference image itself.",
+                    f"image (missing or unreadable); omitting aspect_ratio so the model "
+                    f"infers it from the attached reference image itself - image_size is "
+                    f"still set, that's an independent knob.",
+                )
+                generation_config = genai_types.GenerateContentConfig(
+                    image_config=genai_types.ImageConfig(image_size=IMAGE_SIZE)
                 )
             else:
                 generation_config = genai_types.GenerateContentConfig(
-                    image_config=genai_types.ImageConfig(aspect_ratio=aspect_ratio)
+                    image_config=genai_types.ImageConfig(aspect_ratio=aspect_ratio, image_size=IMAGE_SIZE)
                 )
+        else:
+            # Generate mode states its aspect ratio in prompt text only (Square 1:1) and
+            # never passed a config at all before this - image_size needs one regardless.
+            generation_config = genai_types.GenerateContentConfig(
+                image_config=genai_types.ImageConfig(image_size=IMAGE_SIZE)
+            )
 
         import time as _time
         response = None
@@ -1500,7 +1584,7 @@ def edit_image(current_image_bytes, instruction, ad_id, aspect="1:1", angle_slug
                 prompt,
             ],
             config=genai_types.GenerateContentConfig(
-                image_config=genai_types.ImageConfig(aspect_ratio=aspect),
+                image_config=genai_types.ImageConfig(aspect_ratio=aspect, image_size=IMAGE_SIZE),
             ),
         )
         image_bytes = None
@@ -1563,11 +1647,11 @@ def regenerate_from_stored_prompt(current_image_bytes, stored_prompt, instructio
     try:
         client = genai.Client(vertexai=True, project="besque-martech", location="global")
         aspect_ratio = derive_aspect_ratio(current_image_bytes)
-        generation_config = None
         if aspect_ratio is not None:
-            generation_config = genai_types.GenerateContentConfig(
-                image_config=genai_types.ImageConfig(aspect_ratio=aspect_ratio)
-            )
+            image_config = genai_types.ImageConfig(aspect_ratio=aspect_ratio, image_size=IMAGE_SIZE)
+        else:
+            image_config = genai_types.ImageConfig(image_size=IMAGE_SIZE)
+        generation_config = genai_types.GenerateContentConfig(image_config=image_config)
         call_kwargs = {
             "model": "gemini-3.1-flash-image",
             "contents": [

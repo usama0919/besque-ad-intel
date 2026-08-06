@@ -140,7 +140,7 @@ class _FakeGenaiClient:
     def __init__(self, *a, **k):
         self.models = self
 
-    def generate_content(self, model, contents):
+    def generate_content(self, model, contents, config=None):
         part = type("Part", (), {"inline_data": type("Data", (), {"data": b"fake-png-bytes"})()})()
         candidate = type("Candidate", (), {"content": type("Content", (), {"parts": [part]})()})()
         return type("Response", (), {"candidates": [candidate]})()

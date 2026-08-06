@@ -249,6 +249,45 @@ def test_generate_image_edit_mode_orders_competitor_before_product_reference_ima
     assert "REFERENCE PRODUCT PHOTOS ABOVE" in framing_and_prompt
 
 
+def test_generate_image_illustrated_style_drops_product_reference_images(monkeypatch, tmp_path):
+    """2026-08-06, Grüns GLP-1 leak: passing a photographic product reference AND demanding
+    faithful substitution is what produced a photorealistic bottle composited into an
+    otherwise hand-drawn illustrated scene. realism="illustrated" must drop the product
+    photos entirely - the competitor image (the actual scene to reproduce) still attaches,
+    only the product's OWN reference photos are withheld."""
+    monkeypatch.setattr(generate_image_prompt, "genai", type("obj", (), {"Client": _CapturingGenaiClient}))
+    monkeypatch.setattr(generate_image_prompt, "ASSET_DIR", tmp_path)
+    competitor_bytes = _png_bytes()
+
+    generate_image_prompt.generate_image(
+        _blueprint(), "AD_ILLUSTRATED", edit_mode=True, realism="illustrated",
+        retheme_colours=False,
+        competitor_image_bytes=competitor_bytes,
+        reference_images=[b"product-photo-1", b"product-photo-2"],
+    )
+    contents = _CapturingGenaiClient.last_contents
+    assert contents[0].inline_data.data == competitor_bytes
+    assert len(contents) == 2  # competitor image + framing/prompt text - no product photos
+    assert "REFERENCE PRODUCT PHOTOS ABOVE" not in contents[-1]
+
+
+def test_generate_image_photographic_style_keeps_product_reference_images(monkeypatch, tmp_path):
+    """Every non-illustrated register is unaffected - product reference photos are still
+    attached exactly as before."""
+    monkeypatch.setattr(generate_image_prompt, "genai", type("obj", (), {"Client": _CapturingGenaiClient}))
+    monkeypatch.setattr(generate_image_prompt, "ASSET_DIR", tmp_path)
+    competitor_bytes = _png_bytes()
+
+    generate_image_prompt.generate_image(
+        _blueprint(), "AD_PHOTOGRAPHIC", edit_mode=True, realism="high_spec_studio",
+        retheme_colours=False,
+        competitor_image_bytes=competitor_bytes,
+        reference_images=[b"product-photo-1", b"product-photo-2"],
+    )
+    contents = _CapturingGenaiClient.last_contents
+    assert [p.inline_data.data for p in contents[1:3]] == [b"product-photo-1", b"product-photo-2"]
+
+
 # ---- Item 6a (2026-08-04): derive_aspect_ratio - snap the reference image's own
 # width:height to the nearest ratio Vertex's ImageConfig.aspect_ratio actually supports ----
 
@@ -317,23 +356,32 @@ def test_generate_image_edit_mode_sets_aspect_ratio_config_from_reference(monkey
     config = _CapturingGenaiClient.last_config
     assert config is not None
     assert config.image_config.aspect_ratio == "9:16"
+    assert config.image_config.image_size == "2K"
 
 
-def test_generate_image_generate_mode_passes_no_config(monkeypatch, tmp_path):
-    """Generate mode is unaffected by Item 6a - it keeps its prompt-text "Square 1:1"
-    instruction and never sets a generation config."""
+def test_generate_image_generate_mode_sets_image_size_but_no_aspect_ratio(monkeypatch, tmp_path):
+    """Generate mode keeps its prompt-text "Square 1:1" instruction and never sets
+    aspect_ratio on the config (Item 6a is edit-mode-only) - but as of 2026-08-06,
+    image_size is an independent knob and must be set here too: every call before this fix
+    ran at Gemini's unset "1K" default (confirmed live - a 1080x1920 reference produced a
+    768x1376 draft, under Meta's 1080x1350 minimum for a 4:5 feed image), regardless of
+    edit_mode."""
     monkeypatch.setattr(generate_image_prompt, "genai", type("obj", (), {"Client": _CapturingGenaiClient}))
     monkeypatch.setattr(generate_image_prompt, "ASSET_DIR", tmp_path)
 
     generate_image_prompt.generate_image(_blueprint(), "AD_GENERATE", edit_mode=False)
-    assert _CapturingGenaiClient.last_config is None
+    config = _CapturingGenaiClient.last_config
+    assert config is not None
+    assert config.image_config.image_size == "2K"
+    assert config.image_config.aspect_ratio is None
 
 
 def test_generate_image_edit_mode_missing_reference_falls_back_and_warns(monkeypatch, tmp_path):
     """competitor_image_bytes=None (or unreadable) in edit mode must not fail the draft -
-    it OMITS image_config entirely (not a forced "1:1" - a live probe, 2026-08-04, showed
-    that forces the wrong shape while omitting it lets the model infer the reference's own
-    ratio) and records a pipeline_warning instead."""
+    it OMITS aspect_ratio (not a forced "1:1" - a live probe, 2026-08-04, showed that
+    forces the wrong shape while omitting it lets the model infer the reference's own
+    ratio) and records a pipeline_warning instead. image_size is still set (2026-08-06) -
+    that's an independent knob from aspect_ratio, so the fallback must not lose it too."""
     from src import dedupe
     monkeypatch.setattr(generate_image_prompt, "genai", type("obj", (), {"Client": _CapturingGenaiClient}))
     monkeypatch.setattr(generate_image_prompt, "ASSET_DIR", tmp_path)
@@ -345,7 +393,10 @@ def test_generate_image_edit_mode_missing_reference_falls_back_and_warns(monkeyp
         _blueprint(), "AD_ASPECT_FALLBACK", edit_mode=True, competitor_image_bytes=None,
     )
     assert dest is not None  # the draft still succeeds
-    assert _CapturingGenaiClient.last_config is None  # no image_config forced onto the call
+    config = _CapturingGenaiClient.last_config
+    assert config is not None
+    assert config.image_config.aspect_ratio is None  # not forced onto the call
+    assert config.image_config.image_size == "2K"
     assert len(warnings) == 1
     kind, detail = warnings[0]
     assert kind == "edit_mode_aspect_ratio_fallback"
@@ -1048,7 +1099,7 @@ def test_register_clause_absent_when_no_style():
 def test_register_clause_uses_style_guidance():
     instruction = generate_image_prompt._register_clause("illustrated")
     assert "Pixar" in instruction
-    assert "accurate and legible" in instruction
+    assert "RECOGNISABLE by silhouette" in instruction
     assert "hand-drawn bottle inside a photographic frame" in instruction
 
 
@@ -1064,6 +1115,17 @@ def test_register_clause_illustrated_label_never_says_photorealistic():
     assert "illustrated visual language" in instruction
 
 
+def test_register_clause_illustrated_drops_secondary_label_legibility_demand():
+    """Same live incident (2026-08-06): the old wording demanded the WHOLE label stay
+    legible ("angled so it reads clearly") - the critic correctly flagged sub-lines/cert
+    icons as illegible at illustrated scale, confirming that demand can't survive in this
+    register. Only the product NAME needs to stay legible; secondary label content
+    (sub-lines, cert icons, fine print) explicitly does not."""
+    instruction = generate_image_prompt._register_clause("illustrated")
+    assert "does NOT need to stay legible" in instruction
+    assert "sub-lines, certification icons, fine print" in instruction
+
+
 def test_register_clause_states_faithful_reproduction_wins_over_style_vocabulary():
     # Chunk 13 follow-up: the register vocabulary must never read as license to
     # re-stage the reference's own composition/framing/lighting - the exception is
@@ -1077,6 +1139,60 @@ def test_edit_mode_instruction_style_reaches_register_clause():
     instruction = generate_image_prompt._edit_mode_instruction(style="ugc_native")
     assert "REGISTER:" in instruction
     assert "phone" in instruction.lower()
+
+
+# ---- style=="illustrated" (2026-08-06, Grüns GLP-1 leak): the product-substitution
+# sentence stops pointing at a reference photo and describes the bottle natively instead ----
+
+def test_edit_mode_instruction_illustrated_never_mentions_reference_photo():
+    """The old wording ("shown in the reference photo(s) that follow") must not appear at
+    all for this style - generate_image() no longer attaches one, so a prompt still
+    pointing at it would reference nothing."""
+    instruction = generate_image_prompt._edit_mode_instruction(style="illustrated")
+    assert "shown in the reference photo(s) that follow" not in instruction
+    assert "no product reference photo is attached" in instruction.lower()
+
+
+def test_edit_mode_instruction_illustrated_names_product_by_name():
+    instruction = generate_image_prompt._edit_mode_instruction(
+        style="illustrated", product_name="Magic Body Oil",
+    )
+    assert '"Magic Body Oil"' in instruction
+
+
+def test_edit_mode_instruction_illustrated_falls_back_to_besque_name():
+    """No product_name given - same fallback rule 4 already states for the unbranded
+    case, not a silent gap."""
+    instruction = generate_image_prompt._edit_mode_instruction(style="illustrated")
+    assert '"Besque"' in instruction
+
+
+def test_edit_mode_instruction_illustrated_drops_secondary_legibility_demand():
+    instruction = generate_image_prompt._edit_mode_instruction(style="illustrated")
+    assert "does not need to be legible" in instruction
+
+
+def test_edit_mode_instruction_illustrated_drawn_natively_never_photorealistic():
+    instruction = generate_image_prompt._edit_mode_instruction(style="illustrated")
+    assert "NATIVELY" in instruction
+    assert "never a photograph or photorealistic render composited" in instruction
+
+
+def test_edit_mode_instruction_photographic_style_unaffected_by_illustrated_branch():
+    """Every non-illustrated style keeps pointing at the reference photo exactly as
+    before - this is an illustrated-only change."""
+    instruction = generate_image_prompt._edit_mode_instruction(style="high_spec_studio")
+    assert "shown in the reference photo(s) that follow" in instruction
+    assert "NATIVELY" not in instruction
+
+
+def test_edit_mode_instruction_illustrated_still_recolours_substance():
+    """The illustrated branch must not silently drop the substance-recolour clause the
+    photographic branch already carries."""
+    instruction = generate_image_prompt._edit_mode_instruction(
+        style="illustrated", substance_colour="bright golden-amber oil",
+    )
+    assert "bright golden-amber oil" in instruction
 
 
 def test_build_image_prompt_edit_mode_uses_reference_style_by_default():
@@ -1228,6 +1344,64 @@ def test_structural_zones_clause_sub_line_and_body_copy_substituted_when_text_su
     assert "matching the reference's own line count" in clause
 
 
+def test_structural_zones_clause_panel_copy_routes_distinct_text_by_position():
+    """2026-08-06, Grüns GLP-1 leak: a two-panel before/after joke rendered the SAME
+    headline text in both panels, because every sub_line zone got the SAME zone_copy_text
+    regardless of position. panel_copy must route each zone to ITS OWN text by exact
+    position match."""
+    clause, substituted = generate_image_prompt._structural_zones_clause(
+        [_szone("sub_line", position="upper-left-mid"), _szone("sub_line", position="upper-right-mid")],
+        zone_copy_text="fallback text - must not appear when panel_copy covers both",
+        panel_copy=[
+            {"position": "upper-left-mid", "text": "Skin feeling looser?"},
+            {"position": "upper-right-mid", "text": "Give it what it needs."},
+        ],
+    )
+    assert substituted == {"sub_line"}
+    assert '"Skin feeling looser?"' in clause
+    assert '"Give it what it needs."' in clause
+    assert "fallback text" not in clause
+    assert clause.count("upper-left-mid") == 1
+    assert clause.count("upper-right-mid") == 1
+
+
+def test_structural_zones_clause_panel_copy_falls_back_when_position_uncovered():
+    """panel_copy given but missing an entry for one zone's position - that zone falls
+    back to zone_copy_text rather than being silently dropped."""
+    clause, substituted = generate_image_prompt._structural_zones_clause(
+        [_szone("sub_line", position="upper-left-mid"), _szone("sub_line", position="upper-right-mid")],
+        zone_copy_text="shared fallback",
+        panel_copy=[{"position": "upper-left-mid", "text": "Skin feeling looser?"}],
+    )
+    assert substituted == {"sub_line"}
+    assert '"Skin feeling looser?"' in clause
+    assert '"shared fallback"' in clause
+
+
+def test_structural_zones_clause_panel_copy_absent_reproduces_shared_text_behaviour():
+    """No panel_copy at all - byte-for-byte the same single-shared-text behaviour as
+    before this feature existed."""
+    with_panel_copy_absent = generate_image_prompt._structural_zones_clause(
+        [_szone("sub_line"), _szone("body_copy")], zone_copy_text="7 cold-pressed oils.",
+    )
+    with_panel_copy_none = generate_image_prompt._structural_zones_clause(
+        [_szone("sub_line"), _szone("body_copy")], zone_copy_text="7 cold-pressed oils.", panel_copy=None,
+    )
+    assert with_panel_copy_absent == with_panel_copy_none
+
+
+def test_structural_zones_clause_panel_copy_malformed_entries_ignored():
+    """A malformed panel_copy entry (missing position/text, or not even a dict) must
+    never raise - it's silently skipped and the zone falls back to zone_copy_text."""
+    clause, substituted = generate_image_prompt._structural_zones_clause(
+        [_szone("sub_line", position="upper-left-mid")],
+        zone_copy_text="fallback",
+        panel_copy=["not-a-dict", {"position": "upper-left-mid"}, {"text": "no position"}, {}],
+    )
+    assert substituted == {"sub_line"}
+    assert '"fallback"' in clause
+
+
 def test_structural_zones_clause_sub_line_and_body_copy_removed_when_no_text():
     """No Besque text for this run (text_in_image off, or no copy) - never leave the
     reference's own sub-line/body-copy sitting there untouched."""
@@ -1293,6 +1467,34 @@ def test_edit_mode_instruction_forwards_structural_zones_and_cta_text():
     )
     assert "STRUCTURAL ZONES - SUBSTITUTE" in instruction
     assert "replace its content with BESQUE" in instruction
+
+
+def test_edit_mode_instruction_forwards_panel_copy_end_to_end():
+    instruction = generate_image_prompt._edit_mode_instruction(
+        text_in_image=True, headline="H", subtext="shared fallback",
+        structural_zones=[
+            _szone("sub_line", position="upper-left-mid"),
+            _szone("sub_line", position="upper-right-mid"),
+        ],
+        panel_copy=[
+            {"position": "upper-left-mid", "text": "Skin feeling looser?"},
+            {"position": "upper-right-mid", "text": "Give it what it needs."},
+        ],
+    )
+    assert '"Skin feeling looser?"' in instruction
+    assert '"Give it what it needs."' in instruction
+
+
+def test_edit_mode_instruction_panel_copy_suppressed_when_text_in_image_off():
+    """Same gating rule as zone_copy_text/cta_text - panel_copy must never leak into the
+    prompt when the operator asked for no baked-in text this run; those zones fall to
+    removal instead."""
+    instruction = generate_image_prompt._edit_mode_instruction(
+        text_in_image=False,
+        structural_zones=[_szone("sub_line", position="upper-left-mid")],
+        panel_copy=[{"position": "upper-left-mid", "text": "Skin feeling looser?"}],
+    )
+    assert "Skin feeling looser?" not in instruction
 
 
 def test_edit_mode_instruction_gates_zone_copy_and_cta_on_text_in_image():

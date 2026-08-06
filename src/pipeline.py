@@ -658,6 +658,11 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
                     # zones), same "caller decides, this just forwards" pattern as
                     # offer_text/realism.
                     cta_text=copy.get("cta") or None,
+                    # panel_copy (2026-08-06): generate_copy_live's per-panel output for a
+                    # multi-panel comparison reference (see generate_copy.comparison_panels)
+                    # - only consumed by structural_zones' sub_line/body_copy routing in edit
+                    # mode, a no-op everywhere else, same forwarding pattern as cta_text.
+                    panel_copy=copy.get("panel_copy") or None,
                     **gen_kwargs,
                 )
             except Exception as e:

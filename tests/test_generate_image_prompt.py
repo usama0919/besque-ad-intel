@@ -390,11 +390,13 @@ def test_edit_image_prompt_states_aspect_ratio(monkeypatch, tmp_path):
 
 class _FakeGenaiClient:
     """Stands in for genai.Client so generate_image() can run fully (prompt building,
-    stem naming, file write) without a real network call."""
+    stem naming, file write) without a real network call. config is accepted (2026-08-06:
+    generate mode now always passes one, to set ImageConfig.image_size) but ignored -
+    this fake only cares about contents."""
     def __init__(self, *a, **k):
         self.models = self
 
-    def generate_content(self, model, contents):
+    def generate_content(self, model, contents, config=None):
         part = type("Part", (), {"inline_data": type("Data", (), {"data": b"fake-png-bytes"})()})()
         candidate = type("Candidate", (), {"content": type("Content", (), {"parts": [part]})()})()
         return type("Response", (), {"candidates": [candidate]})()
