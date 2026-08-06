@@ -48,7 +48,8 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
                         creative_description: str = None, edit_mode: bool = False,
                         offer_text: str = None, operator_instruction: str = None,
                         retheme_colours: bool = True, brand_palette: str = None,
-                        realism: str = None, critic_feedback: list = None) -> str:
+                        realism: str = None, critic_feedback: list = None,
+                        cta_text: str = None) -> str:
     """Construct a Besque-adapted image generation prompt from the blueprint's visual notes.
     include_product=True, text_in_image=False, creative_description=None, edit_mode=False,
     offer_text=None, operator_instruction=None (today's defaults) reproduce the prior
@@ -180,7 +181,9 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
                                    retheme_colours=retheme_colours, palette=brand_palette,
                                    substance_colour=(product or {}).get("substance_colour"),
                                    style=(realism or "").strip() or prod_style,
-                                   typography_zones=blueprint.get("typography_zones")) +
+                                   typography_zones=blueprint.get("typography_zones"),
+                                   structural_zones=blueprint.get("structural_zones"),
+                                   cta_text=cta_text) +
             product_clause +
             closing
         )
@@ -550,6 +553,92 @@ def _suppressed_container_exception(suppressing_text, suppressing_offer, suppres
     )
 
 
+# Zone types this pass has a real Besque value for - only these get substituted. The
+# rest (badge/disclaimer/price_anchor/product_callout) have no operator input yet, so
+# they're removed rather than guessed at. social_proof is deliberately absent from both
+# sets this pass - quotes are approved but the aggregate is held pending Harry, so nothing
+# here should assume either.
+_STRUCTURAL_ZONE_REMOVE_TYPES = ("badge", "disclaimer", "price_anchor", "product_callout")
+
+
+def _structural_zones_clause(structural_zones, zone_copy_text=None, cta_text=None):
+    """Wires blueprint.structural_zones (2026-08-06 schema addition) into edit mode, for
+    only the zone types we have a real Besque value for today:
+    - brand_wordmark: ALWAYS substituted with BESQUE, same position/container, never
+      removed - its absence is the single biggest reason a clone reads as unbranded next
+      to the reference, so this doesn't wait on text_in_image the way the others do.
+    - sub_line / body_copy: substituted with zone_copy_text when supplied, same
+      position/container, matching the reference's own line count where possible.
+      Callers must pass None here (not the raw subtext) when text_in_image is off -
+      otherwise these fall to REMOVAL, same as the container-removal exception already
+      does for headline/subtext - never left showing the reference's own words.
+    - cta: substituted with cta_text when supplied, same button shape/position - same
+      None-when-suppressed rule as above.
+    - badge/disclaimer/price_anchor/product_callout: always REMOVED - container gone
+      entirely, not left as an empty shape, composition rebalanced into the freed space.
+    - social_proof: no instruction generated - left exactly as the general
+      reproduce-faithfully instruction above already governs it.
+
+    Returns (clause_text, substituted_zone_types) - the second value lets the TEXT
+    clause's "entire text budget" ban adjust itself so it never bans a category this
+    function is simultaneously authorising, the same class of writer/rule6 contradiction
+    this codebase has already hit more than once."""
+    substituted_zone_types = set()
+    if not structural_zones:
+        return "", substituted_zone_types
+
+    substitute_lines = []
+    remove_lines = []
+    for z in structural_zones:
+        zt = z.get("zone_type")
+        pos = z.get("position") or "its shown position"
+        container = z.get("container") or "none"
+        if zt == "brand_wordmark":
+            substitute_lines.append(
+                f"- brand_wordmark at {pos} (container: {container}): replace its content "
+                f"with BESQUE - same position, same container shape, never removed."
+            )
+            substituted_zone_types.add(zt)
+        elif zt in ("sub_line", "body_copy"):
+            if zone_copy_text:
+                substitute_lines.append(
+                    f"- {zt} at {pos} (container: {container}): replace its wording with "
+                    f"\"{zone_copy_text}\" - same position, same container, matching the "
+                    f"reference's own line count for this zone where possible, our words only."
+                )
+                substituted_zone_types.add(zt)
+            else:
+                remove_lines.append(f"- {zt} at {pos} (container: {container})")
+        elif zt == "cta":
+            if cta_text:
+                substitute_lines.append(
+                    f"- cta at {pos} (container: {container}): replace its label with "
+                    f"\"{cta_text}\" - same button shape and position, our words only."
+                )
+                substituted_zone_types.add(zt)
+            else:
+                remove_lines.append(f"- cta at {pos} (container: {container})")
+        elif zt in _STRUCTURAL_ZONE_REMOVE_TYPES:
+            remove_lines.append(f"- {zt} at {pos} (container: {container})")
+        # else: social_proof, or an unrecognised zone_type - no instruction either way.
+
+    parts = []
+    if substitute_lines:
+        parts.append(
+            "STRUCTURAL ZONES - SUBSTITUTE (STRICT): the following zones are kept exactly "
+            "as positioned, their content replaced with ours, never the reference's own "
+            "words and never invented: " + " ".join(substitute_lines)
+        )
+    if remove_lines:
+        parts.append(
+            "STRUCTURAL ZONES - REMOVE (STRICT): no Besque value exists for these zones "
+            "yet - each container is removed entirely, not left as an empty shape, and "
+            "the composition rebalanced into the freed space: " + " ".join(remove_lines)
+        )
+    clause = (" ".join(parts) + " ") if parts else ""
+    return clause, substituted_zone_types
+
+
 def _typography_zones_clause(typography_zones):
     """PART B3b (2026-08-06): per-zone typographic TREATMENT, not just per-zone content.
     The TEXT clause below already says "same size, position, weight, casing, and text
@@ -642,7 +731,8 @@ def _register_clause(style):
 def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, offer_text=None,
                             include_product=True, reference_has_product=True,
                             retheme_colours=True, palette=None,
-                            substance_colour=None, style=None, typography_zones=None):
+                            substance_colour=None, style=None, typography_zones=None,
+                            structural_zones=None, cta_text=None):
     """EDIT MODE (2026-08-01): Gemini receives the competitor's own ad as an input image
     Part, not just a text description of it - the reference image IS the creative brief,
     so no template scene/layout/palette description is assembled here (see
@@ -784,10 +874,35 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             "stays exactly as it appears in the source image. "
         )
     eff_headline, eff_subtext = effective_authorised_text(text_in_image, headline, subtext)
+    # structural_zones' sub_line/body_copy/cta substitution must never be offered when
+    # text_in_image itself is off - same gating headline/subtext already use, so these
+    # zones fall to REMOVAL below instead of showing the reference's own words when the
+    # operator asked for no baked-in text this run.
+    zone_copy_text = eff_subtext if text_in_image else None
+    zone_cta_text = cta_text if text_in_image else None
+    structural_clause, substituted_zone_types = _structural_zones_clause(
+        structural_zones, zone_copy_text=zone_copy_text, cta_text=zone_cta_text,
+    )
     if eff_headline:
         permitted = f'the headline "{eff_headline}"'
         if eff_subtext:
             permitted += f' and the supporting text "{eff_subtext}"'
+        # The "entire text budget" ban must never contradict STRUCTURAL ZONES below by
+        # banning a category that clause is simultaneously authorising (2026-08-06) - the
+        # same writer/rule6 contradiction shape this codebase has already hit more than
+        # once. Default (no structural_zones substitution active) is BYTE-FOR-BYTE the
+        # original wording - every blueprint without structural_zones, and every one
+        # where none of sub_line/body_copy/cta apply, sees no change here at all.
+        if substituted_zone_types & {"sub_line", "body_copy", "cta"}:
+            budget_ban = (
+                "no ingredient list or mechanism/benefit paragraph may ALSO be rendered "
+                "beyond what STRUCTURAL ZONES below explicitly authorises"
+            )
+        else:
+            budget_ban = (
+                "no ingredient list, mechanism or benefit paragraph, additional body "
+                "copy, or CTA sentence may ALSO be rendered"
+            )
         base += (
             f"TEXT: preserve the reference image's text zones EXACTLY as they appear - "
             f"same size, position, weight, casing, and text colour - and replace ONLY "
@@ -795,9 +910,8 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             f"weight, casing, placement) and text colour are INHERITED from the "
             f"reference exactly as shown, never re-themed or restyled to a different "
             f"look - the wording is the ONLY thing that changes. This is the ENTIRE text "
-            f"budget for this image - no ingredient list, mechanism or benefit paragraph, "
-            f"additional body copy, or CTA sentence may ALSO be rendered, even if such "
-            f"text exists in the product description, generated copy, or reference ad. "
+            f"budget for this image - {budget_ban}, even if such text exists in the "
+            f"product description, generated copy, or reference ad. "
             f"The competitor's brand name, product name, and claims must NEVER survive "
             f"into the output, even inside this inherited styling. "
         )
@@ -813,6 +927,7 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             f"filled later as a separate HTML overlay. "
         )
     base += _typography_zones_clause(typography_zones)
+    base += structural_clause
     if offer_text:
         base += (
             f"OFFER: if the reference shows an offer, discount, price, or CTA badge, "
@@ -963,7 +1078,7 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
                     include_product=True, text_in_image=False, headline=None, subtext=None,
                     messaging_angle=None, realism=None, body_area=None, offer_text=None,
                     edit_mode=False, competitor_image_bytes=None, operator_instruction=None,
-                    retheme_colours=True, critic_feedback=None):
+                    retheme_colours=True, critic_feedback=None, cta_text=None):
     """Single-pass image generation from the blueprint. One image, no iteration.
     Saves to assets/<stem>_draft.png (stem = ad_id, or ad_id+angle if angle_slug is given)
     and returns the path. Returns None on failure. include_product/text_in_image/headline/
@@ -1040,7 +1155,7 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
                                  creative_description=creative_description, edit_mode=edit_mode,
                                  offer_text=offer_text, operator_instruction=operator_instruction,
                                  retheme_colours=retheme_colours, brand_palette=brand_palette,
-                                 realism=realism, critic_feedback=critic_feedback)
+                                 realism=realism, critic_feedback=critic_feedback, cta_text=cta_text)
     stem = _draft_stem(ad_id, angle_slug)
     try:
         client = genai.Client(vertexai=True, project="besque-martech", location="global")

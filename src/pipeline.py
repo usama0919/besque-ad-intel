@@ -652,6 +652,12 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
                     body_area=body_area, offer_text=offer_text,
                     edit_mode=edit_mode, competitor_image_bytes=(image_bytes if edit_mode else None),
                     operator_instruction=operator_instruction, retheme_colours=retheme_colours,
+                    # cta_text (2026-08-06): the generated copy's own CTA label, only
+                    # consumed by build_image_prompt's structural_zones "cta" substitution
+                    # in edit mode - a no-op everywhere else (generate mode/no structural
+                    # zones), same "caller decides, this just forwards" pattern as
+                    # offer_text/realism.
+                    cta_text=copy.get("cta") or None,
                     **gen_kwargs,
                 )
             except Exception as e:

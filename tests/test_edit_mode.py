@@ -1174,3 +1174,162 @@ def test_build_image_prompt_generate_mode_unaffected_by_typography_zones():
     bp_with_zones["typography_zones"] = [_zone()]
     assert (generate_image_prompt.build_image_prompt(bp_plain)
             == generate_image_prompt.build_image_prompt(bp_with_zones))
+
+
+# ---- structural_zones generator wiring (2026-08-06) - only the zone types we have a
+# real Besque value for today: brand_wordmark (always), sub_line/body_copy/cta (only when
+# text_in_image supplies real content, else removed - never left showing the reference's
+# own words), badge/disclaimer/price_anchor/product_callout (always removed, no operator
+# input exists yet), social_proof (untouched, no instruction either way). ----
+
+def _szone(zone_type, **overrides):
+    z = {"zone_type": zone_type, "position": "top-center", "container": "none"}
+    z.update(overrides)
+    return z
+
+
+def test_structural_zones_clause_empty_for_blank_input():
+    clause, substituted = generate_image_prompt._structural_zones_clause(None)
+    assert clause == "" and substituted == set()
+    clause, substituted = generate_image_prompt._structural_zones_clause([])
+    assert clause == "" and substituted == set()
+
+
+def test_structural_zones_clause_brand_wordmark_always_substituted():
+    """The single biggest visible gap in every draft so far - never removed, never
+    gated on text_in_image, unlike everything else this function handles."""
+    clause, substituted = generate_image_prompt._structural_zones_clause(
+        [_szone("brand_wordmark", position="top-center", container="oval")]
+    )
+    assert "brand_wordmark" in substituted
+    assert "replace its content with BESQUE" in clause
+    assert "never removed" in clause
+    assert "top-center" in clause and "oval" in clause
+
+
+def test_structural_zones_clause_sub_line_and_body_copy_substituted_when_text_supplied():
+    clause, substituted = generate_image_prompt._structural_zones_clause(
+        [_szone("sub_line"), _szone("body_copy")], zone_copy_text="7 cold-pressed oils.",
+    )
+    assert substituted == {"sub_line", "body_copy"}
+    assert clause.count('"7 cold-pressed oils."') == 2
+    assert "matching the reference's own line count" in clause
+
+
+def test_structural_zones_clause_sub_line_and_body_copy_removed_when_no_text():
+    """No Besque text for this run (text_in_image off, or no copy) - never leave the
+    reference's own sub-line/body-copy sitting there untouched."""
+    clause, substituted = generate_image_prompt._structural_zones_clause(
+        [_szone("sub_line"), _szone("body_copy")], zone_copy_text=None,
+    )
+    assert substituted == set()
+    assert "STRUCTURAL ZONES - REMOVE" in clause
+    assert "sub_line" in clause and "body_copy" in clause
+    assert "STRUCTURAL ZONES - SUBSTITUTE" not in clause
+
+
+def test_structural_zones_clause_cta_substituted_when_text_supplied():
+    clause, substituted = generate_image_prompt._structural_zones_clause(
+        [_szone("cta", position="bottom-center", container="rect")], cta_text="Shop Besque Magic Body Oil",
+    )
+    assert substituted == {"cta"}
+    assert "Shop Besque Magic Body Oil" in clause
+    assert "same button shape and position" in clause
+
+
+def test_structural_zones_clause_cta_removed_when_no_text():
+    clause, substituted = generate_image_prompt._structural_zones_clause(
+        [_szone("cta")], cta_text=None,
+    )
+    assert substituted == set()
+    assert "STRUCTURAL ZONES - REMOVE" in clause
+
+
+def test_structural_zones_clause_always_removes_badge_disclaimer_price_callout():
+    always_remove = ["badge", "disclaimer", "price_anchor", "product_callout"]
+    clause, substituted = generate_image_prompt._structural_zones_clause(
+        [_szone(zt) for zt in always_remove],
+        zone_copy_text="irrelevant", cta_text="irrelevant",  # even with text available
+    )
+    assert substituted == set()
+    for zt in always_remove:
+        assert zt in clause
+    assert "STRUCTURAL ZONES - SUBSTITUTE" not in clause
+
+
+def test_structural_zones_clause_social_proof_generates_no_instruction():
+    clause, substituted = generate_image_prompt._structural_zones_clause(
+        [_szone("social_proof", social_proof_kind="aggregate_bar")],
+        zone_copy_text="text", cta_text="cta",
+    )
+    assert clause == ""
+    assert substituted == set()
+
+
+def test_structural_zones_clause_handles_several_of_the_same_type():
+    clause, substituted = generate_image_prompt._structural_zones_clause(
+        [_szone("badge", position="top-left"), _szone("badge", position="top-right")]
+    )
+    assert clause.count("badge") == 2
+    assert "top-left" in clause and "top-right" in clause
+
+
+def test_edit_mode_instruction_forwards_structural_zones_and_cta_text():
+    instruction = generate_image_prompt._edit_mode_instruction(
+        text_in_image=True, headline="H", subtext="S",
+        structural_zones=[_szone("brand_wordmark")], cta_text="Shop Now",
+    )
+    assert "STRUCTURAL ZONES - SUBSTITUTE" in instruction
+    assert "replace its content with BESQUE" in instruction
+
+
+def test_edit_mode_instruction_gates_zone_copy_and_cta_on_text_in_image():
+    """text_in_image=False must suppress zone_copy_text/cta_text the SAME way it already
+    suppresses headline/subtext - sub_line/body_copy/cta fall to removal, never showing
+    the reference's own words just because text_in_image happened to be off."""
+    instruction = generate_image_prompt._edit_mode_instruction(
+        text_in_image=False, headline="H", subtext="S",
+        structural_zones=[_szone("sub_line"), _szone("cta")], cta_text="Shop Now",
+    )
+    assert "STRUCTURAL ZONES - SUBSTITUTE" not in instruction
+    assert "STRUCTURAL ZONES - REMOVE" in instruction
+
+
+def test_edit_mode_instruction_text_budget_unchanged_when_no_structural_substitution():
+    """Byte-for-byte the original wording when structural_zones is absent or doesn't
+    substitute anything - every existing blueprint, and every reference without
+    sub_line/body_copy/cta, must see no change here at all."""
+    with_zones = generate_image_prompt._edit_mode_instruction(
+        text_in_image=True, headline="H", subtext="S",
+        structural_zones=[_szone("badge")],  # present, but only removes - never substitutes
+    )
+    without_zones = generate_image_prompt._edit_mode_instruction(
+        text_in_image=True, headline="H", subtext="S", structural_zones=None,
+    )
+    assert "no ingredient list, mechanism or benefit paragraph, additional body copy, or CTA sentence may ALSO be rendered" in with_zones
+    assert "no ingredient list, mechanism or benefit paragraph, additional body copy, or CTA sentence may ALSO be rendered" in without_zones
+
+
+def test_edit_mode_instruction_text_budget_relaxes_only_for_substituted_categories():
+    instruction = generate_image_prompt._edit_mode_instruction(
+        text_in_image=True, headline="H", subtext="S",
+        structural_zones=[_szone("cta")], cta_text="Shop Now",
+    )
+    assert "no ingredient list or mechanism/benefit paragraph may ALSO be rendered" in instruction
+    assert "beyond what STRUCTURAL ZONES below explicitly authorises" in instruction
+    assert "additional body copy, or CTA sentence may ALSO be rendered" not in instruction
+
+
+def test_build_image_prompt_edit_mode_reads_structural_zones_and_cta_from_blueprint():
+    bp = _blueprint()
+    bp["structural_zones"] = [_szone("brand_wordmark")]
+    prompt = generate_image_prompt.build_image_prompt(bp, edit_mode=True, cta_text="Shop Now")
+    assert "replace its content with BESQUE" in prompt
+
+
+def test_build_image_prompt_generate_mode_unaffected_by_structural_zones():
+    bp_plain = _blueprint()
+    bp_with_zones = _blueprint()
+    bp_with_zones["structural_zones"] = [_szone("brand_wordmark")]
+    assert (generate_image_prompt.build_image_prompt(bp_plain, cta_text="Shop Now")
+            == generate_image_prompt.build_image_prompt(bp_with_zones, cta_text="Shop Now"))
