@@ -27,6 +27,58 @@ prompt clause to `brand_rules()`/the writer/`_edit_mode_instruction`.** A ninth 
 longer STRICT block has the same failure mode as the first eight rules already there —
 more prompt text is not the lever that has ever worked for this class of bug.
 
+**Confirmed a third and fourth time, 2026-08-06** (Grüns GLP-1 illustrated ad): an FDA
+disclaimer-removal instruction and an illustrated-bottle-must-not-be-photorealistic
+instruction were BOTH present in the persisted prompt on BOTH attempts of the
+corrective-retry loop — attempt 2 even quoted the critic's own finding back at Gemini
+verbatim, naming the disclaimer's exact text — and Gemini ignored both, twice. **The
+fix that actually worked was structural, not textual**: dropping the product's
+photographic reference images entirely when the register is `illustrated`
+(`_edit_mode_instruction`), so there's no photograph for Gemini to lean on regardless
+of the prompt. The disclaimer leak has no structural fix yet and still relies on the
+critic/retry loop as the sole backstop. **The corollary this adds: when a wording-only
+fix keeps failing, look for a structural lever — an input you can withhold or change —
+before writing a ninth sentence.** See "fabricated testimonials render on the image"
+in Known gaps below for this exact violation class recurring, unfixed, on a different
+input (customer quotes rather than a disclaimer).
+
+## `regenerate` froze an ad's prompt forever — fixed 2026-08-06, commit `45b183d`
+Until `45b183d`, `pipeline._regenerate_existing_draft` never called `build_image_prompt`
+again — it read the artifact's OWN stored `image_prompt` text verbatim and just
+appended `_regenerate_delta_clause(instruction)` on top
+(`generate_image_prompt.regenerate_from_stored_prompt`). So any ad that already had a
+draft carried its ORIGINAL generation's prompt for life: no later rule, guardrail, or
+compliance fix could ever reach it through Regenerate, no matter how many times an
+operator clicked it. **Drafts the team actively iterates on via Regenerate were
+therefore the LEAST protected against a later fix, not the most** — the opposite of
+what anyone would assume from the UI.
+
+Found live: the Grüns GLP-1 illustrated-bottle fix (see the guardrails note above)
+appeared to silently not work on a real ad, even after confirming the source was
+correct and the process had been restarted after the fix commit. The actual cause
+traced two levels deep — first to `_regenerate_existing_draft`'s frozen prompt, then to
+the fact that the specific ad tested had already been regenerated once *before* the fix
+landed, so its stored prompt (and everything descended from it) predated the fix
+entirely and no restart could ever have changed that.
+
+**Fixed**: `_regenerate_existing_draft` now REBUILDS the prompt every time via
+`build_image_prompt`, from the artifact's own stored inputs (`blueprint`,
+`generated_copy`, `text_in_image`, `operator_instruction`, plus six newly-added
+nullable artifact columns — `include_product`/`retheme_colours`/`realism`/`body_area`/
+`offer_text`/`product_id`, self-migrating in `dedupe.init_artifacts()`) — THEN appends
+the operator's delta instruction on top. A stored input that comes back NULL (a
+pre-migration row, or a caller that never passed it) is logged by name with what it was
+defaulted to, never silently guessed. Same function also now falls back to a normal
+first generation when no artifact exists yet, instead of failing the ad (was:
+`"regenerate requested but no existing artifact for angle_id=None"` — same root cause,
+the function assumed history always exists once Regenerate is requested).
+
+**The standing lesson, not just the bug**: verifying an image-path fix by clicking
+Regenerate on an ad that already has a draft proves NOTHING about whether the fix
+works, because Regenerate's own mechanism can mask an unrelated, already-fixed bug
+indefinitely. **Always verify a prompt/rule fix via Generate on an ad that has never
+been drafted before — never via Regenerate.**
+
 ## Operational gotchas (learned 3 Aug 2026)
 
 - **Restart uvicorn after any commit touching `src/`.** No `--reload` (deliberate —
@@ -119,6 +171,17 @@ short-circuits `_page_matches` (`scrape.py:78`). A valid-but-wrong ID then scrap
 brand silently, with nothing checking the name. Probe any new ID before a full run and
 confirm the `page_name` and `page_id` carried on the returned ads.
 
+## `POST /api/competitors` still writes the brand NAME into `page_id` — open bug
+`dashboard.py:753`: `resolved_page_id = page_id or name`. This is the exact bug already
+fixed in the PUT handler (see "Two dashboard bugs" under 2026-08-04 below) — but the
+ADD-competitor endpoint still has it. Found 2026-08-06: **38 of the 50 tracked
+competitor rows had the brand's NAME sitting in `page_id`** instead of a real numeric
+Facebook Ad Library id; 32 fixed by hand. **The fallback itself is still live** — every
+new competitor added through this endpoint without an explicit numeric id will keep
+reproducing this. Distinct from the note directly above: that one is about `scrape.py`
+never validating an existing `page_id`; this one is about `dashboard.py` writing a
+wrong `page_id` to begin with.
+
 ## `product=` must reach both live calls
 `process_ad` passes the product dict to `generate_copy_live` (`pipeline.py:39`) **and**
 `generate_image` (`pipeline.py:45`). Dropping it from the copy call renders "None supplied."
@@ -204,7 +267,32 @@ blueprint reused). Final failure is recorded via
   (`s[:i] + new + s[j:]`) — especially not a live template.
 - No destructive DB or filesystem commands without asking; dry-run and show counts first.
 
-## Known gaps (as of 2026-08-04)
+## Known gaps (as of 2026-08-04, additions dated 2026-08-06 marked inline)
+- **OPEN, SEVERITY-CRITICAL, 2026-08-06: fabricated testimonials render on the IMAGE, not
+  just in copy.** Generated claims appear inside quotation marks with a star rating,
+  styled exactly like a real customer quote, despite `approved_testimonials` being empty
+  at every call site (see below) and compliance rule C2 supposedly banning this. This is
+  the EXACT violation category from the original six-violation sweep (top guardrails
+  note, leak #6) recurring on the image path specifically — and now that
+  `product_reviews` holds 18,920 real reviews (see 2026-08-06 note above), there's a real
+  legitimate alternative to fabricating one. **Fix must be: a REAL stored review or
+  nothing rendered — never a generated quote, never a fallback that invents one when no
+  real review matches.** Not yet fixed.
+- **OPEN, 2026-08-06: bottle rendering register only fixed in ONE direction.** `fc73058`
+  stops a photorealistic bottle appearing in an illustrated scene (drops reference
+  photos, describes the bottle natively when `style=="illustrated"` — see the top
+  guardrails note). The REVERSE has also been observed live: an illustrated-looking
+  bottle in an otherwise photographic scene. Needs one general rule that binds both ways
+  — `_edit_mode_instruction`'s photographic branch still unconditionally says "shown in
+  the reference photo(s) that follow" with no corresponding check the other direction.
+- **OPEN, 2026-08-06: double headline when `text_in_image` is on.** The HTML overlay
+  (headline/offer rendered as a separate layer on the card) and the baked-in in-scene
+  text (`_edit_mode_instruction`'s TEXT branch) can both be active at once, rendering the
+  headline twice — once as real overlay HTML, once drawn into the image itself. Not yet
+  root-caused or fixed; needs one to be suppressed when the other is active rather than
+  both defaulting on independently.
+- **OPEN, 2026-08-06: competitor product text still leaks into drafts.** Not yet
+  root-caused this session — flagged for follow-up, no fix direction identified yet.
 - **`DATABASE_URL` in `.env` pointing at a raw IP is correct, not a misconfiguration** —
   that's the documented local-dev route to Cloud SQL; Cloud Run itself connects via the
   socket path instead. `.env.example`'s `localhost` value is the thing that's out of date,
@@ -377,6 +465,21 @@ blueprint reused). Final failure is recorded via
   chosen, but must never appear as an assertion outside a real quote.
 - Still unanswered: emotional register for loose skin, crepey skin, bruising, and
   menopause; and a separate, still-open bottle-description dispute.
+
+### Reviews imported 2026-08-06 — `product_reviews` table, aggregate claim NOT cleared
+18,920 real customer reviews imported (`import_reviews.py`), scoped via
+`products.shopify_product_ids` to product_id=1 only, filtered to Active status +
+rating≥4. Medical-flag rows are STORED with the matched keyword, not dropped — see C5
+above, mechanism/medical language still needs a human check before use, this just keeps
+the row instead of silently losing it.
+
+**A published review-count/average is HELD pending Harry, and the data explains why**:
+Active rows are 99.95% 4-5★, but ~20,000 Rejected rows are 89% 1-3★ — the two statuses
+are clearly not a random sample of the same population, they're filtered by outcome.
+Publishing an aggregate built only from the surviving (self-selected) Active set would
+likely read as a substantiated efficacy/satisfaction claim, not neutral social proof.
+Do not compute or surface an aggregate count/average until this is resolved — same
+category of open regulatory question as the still-unanswered items directly above.
 
 ### Also as of today
 - `export_drafts.py` exists at repo root - a standalone, read-only export utility (drafts +
@@ -553,6 +656,11 @@ Seven items, ordered by risk, each its own commit so they can be bisected indepe
    `check_output` run-strip toggle (off by default — real cost, an extra vision call per
    ad). `CITED_RULE_IDS` ties its checklist to actual rule numbers so it can't silently
    drift from `brand_rules()` without a test noticing.
+   **Confirmed firing end-to-end live, 2026-08-06**: a HIGH-confidence finding on
+   attempt 1 → one corrective retry → still HIGH → saved and marked
+   `critic_high_after_retry`, never left indistinguishable from a clean pending draft.
+   First real proof this loop's designed behaviour actually happens, not just passes
+   its own tests.
 2. **Two compliance holes**: `FIRST_PERSON_PATTERN` only matched literal "I" — extended to
    catch first-person possessive testimonial phrasing ("my new staple") with no "I" at
    all. New `check_unauthorized_efficacy_claim` (always-on, unlike the offer check) catches
@@ -582,6 +690,16 @@ Seven items, ordered by risk, each its own commit so they can be bisected indepe
    ...)`) inside `build_image_prompt`, silently shadowing the caller's value before
    `_edit_mode_instruction` ever saw it — renamed to `brand_palette` throughout. A reminder
    that a parameter name alone doesn't guarantee no collision in a large function.
+6. **Image resolution — `ImageConfig.image_size` (2026-08-06).** Never set anywhere before
+   this, so every generation ran at Gemini's lowest tier by default — measured live, a
+   1080x1920 reference produced a 768x1376 draft, under Meta's 1080x1350 minimum for a 4:5
+   feed image. Now explicitly `"2K"` on every `ImageConfig` this module builds. Measured
+   1K vs 2K on the same reference: 1536x2752 vs 768x1376 (exactly double, as expected),
+   32.1s vs 22.9s generation time (+40%), 4.9MB vs 1.1MB file (~4.3x). Confirmed nothing
+   downstream resizes/recompresses on save or serving - the size increase is real and
+   compounds across a review screen showing many cards at once and across GCS storage.
+   **Follow-up queued, not built**: serve a downscaled thumbnail on cards, full resolution
+   only on click.
 
 **Not started:**
 6. **Three edit-mode corrections.** *Why these matter*: aspect ratio is currently forced to
