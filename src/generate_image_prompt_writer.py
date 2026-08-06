@@ -168,13 +168,14 @@ STYLE_GUIDANCE = {
         "here - that comes from the product record and the bottle-fixed clause downstream."
     ),
 }
-# A schema addition to production_style can't silently leave this dict (and every one of
-# its three consumers) with nothing to say about it.
-from src import validator as _validator
-assert set(_validator.production_styles()) <= set(STYLE_GUIDANCE), (
-    "STYLE_GUIDANCE is missing an entry for one of validator.production_styles()"
-)
-del _validator
+# Coverage against a schema addition to production_style is asserted in
+# test_style_guidance_has_every_canonical_style (tests/test_generate_image_prompt.py),
+# not here (2026-08-06, item 3): a module-level assert ran on every import of this file,
+# which pipeline.py imports - if it ever tripped in the deployed container, the whole
+# import chain fails and every request 500s, the exact shape of the missing-Pillow
+# outage (see CLAUDE.md). `python -O` also strips assert statements entirely, so it was
+# unreliable as a safety net even where it did run. The test gives the identical
+# coverage in CI/dev, with no way to take production down if it starts failing.
 
 
 def _build_user_prompt(blueprint, product=None, angle=None, realism=None, body_area=None,
