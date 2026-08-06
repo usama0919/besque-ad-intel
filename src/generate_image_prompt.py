@@ -554,11 +554,15 @@ def _suppressed_container_exception(suppressing_text, suppressing_offer, suppres
 
 
 # Zone types this pass has a real Besque value for - only these get substituted. The
-# rest (badge/disclaimer/price_anchor/product_callout) have no operator input yet, so
-# they're removed rather than guessed at. social_proof is deliberately absent from both
-# sets this pass - quotes are approved but the aggregate is held pending Harry, so nothing
-# here should assume either.
-_STRUCTURAL_ZONE_REMOVE_TYPES = ("badge", "disclaimer", "price_anchor", "product_callout")
+# rest (badge/price_anchor/product_callout) have no operator input yet, so they're removed
+# rather than guessed at. disclaimer is also always removed, but gets its own branch below
+# (not this tuple) because a disclaimer's removal carries an extra rule the others don't:
+# any asterisk/footnote marker pointing to it must go too (2026-08-06, Grüns GLP-1 leak - a
+# US FDA supplement disclaimer survived onto a UK cosmetic ad for a product it never applied
+# to, with the headline's asterisk left pointing at a competitor's legal text). social_proof
+# is deliberately absent from both sets this pass - quotes are approved but the aggregate is
+# held pending Harry, so nothing here should assume either.
+_STRUCTURAL_ZONE_REMOVE_TYPES = ("badge", "price_anchor", "product_callout")
 
 
 def _structural_zones_clause(structural_zones, zone_copy_text=None, cta_text=None):
@@ -574,8 +578,12 @@ def _structural_zones_clause(structural_zones, zone_copy_text=None, cta_text=Non
       does for headline/subtext - never left showing the reference's own words.
     - cta: substituted with cta_text when supplied, same button shape/position - same
       None-when-suppressed rule as above.
-    - badge/disclaimer/price_anchor/product_callout: always REMOVED - container gone
-      entirely, not left as an empty shape, composition rebalanced into the freed space.
+    - badge/price_anchor/product_callout: always REMOVED - container gone entirely, not
+      left as an empty shape, composition rebalanced into the freed space.
+    - disclaimer: always REMOVED, same as above, but a legal/regulatory/medical disclaimer
+      belonging to the reference brand is never Besque's for ANY product - the removal
+      instruction also explicitly takes any pointing asterisk/footnote marker with it, so
+      no dangling reference is left behind (2026-08-06, Grüns GLP-1 leak).
     - social_proof: no instruction generated - left exactly as the general
       reproduce-faithfully instruction above already governs it.
 
@@ -589,6 +597,7 @@ def _structural_zones_clause(structural_zones, zone_copy_text=None, cta_text=Non
 
     substitute_lines = []
     remove_lines = []
+    disclaimer_lines = []
     for z in structural_zones:
         zt = z.get("zone_type")
         pos = z.get("position") or "its shown position"
@@ -618,6 +627,8 @@ def _structural_zones_clause(structural_zones, zone_copy_text=None, cta_text=Non
                 substituted_zone_types.add(zt)
             else:
                 remove_lines.append(f"- cta at {pos} (container: {container})")
+        elif zt == "disclaimer":
+            disclaimer_lines.append(f"- disclaimer at {pos} (container: {container})")
         elif zt in _STRUCTURAL_ZONE_REMOVE_TYPES:
             remove_lines.append(f"- {zt} at {pos} (container: {container})")
         # else: social_proof, or an unrecognised zone_type - no instruction either way.
@@ -634,6 +645,17 @@ def _structural_zones_clause(structural_zones, zone_copy_text=None, cta_text=Non
             "STRUCTURAL ZONES - REMOVE (STRICT): no Besque value exists for these zones "
             "yet - each container is removed entirely, not left as an empty shape, and "
             "the composition rebalanced into the freed space: " + " ".join(remove_lines)
+        )
+    if disclaimer_lines:
+        parts.append(
+            "STRUCTURAL ZONES - REMOVE, DISCLAIMER (STRICT): a legal, regulatory, or medical "
+            "disclaimer belonging to the reference brand is NEVER Besque's, whatever product "
+            "is being advertised and whatever the reference sells - remove the container "
+            "entirely, not left as an empty shape. Any asterisk or footnote marker elsewhere "
+            "in the frame (on a headline, subtext, or badge) that points to this disclaimer "
+            "must be removed with it - a dangling asterisk with no referent left behind is "
+            "its own defect, just as bad as the disclaimer text itself: "
+            + " ".join(disclaimer_lines)
         )
     clause = (" ".join(parts) + " ") if parts else ""
     return clause, substituted_zone_types

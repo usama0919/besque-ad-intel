@@ -99,8 +99,14 @@ def effective_body_area(blueprint, body_area):
 # already govern the bottle downstream of the writer, so hardcoding either description
 # here would just give the writer a second, competing source of truth for it. What IS kept
 # is the doc's underlying insight for "illustrated": label detail drifts into unreadable
-# scribbles unless the writer is explicitly told to preserve photorealistic label detail -
-# encoded below as a requirement, without naming what the label actually says or looks like.
+# scribbles unless the writer is explicitly told to keep it legible - encoded below as a
+# requirement, without naming what the label actually says or looks like. That requirement
+# originally said "photorealistic label detail", which overshot the team's actual rule and
+# produced a live bug (2026-08-06, Grüns GLP-1 reference): a photorealistic bottle composited
+# into an otherwise hand-drawn illustrated scene. The team's rule is narrower - geometry,
+# proportions and label CONTENT stay exactly accurate for every register, but the RENDERING
+# of the bottle (and its label) always matches the surrounding scene's own visual style. Fixed
+# to say "accurate and legible, rendered in this scene's own illustrated visual language".
 STYLE_GUIDANCE = {
     "ugc_native": (
         "Framing: extremely realistic UGC-style photograph, shot on a smartphone/phone front "
@@ -162,10 +168,15 @@ STYLE_GUIDANCE = {
         "border, halftone dot shading on skin. Flat vector - clean bold outlines, flat shading, "
         "bright warm colour palette, playful and eye-catching, sticker-style aesthetic. Label "
         "fidelity: illustrated styles tend to abstract the product's label into unreadable "
-        "scribbles unless told otherwise - explicitly state that the product keeps "
-        "photorealistic label detail, angled so the label reads clearly, even inside an "
-        "otherwise illustrated scene. Never describe what the label actually says or looks like "
-        "here - that comes from the product record and the bottle-fixed clause downstream."
+        "scribbles unless told otherwise - explicitly state that the product's label stays "
+        "accurate and legible, angled so it reads clearly, but rendered in THIS SCENE'S OWN "
+        "illustrated visual language, never photorealistic and never a photographic bottle "
+        "composited into the drawing - a 3D/Pixar scene gets a 3D/Pixar-rendered label, a "
+        "vintage comic scene gets the same bold-outline/halftone treatment on the label, a flat "
+        "vector scene gets the same flat-shaded treatment. Accurate and legible governs WHAT the "
+        "label says; the surrounding style governs HOW it's rendered - both at once, never one "
+        "traded for the other. Never describe what the label actually says or looks like here - "
+        "that comes from the product record and the bottle-fixed clause downstream."
     ),
 }
 # Coverage against a schema addition to production_style is asserted in

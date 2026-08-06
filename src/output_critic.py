@@ -31,7 +31,8 @@ log = logging.getLogger("output_critic")
 # default these to high confidence rather than hedge.
 HIGH_CONFIDENCE_BY_DEFAULT = (
     "unauthorised offer", "scarcity claim", "promo code", "efficacy claim", "testimonial",
-    "product category mismatch",
+    "product category mismatch", "regulatory text carried over from the reference",
+    "product rendering does not match the scene's style",
 )
 
 CRITIC_SYSTEM = (
@@ -77,11 +78,23 @@ CRITIC_SYSTEM = (
     "content\n"
     "- garbled or illegible rendered text\n"
     "- text rendered when none was authorised below, or missing when it was authorised "
-    "(rule 6)\n\n"
+    "(rule 6)\n"
+    "- regulatory, legal, or medical disclaimer text carried over from the reference - an "
+    "FDA/dietary-supplement statement, drug facts, a clinical-trial footnote, "
+    "country-specific legal text, or a competitor's own T&Cs - on ANY product, even one "
+    "the disclaimer plainly doesn't apply to (the disclaimer-removal instruction). Also "
+    "flag a dangling asterisk or footnote marker left with no referent after disclaimer "
+    "text was removed - that's its own defect, just as bad as the disclaimer surviving\n"
+    "- the product rendered in a different visual register than the surrounding scene - "
+    "most commonly a photorealistic bottle composited into an otherwise illustrated/"
+    "hand-drawn scene, or the reverse - the bottle's geometry and label CONTENT must stay "
+    "accurate, but its RENDERING must match the scene around it (the bottle-rendering-"
+    "matches-scene instruction)\n\n"
     "Treat a hit in these categories as HIGH confidence by default unless you are quite "
     "sure it's a false read: unauthorised offer, scarcity claim, promo code, efficacy "
-    "claim, testimonial, product category mismatch. These are the exact categories that "
-    "have shipped in real drafts before this check existed."
+    "claim, testimonial, product category mismatch, regulatory text carried over from the "
+    "reference, product rendering does not match the scene's style. These are the exact "
+    "categories that have shipped in real drafts before this check existed."
 )
 
 # CRITIC_SYSTEM is an INDEPENDENTLY hand-written checklist, not generated from

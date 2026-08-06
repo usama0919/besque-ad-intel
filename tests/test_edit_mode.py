@@ -1048,8 +1048,20 @@ def test_register_clause_absent_when_no_style():
 def test_register_clause_uses_style_guidance():
     instruction = generate_image_prompt._register_clause("illustrated")
     assert "Pixar" in instruction
-    assert "photorealistic label detail" in instruction
+    assert "accurate and legible" in instruction
     assert "hand-drawn bottle inside a photographic frame" in instruction
+
+
+def test_register_clause_illustrated_label_never_says_photorealistic():
+    """2026-08-06, Grüns GLP-1 leak: STYLE_GUIDANCE's illustrated entry used to say the
+    label keeps "photorealistic label detail", which directly contradicted the
+    bottle-rendering-matches-scene clause in the same prompt and produced a photorealistic
+    bottle composited into an otherwise hand-drawn scene. The label must stay accurate and
+    legible, but rendered in the scene's own illustrated visual language, never
+    photorealistic."""
+    instruction = generate_image_prompt._register_clause("illustrated")
+    assert "photorealistic label detail" not in instruction
+    assert "illustrated visual language" in instruction
 
 
 def test_register_clause_states_faithful_reproduction_wins_over_style_vocabulary():
