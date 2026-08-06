@@ -42,3 +42,8 @@ backups/
 exports/
 
 data/
+
+part1g_*.txt
+part_b*.txt
+pinned_test_output.txt
+retry_tests_output.txt
