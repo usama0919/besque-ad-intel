@@ -124,6 +124,110 @@ def test_process_ad_does_not_hard_block_ordinary_skincare_reference(monkeypatch)
     assert pipeline.process_ad(ad) == "processed"
 
 
+# ---- Task H, Part 1 (2026-08-07): a reference with nothing to clone (no product, no
+# headline, no text zone, no offer) must be skipped INSIDE process_ad, right after
+# deconstruct - including on a FIRST-EVER generation, never only against a prior artifact.
+
+def _nothing_to_clone_blueprint(**overrides):
+    bp = {
+        "format": "lifestyle_scene",
+        "layout_detail": {"product_count": 0},
+        "product_category": {"category": "other", "signals": []},
+        "visual": {"subject": "woman in a robe by a window"},
+    }
+    bp.update(overrides)
+    return bp
+
+
+def test_process_ad_skips_reference_with_nothing_to_clone(monkeypatch):
+    """product_count==0 AND no headline AND no text zone AND no offer - proven live as a
+    redrawn woman with no product and no copy. Must skip, never fail, never generate."""
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    dedupe.init_pipeline_warnings()
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+          "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    monkeypatch.setattr(pipeline.assets, "download_image", lambda url, aid: "fake.jpg")
+    monkeypatch.setattr(pipeline.assets, "download_image_bytes", lambda url: b"fake-bytes")
+    monkeypatch.setattr(pipeline.deconstruct, "deconstruct_image",
+                        lambda **k: _nothing_to_clone_blueprint())
+    copy_calls, image_calls = [], []
+    monkeypatch.setattr(pipeline.generate_copy, "generate_copy_live", lambda *a, **k: copy_calls.append(1))
+    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image", lambda *a, **k: image_calls.append(1))
+    warnings = []
+    monkeypatch.setattr(pipeline.dedupe, "record_warning", lambda kind, detail: warnings.append((kind, detail)))
+    try:
+        assert pipeline.process_ad(ad) == "skipped"
+        assert copy_calls == []  # never reaches copy generation
+        assert image_calls == []  # never reaches image generation
+        assert any(kind == "reference_nothing_to_clone" for kind, detail in warnings)
+        assert dedupe.is_new(ad_id) is False  # marked seen - never re-analysed on a future run
+    finally:
+        with dedupe.get_conn() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM seen_ads WHERE ad_id = %s", (ad_id,))
+            conn.commit()
+
+
+def test_process_ad_does_not_skip_when_reference_has_a_headline(monkeypatch):
+    """product_count==0 but a real headline exists - there IS something to clone, so this
+    must proceed, never be conflated with the true nothing-to-clone case."""
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+          "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    _mock_all_stages(monkeypatch)
+    monkeypatch.setattr(pipeline.deconstruct, "deconstruct_image",
+                        lambda **k: _nothing_to_clone_blueprint(headline_verbatim="Feel confident again"))
+    try:
+        assert pipeline.process_ad(ad) == "processed"
+    finally:
+        with dedupe.get_conn() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM seen_ads WHERE ad_id = %s", (ad_id,))
+            conn.commit()
+
+
+def test_process_ad_does_not_skip_when_reference_has_a_text_bearing_zone(monkeypatch):
+    """product_count==0, no headline_verbatim, but a text-bearing structural zone
+    (sub_line/body_copy/cta) exists - still something to clone."""
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+          "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    _mock_all_stages(monkeypatch)
+    monkeypatch.setattr(pipeline.deconstruct, "deconstruct_image", lambda **k: _nothing_to_clone_blueprint(
+        structural_zones=[{"zone_type": "sub_line", "position": "top", "container": "none", "detail": "tagline"}],
+    ))
+    try:
+        assert pipeline.process_ad(ad) == "processed"
+    finally:
+        with dedupe.get_conn() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM seen_ads WHERE ad_id = %s", (ad_id,))
+            conn.commit()
+
+
+def test_process_ad_does_not_skip_when_reference_has_an_offer(monkeypatch):
+    """product_count==0, no headline, no text zone, but an offer exists - still something
+    to clone."""
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+          "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    _mock_all_stages(monkeypatch)
+    monkeypatch.setattr(pipeline.deconstruct, "deconstruct_image", lambda **k: _nothing_to_clone_blueprint(
+        offer={"type": "discount", "value": "20%", "mechanic": "sitewide"},
+    ))
+    try:
+        assert pipeline.process_ad(ad) == "processed"
+    finally:
+        with dedupe.get_conn() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM seen_ads WHERE ad_id = %s", (ad_id,))
+            conn.commit()
+
+
 # ---- Prompt 4, Item 4: format flag - FLAG, never a filter, always processed normally ----
 
 def test_process_ad_persists_format_flag_when_reference_is_a_bundle(monkeypatch):
@@ -166,11 +270,18 @@ def test_process_ad_format_flag_empty_string_when_no_mismatch(monkeypatch):
 # also caused - both cases now record a pipeline_warning AND surface on the card. ----
 
 def _no_product_in_reference_blueprint():
+    """product_count == 0 to exercise the silent-override audit below - but WITH a
+    headline, deliberately, so this stays a "no product, but something else to clone"
+    reference, distinct from Task H's "nothing here to clone at all" (product_count == 0
+    AND no headline AND no text zone AND no offer) - the two are different bugs with
+    different fixes, and this fixture must not accidentally trip the second one while
+    testing the first."""
     return {
         "format": "before_after",
         "layout_detail": {"product_count": 0},
         "product_category": {"category": "firming", "signals": []},
         "visual": {"subject": "before/after skin comparison, no product in frame"},
+        "headline_verbatim": "See the difference in 30 days",
     }
 
 

@@ -1,5 +1,6 @@
 """Regeneration step (image prompt): turn a blueprint's visual into an image-gen prompt."""
 import io
+import logging
 import math
 import os
 from PIL import Image
@@ -7,6 +8,63 @@ from src import assets, generate_image_prompt_writer
 from src.compliance_rules import COMPLIANCE_RULES
 
 IMAGE_MODEL = os.getenv("IMAGE_MODEL", "placeholder-image-model")
+
+log = logging.getLogger("generate_image_prompt")
+
+
+# SUBSTITUTION AS ONE RULE, props row (2026-08-07): a prop belonging to the COMPETITOR's
+# own product category (an applicator diagram, an anatomical inset, a device illustration)
+# has no Besque equivalent and must be removed WITH the competitor's product, never
+# preserved as background composition. Proven live: a real draft kept a leftover eye-
+# diagram prop (from a competitor eye-gel reference) standing next to the substituted
+# Besque bottle - nothing keyed off product_category.signals/visual.subject at all, so the
+# prop had no removal hook, unlike the product itself which always does.
+PROP_KEYWORDS = ("diagram", "illustration", "device", "applicator", "inset",
+                 "anatomical", "prop stand", "wand", "roller", "dropper tool")
+
+
+def _competitor_props_clause(blueprint):
+    """Scans product_category.signals and visual.subject (both already extracted by
+    deconstruct.py - no new model call) for language naming a prop tied to the
+    COMPETITOR's own product category, quoted back verbatim in the removal instruction so
+    the model sees exactly what was flagged, never a paraphrase. Returns "" when nothing
+    matches (the ordinary case for most references) - never a guessed prop.
+
+    Edit-mode only: this reads signals about what the ATTACHED reference image literally
+    shows, and only edit mode attaches that image to Gemini at all - generate mode's
+    writer/template text has no equivalent literal-pixel-copy risk to guard against here."""
+    blueprint = blueprint or {}
+    candidates = list((blueprint.get("product_category") or {}).get("signals") or [])
+    subject = (blueprint.get("visual") or {}).get("subject")
+    if subject:
+        candidates.append(subject)
+    matches = [c for c in candidates if any(kw in c.lower() for kw in PROP_KEYWORDS)]
+    if not matches:
+        return ""
+    quoted = "; ".join(f'"{m}"' for m in matches)
+    return (
+        f"PROPS (STRICT): the reference's own scene includes a prop belonging to the "
+        f"COMPETITOR's product category, not Besque's - {quoted}. Remove it WITH the "
+        f"competitor's product; it is not part of the composition to preserve, and must "
+        f"never be redrawn, kept as a background element, or left standing next to the "
+        f"substituted Besque product. "
+    )
+
+
+def resolve_product_count(reference_count, operator_count, default_count=1):
+    """How many Besque products belong in the scene (Task F, point 6, 2026-08-07).
+    Precedence: an explicit operator override for THIS run wins outright when given;
+    otherwise what the REFERENCE literally shows (blueprint.layout_detail.product_count)
+    is the natural baseline; a logged default (1) only when neither is available.
+    Returns (resolved_count, source) - source is "operator"/"reference"/"default". The
+    caller logs a line whenever resolved_count > 1, since that's exactly the case this
+    codebase has no real second-SKU asset to honour yet - never when it resolves to the
+    ordinary single-product case, which needs no comment."""
+    if operator_count is not None:
+        return operator_count, "operator"
+    if reference_count is not None and reference_count > 0:
+        return int(reference_count), "reference"
+    return default_count, "default"
 
 
 def resolve_effective_include_product(blueprint, include_product, edit_mode):
@@ -50,7 +108,7 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
                         retheme_colours: bool = True, brand_palette: str = None,
                         realism: str = None, critic_feedback: list = None,
                         cta_text: str = None, panel_copy: list = None,
-                        testimonial: dict = None) -> str:
+                        testimonial: dict = None, product_count: int = None) -> str:
     """Construct a Besque-adapted image generation prompt from the blueprint's visual notes.
     include_product=True, text_in_image=False, creative_description=None, edit_mode=False,
     offer_text=None, operator_instruction=None (today's defaults) reproduce the prior
@@ -69,10 +127,11 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
     (passed separately to generate_image as an input Part) IS the creative brief, so neither
     the writer nor the template scene/layout/palette text is used - see
     _edit_mode_instruction. product_clause/closing still always apply, same as every other
-    branch. Aspect ratio is NOT stated in edit-mode prompt text (Item 6a) - it's derived
-    from the reference image itself and set on the generation config instead, see
-    generate_image/derive_aspect_ratio; generate mode keeps its explicit "Square 1:1"
-    prompt-text instruction unchanged. offer_text is only consumed here in edit_mode (see
+    branch. Aspect ratio is NOT stated in edit-mode prompt text - the model infers it
+    entirely from the attached reference image bytes (see generate_image, which never sets
+    aspect_ratio on the generation config, in any mode, as of 2026-08-07); generate mode
+    keeps its explicit "Square 1:1" prompt-text instruction unchanged. offer_text is only
+    consumed here in edit_mode (see
     _edit_mode_instruction's OFFER branch); the non-edit-mode/writer path already gets
     offer_text via generate_image's separate call into write_creative_description.
 
@@ -98,7 +157,18 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
     creative_format here too, before Item C (2026-08-05) removed that read entirely - the
     TEXT branch now inherits the reference's own typography rather than mapping
     creative_format to a Besque typeface, so there's nothing left to read it for. See
-    _substance_recolour_clause for what happens when substance_colour is unset."""
+    _substance_recolour_clause for what happens when substance_colour is unset.
+
+    product_count (Task F, point 6, 2026-08-07): resolved via resolve_product_count
+    against blueprint.layout_detail.product_count (the reference's own observed count) -
+    see resolve_product_count for precedence. A Besque-on-Besque test with a 200ml+100ml
+    reference pair rendered a single bottle with no instruction either way about count -
+    correct by luck, not by design, since nothing stopped the model from instead inventing
+    a second, wrong bottle to match the reference. Today there is exactly one enabled
+    product/visual_description, so a resolved count above 1 can never be honoured with a
+    genuinely distinct second SKU - product_clause below always renders exactly ONE
+    bottle in that case and states so explicitly (never silently duplicating the single
+    SKU to fake a pair), logging once when this limitation actually fires."""
     visual = blueprint.get("visual", {})
     # visual.subject is deliberately NOT read here. In practice it's where the vision
     # deconstruct step puts rich, identity-carrying descriptions of the competitor ad's
@@ -109,10 +179,15 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
     layout = visual.get("layout", "clean centered composition")
     palette = visual.get("palette_mood", "warm, natural tones")
     text_placement = visual.get("text_placement", "minimal")
+    scene_lighting = visual.get("scene_lighting") or {}
     prod_style = (blueprint.get("production_style") or {}).get("style", "")
 
     effective_include_product, reference_has_product = resolve_effective_include_product(
         blueprint, include_product, edit_mode
+    )
+    reference_product_count = (blueprint.get("layout_detail") or {}).get("product_count")
+    resolved_product_count, product_count_source = resolve_product_count(
+        reference_product_count, product_count
     )
 
     if effective_include_product:
@@ -132,11 +207,32 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
             )
         else:
             product_desc = "(a natural botanical body oil in an elegant bottle). "
-        product_clause = (
-            f"Place the Besque product described below as the subject "
-            f"within this setting; do not render the competitor's product. "
-            + product_desc
-        )
+        if resolved_product_count and resolved_product_count > 1:
+            # Only one Besque SKU/visual_description exists to render - a genuinely
+            # distinct second product (e.g. a different size with its own label copy)
+            # cannot be sourced from what's passed into this function. Render exactly ONE
+            # bottle, stated explicitly so the model doesn't independently try to
+            # duplicate it or invent a different SKU to match the reference's count.
+            log.info(
+                "product_count resolved to %s (source=%s) but only one Besque SKU is "
+                "available - rendering a single bottle rather than duplicating it to "
+                "fake a pair", resolved_product_count, product_count_source,
+            )
+            product_clause = (
+                f"The reference shows {resolved_product_count} products together, but only "
+                f"ONE Besque product exists to render here - place exactly ONE Besque "
+                f"product described below as the subject within this setting; do NOT "
+                f"duplicate it to fake a second bottle, and do NOT invent a different "
+                f"SKU/size/variant to match the reference's count. Do not render the "
+                f"competitor's product. "
+                + product_desc
+            )
+        else:
+            product_clause = (
+                f"Place the Besque product described below as the subject "
+                f"within this setting; do not render the competitor's product. "
+                + product_desc
+            )
     else:
         product_clause = (
             "This is a deliberately productless, educational/illustrative image - do not "
@@ -182,10 +278,13 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
                                    retheme_colours=retheme_colours, palette=brand_palette,
                                    substance_colour=(product or {}).get("substance_colour"),
                                    style=(realism or "").strip() or prod_style,
+                                   scene_lighting=scene_lighting,
                                    typography_zones=blueprint.get("typography_zones"),
                                    structural_zones=blueprint.get("structural_zones"),
                                    cta_text=cta_text, product_name=(product or {}).get("name"),
-                                   panel_copy=panel_copy, testimonial=testimonial) +
+                                   panel_copy=panel_copy, testimonial=testimonial,
+                                   certifications=(product or {}).get("certifications"),
+                                   competitor_props_clause=_competitor_props_clause(blueprint)) +
             product_clause +
             closing
         )
@@ -202,7 +301,7 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
             _critic_feedback_clause(critic_feedback) +
             creative_description.strip() + " "
             + product_clause
-            + _bottle_fixed_clause() + _register_lighting_only_clause() +
+            + _bottle_fixed_clause() + _bottle_register_clause(scene_lighting) +
             f"Square 1:1 aspect ratio composition. " +
             closing
         )
@@ -219,7 +318,7 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
             f"Palette and mood: {palette}. Text placement: {text_placement}. "
             f"Square 1:1 aspect ratio composition. "
             + generate_image_prompt_writer.STYLE_GUIDANCE.get(prod_style, DEFAULT_STYLE_GUIDANCE)
-            + _bottle_fixed_clause() + _register_lighting_only_clause() +
+            + _bottle_fixed_clause() + _bottle_register_clause(scene_lighting) +
             closing
         )
     return prompt
@@ -556,19 +655,48 @@ def _suppressed_container_exception(suppressing_text, suppressing_offer, suppres
 
 
 # Zone types this pass has a real Besque value for - only these get substituted. The
-# rest (badge/price_anchor/product_callout) have no operator input yet, so they're removed
-# rather than guessed at. disclaimer is also always removed, but gets its own branch below
-# (not this tuple) because a disclaimer's removal carries an extra rule the others don't:
-# any asterisk/footnote marker pointing to it must go too (2026-08-06, Grüns GLP-1 leak - a
-# US FDA supplement disclaimer survived onto a UK cosmetic ad for a product it never applied
-# to, with the headline's asterisk left pointing at a competitor's legal text). social_proof
-# is deliberately absent from both sets this pass - quotes are approved but the aggregate is
-# held pending Harry, so nothing here should assume either.
-_STRUCTURAL_ZONE_REMOVE_TYPES = ("badge", "price_anchor", "product_callout")
+# rest (price_anchor/product_callout) have no operator input yet, so they're removed
+# rather than guessed at. badge is handled separately below (not in this tuple) - it has
+# its OWN substitute-or-remove branch, since a badge sometimes DOES have a genuine Besque
+# counterpart (its own certifications), unlike these two. disclaimer is also always
+# removed, but gets its own branch below (not this tuple) because a disclaimer's removal
+# carries an extra rule the others don't: any asterisk/footnote marker pointing to it must
+# go too (2026-08-06, Grüns GLP-1 leak - a US FDA supplement disclaimer survived onto a UK
+# cosmetic ad for a product it never applied to, with the headline's asterisk left pointing
+# at a competitor's legal text). social_proof is deliberately absent from both sets this
+# pass - quotes are approved but the aggregate is held pending Harry, so nothing here
+# should assume either.
+_STRUCTURAL_ZONE_REMOVE_TYPES = ("price_anchor", "product_callout")
+
+# SUBSTITUTION AS ONE RULE, badge/banner row (2026-08-07): a badge whose own `detail` text
+# reads as a CERTIFICATION has a genuine Besque counterpart (the product's own real
+# certifications, e.g. Vegan/Cruelty-Free/100% Natural) - substituted with those, never a
+# generic "certified" claim invented to fill the shape. Cert-for-cert substitution ONLY.
+#
+# Narrowed 2026-08-07: award/editorial/third-party-endorsement badges (e.g. "Allure Best
+# of Beauty Award Winner") were initially treated as cert-shaped too - wrong, since
+# substituting a cert icon for an award badge implies Besque won an award it hasn't.
+# AWARD_BADGE_KEYWORDS is checked FIRST and always wins the ambiguity: a badge matching
+# either list removes, never substitutes, unless it matches ONLY a cert keyword.
+AWARD_BADGE_KEYWORDS = ("award", "winner", "best of", "editor", "reader's choice",
+                        "as seen in", "featured in", "recommended by")
+
+CERT_BADGE_KEYWORDS = ("certif", "seal", "organic", "cruelty", "vegan", "natural",
+                       "eco", "dermat", "accredit", "approved", "clinically tested")
+
+
+def _is_award_shaped_badge(detail):
+    detail_lower = (detail or "").lower()
+    return any(kw in detail_lower for kw in AWARD_BADGE_KEYWORDS)
+
+
+def _is_cert_shaped_badge(detail):
+    detail_lower = (detail or "").lower()
+    return any(kw in detail_lower for kw in CERT_BADGE_KEYWORDS)
 
 
 def _structural_zones_clause(structural_zones, zone_copy_text=None, cta_text=None, panel_copy=None,
-                              testimonial=None):
+                              testimonial=None, certifications=None):
     """Wires blueprint.structural_zones (2026-08-06 schema addition) into edit mode, for
     only the zone types we have a real Besque value for today:
     - brand_wordmark: ALWAYS substituted with BESQUE, same position/container, never
@@ -583,7 +711,16 @@ def _structural_zones_clause(structural_zones, zone_copy_text=None, cta_text=Non
       headline/subtext - never left showing the reference's own words.
     - cta: substituted with cta_text when supplied, same button shape/position - same
       None-when-suppressed rule as above.
-    - badge/price_anchor/product_callout: always REMOVED - container gone entirely, not
+    - badge (2026-08-07, SUBSTITUTION AS ONE RULE, narrowed same day): substituted with
+      the product's real certifications ONLY when this specific badge's own `detail`
+      reads as a certification/seal (see _is_cert_shaped_badge) AND certifications is
+      non-empty AND it does NOT also read as an award/editorial/endorsement badge (see
+      _is_award_shaped_badge, checked first) - genuine cert-for-cert counterpart or
+      nothing, never a guessed cert and never a cert substituted for an award Besque
+      hasn't won. Every other badge (a star rating, a "NEW" flag, a %-off roundel, an
+      award/editorial badge, or a cert-shaped badge with no certifications supplied)
+      falls to REMOVAL, same as price_anchor/product_callout below.
+    - price_anchor/product_callout: always REMOVED - container gone entirely, not
       left as an empty shape, composition rebalanced into the freed space.
     - disclaimer: always REMOVED, same as above, but a legal/regulatory/medical disclaimer
       belonging to the reference brand is never Besque's for ANY product - the removal
@@ -660,6 +797,22 @@ def _structural_zones_clause(structural_zones, zone_copy_text=None, cta_text=Non
                 substituted_zone_types.add(zt)
             else:
                 remove_lines.append(f"- cta at {pos} (container: {container})")
+        elif zt == "badge":
+            detail = z.get("detail") or ""
+            # Award/editorial/endorsement keywords win the ambiguity: checked FIRST, so a
+            # badge matching one is removed even if it also happens to match a cert
+            # keyword - never substitute a cert icon for an award Besque hasn't won.
+            if not _is_award_shaped_badge(detail) and certifications and _is_cert_shaped_badge(detail):
+                cert_list = ", ".join(certifications)
+                substitute_lines.append(
+                    f"- badge at {pos} (container: {container}): this reads as a "
+                    f"certification badge (\"{detail}\") - replace its content with "
+                    f"Besque's own real certifications: {cert_list} - same shape and "
+                    f"position, never a certification Besque doesn't actually hold."
+                )
+                substituted_zone_types.add(zt)
+            else:
+                remove_lines.append(f"- badge at {pos} (container: {container})")
         elif zt == "disclaimer":
             disclaimer_lines.append(f"- disclaimer at {pos} (container: {container})")
         elif zt == "social_proof":
@@ -778,7 +931,53 @@ def _register_lighting_only_clause():
     )
 
 
-def _register_clause(style):
+def _scene_lighting_facts(scene_lighting):
+    """Turn deconstruct.py's observed visual.scene_lighting object into a facts sentence -
+    OBSERVATIONS of this specific reference's own lighting (direction, hardness, colour
+    temperature, shadow behaviour, grain, depth of field), never a style label. Returns ""
+    when nothing was extracted (a pre-migration blueprint, or the model omitted the field
+    this run) - callers fall back to the generic register-matching wording in that case;
+    this function never guesses a value to fill the gap."""
+    scene_lighting = scene_lighting or {}
+    facts = []
+    if scene_lighting.get("light_direction"):
+        facts.append(f"light falls from {scene_lighting['light_direction']}")
+    if scene_lighting.get("hardness"):
+        facts.append(f"shadows are {scene_lighting['hardness']}")
+    if scene_lighting.get("shadow_behaviour"):
+        facts.append(f"shadow behaviour: {scene_lighting['shadow_behaviour']}")
+    if scene_lighting.get("colour_temperature"):
+        facts.append(f"colour temperature: {scene_lighting['colour_temperature']}")
+    if scene_lighting.get("grain"):
+        facts.append(f"grain/texture: {scene_lighting['grain']}")
+    if scene_lighting.get("depth_of_field"):
+        facts.append(f"depth of field: {scene_lighting['depth_of_field']}")
+    if not facts:
+        return ""
+    return "OBSERVED SCENE LIGHTING (facts about this reference, not a style label): " + "; ".join(facts) + ". "
+
+
+def _bottle_register_clause(scene_lighting):
+    """Replaces the generic 'match the rendering register' instruction with concrete
+    observed facts about THIS reference's own lighting, whenever deconstruct.py extracted
+    them - a wording-only "match the style" instruction has already failed three times on
+    this exact bottle-register bug (see CLAUDE.md's guardrails note), so this states what
+    the scene's lighting actually IS rather than asking the model to infer it. Falls back
+    to _register_lighting_only_clause()'s original generic wording only when scene_lighting
+    is entirely empty (nothing to state facts about) - never a silent guess."""
+    facts = _scene_lighting_facts(scene_lighting)
+    if not facts:
+        return _register_lighting_only_clause()
+    return (
+        facts +
+        "The bottle's lighting, shadow, grain, and depth of field must match these "
+        "observed facts about THIS scene EXACTLY - never the separate, unrelated studio "
+        "lighting the product's own reference photo(s) happen to have been shot under. "
+        "Geometry, proportions, and label stay exactly as stated above regardless. "
+    )
+
+
+def _register_clause(style, scene_lighting=None):
     """Edit-mode only - this is _edit_mode_instruction's single caller, appended straight
     onto `opening` (Chunk 13 follow-up). generate_image_prompt_writer.STYLE_GUIDANCE is
     written for two different jobs depending on mode: in generate mode (no reference) it
@@ -804,16 +1003,18 @@ def _register_clause(style):
         f"if this vocabulary ever conflicts with what the reference actually shows, "
         f"faithful reproduction wins. {guidance} "
         + _bottle_fixed_clause()
-        + _register_lighting_only_clause()
+        + _bottle_register_clause(scene_lighting)
     )
 
 
 def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, offer_text=None,
                             include_product=True, reference_has_product=True,
                             retheme_colours=True, palette=None,
-                            substance_colour=None, style=None, typography_zones=None,
+                            substance_colour=None, style=None, scene_lighting=None,
+                            typography_zones=None,
                             structural_zones=None, cta_text=None, product_name=None,
-                            panel_copy=None, testimonial=None):
+                            panel_copy=None, testimonial=None, certifications=None,
+                            competitor_props_clause=""):
     """EDIT MODE (2026-08-01): Gemini receives the competitor's own ad as an input image
     Part, not just a text description of it - the reference image IS the creative brief,
     so no template scene/layout/palette description is assembled here (see
@@ -941,7 +1142,8 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             "palette, text placement, and overall layout as closely as possible. "
             + exception_clause
         )
-    opening += _register_clause(style)
+    opening += _register_clause(style, scene_lighting)
+    opening += competitor_props_clause or ""
 
     if include_product and reference_has_product and style == "illustrated":
         name = product_name or "Besque"
@@ -960,11 +1162,24 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             "appears in the source image. "
         )
     elif include_product and reference_has_product:
+        lighting_facts = _scene_lighting_facts(scene_lighting)
+        # "with its lighting" (the old wording here) was ambiguous between "the scene's
+        # lighting" and "the product reference photo's own separate studio lighting" - the
+        # two contradict whenever the reference photo is a clean studio/cutout shot dropped
+        # into a UGC or non-studio scene. State the scene's own observed lighting facts
+        # explicitly instead, so there's nothing left to infer; falls back to a
+        # register-level instruction (never the reference photo's own lighting) only when
+        # no scene_lighting was extracted at all.
+        lighting_instruction = lighting_facts or (
+            "Light the substituted product to match THIS SCENE's own lighting register - "
+            "never the separate, unrelated lighting the product's reference photo(s) "
+            "happen to have been shot under. "
+        )
         base = opening + (
             "Changing ONLY the product. Remove the competitor's product entirely and "
             "place the Besque product (shown in the reference photo(s) that follow, if "
-            "any) in its position, at its scale, with its lighting, matching the "
-            "original shot as faithfully as possible. "
+            "any) in its position, at its scale, matching the original shot's composition "
+            "as faithfully as possible. " + lighting_instruction
             + _substance_recolour_clause(substance_colour) +
             "Everything else in the scene stays exactly as it "
             "appears in the source image. "
@@ -991,9 +1206,13 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
     zone_cta_text = cta_text if text_in_image else None
     zone_panel_copy = panel_copy if text_in_image else None
     zone_testimonial = testimonial if text_in_image else None
+    # certifications is deliberately NOT gated by text_in_image - a cert badge is a
+    # brand/product graphic element baked into the base image regardless of whether
+    # headline/subtext render separately as an HTML overlay, the same treatment
+    # brand_wordmark already gets (also unconditional), not sub_line/cta's treatment.
     structural_clause, substituted_zone_types = _structural_zones_clause(
         structural_zones, zone_copy_text=zone_copy_text, cta_text=zone_cta_text,
-        panel_copy=zone_panel_copy, testimonial=zone_testimonial,
+        panel_copy=zone_panel_copy, testimonial=zone_testimonial, certifications=certifications,
     )
     if eff_headline:
         permitted = f'the headline "{eff_headline}"'
@@ -1200,7 +1419,7 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
                     messaging_angle=None, realism=None, body_area=None, offer_text=None,
                     edit_mode=False, competitor_image_bytes=None, operator_instruction=None,
                     retheme_colours=True, critic_feedback=None, cta_text=None, panel_copy=None,
-                    testimonial=None):
+                    testimonial=None, product_count=None):
     """Single-pass image generation from the blueprint. One image, no iteration.
     Saves to assets/<stem>_draft.png (stem = ad_id, or ad_id+angle if angle_slug is given)
     and returns the path. Returns None on failure. include_product/text_in_image/headline/
@@ -1245,19 +1464,21 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
     made in the UI takes effect immediately. Only fetched when it will actually be used
     (edit_mode) - no DB read on the far more common non-edit-mode path.
 
-    Aspect ratio (Item 6a) is edit_mode-only too: derive_aspect_ratio(competitor_image_bytes)
-    snaps the reference ad's own width:height to the nearest ratio Vertex's ImageConfig
-    actually supports, and that ratio is set on the generate_content call's config - not
-    stated in prompt text (see build_image_prompt's edit_mode branch, which no longer
-    mentions an aspect ratio at all). If competitor_image_bytes is missing or unreadable,
-    this OMITS image_config from the call entirely (not a forced "1:1") and records a
-    pipeline_warning rather than failing the draft - a live probe (2026-08-04) confirmed
-    the model infers and preserves the attached reference image's own aspect ratio with no
-    image_config at all, which is only reachable here when the bytes exist but Pillow
-    couldn't decode them (still attached as the input Part either way); forcing "1:1"
-    would have been guaranteed-wrong for a portrait/landscape reference in exactly that
-    case. Generate mode is unaffected - it keeps stating "Square 1:1" in prompt text only,
-    no config passed.
+    Aspect ratio: NEVER forced onto the generation config in EDIT MODE ONLY (reverted
+    2026-08-07, Task framing row - see the comment at the actual generate_content call for
+    the evidence). derive_aspect_ratio still exists and is still correct at picking the
+    nearest supported bucket, but nothing here acts on its result any more - a real
+    letterboxed draft (ad 3170893503111146) had a perfectly-derived "1:1" explicitly set on
+    the call and still came back 1.79:1, on top of an earlier live probe already showing
+    omission beats even a CLOSE explicit value (0.8003 vs 0.8056 against a true 0.8000).
+    This evidence is edit-mode-specific - the attached reference image is what makes
+    omitting safe, since the model has something to infer shape FROM. Generate mode is
+    explicitly UNCHANGED by this: it has never set an explicit aspect_ratio on the config
+    (only the prompt-text "Square 1:1" line), and is not being extended into this fix by
+    inference - there is no attached reference there to constrain shape, and Meta's
+    1080x1350 minimum makes an arbitrary returned shape a real risk, not cosmetic. Left
+    exactly as it was, pending its own generate-mode-specific probe. image_size is a
+    separate knob and is always set, both modes, unaffected by any of this.
 
     Illustrated register (2026-08-06, Grüns GLP-1 leak): reference_images (the product's
     OWN photos) are dropped entirely - never attached to Gemini at all - whenever the
@@ -1292,7 +1513,8 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
                                  offer_text=offer_text, operator_instruction=operator_instruction,
                                  retheme_colours=retheme_colours, brand_palette=brand_palette,
                                  realism=realism, critic_feedback=critic_feedback, cta_text=cta_text,
-                                 panel_copy=panel_copy, testimonial=testimonial)
+                                 panel_copy=panel_copy, testimonial=testimonial,
+                                 product_count=product_count)
     stem = _draft_stem(ad_id, angle_slug)
     try:
         client = genai.Client(vertexai=True, project="besque-martech", location="global")
@@ -1324,43 +1546,32 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
         else:
             contents = prompt
 
-        # Item 6a (2026-08-04): edit mode sets aspect ratio on the generation config,
-        # derived from the reference ad's own shape - see derive_aspect_ratio - instead of
-        # a hardcoded "Square 1:1" prompt-text line (removed from build_image_prompt's
-        # edit_mode branch). Generate mode is untouched: it keeps stating its aspect ratio
-        # in prompt text only, no config passed here.
-        #
-        # aspect_ratio is None (bytes missing, or present but Pillow couldn't decode them)
-        # -> generation_config stays None, i.e. image_config is OMITTED from the call
-        # entirely, NOT forced to "1:1". A live probe (2026-08-04, scratchpad
-        # aspect_ratio_probe.py) confirmed this is the better fallback: with no
-        # image_config at all, gemini-3.1-flash-image inferred and preserved a real
-        # 1080x1350 (0.8000) reference's own ratio almost exactly (922x1152, 0.8003) -
-        # forcing "1:1" would have been guaranteed-wrong here, the exact failure mode this
-        # item exists to fix.
-        generation_config = None
         if edit_mode:
-            aspect_ratio = derive_aspect_ratio(competitor_image_bytes)
-            if aspect_ratio is None:
-                from src import dedupe as _dedupe
-                _dedupe.init_pipeline_warnings()
-                _dedupe.record_warning(
-                    "edit_mode_aspect_ratio_fallback",
-                    f"ad_id={ad_id}: could not derive aspect ratio from the reference "
-                    f"image (missing or unreadable); omitting aspect_ratio so the model "
-                    f"infers it from the attached reference image itself - image_size is "
-                    f"still set, that's an independent knob.",
-                )
-                generation_config = genai_types.GenerateContentConfig(
-                    image_config=genai_types.ImageConfig(image_size=IMAGE_SIZE)
-                )
-            else:
-                generation_config = genai_types.GenerateContentConfig(
-                    image_config=genai_types.ImageConfig(aspect_ratio=aspect_ratio, image_size=IMAGE_SIZE)
-                )
+            # Item 6a (2026-08-04) / Task, framing row (2026-08-07, reverted): edit mode
+            # used to force an explicit aspect_ratio derived from the reference
+            # (derive_aspect_ratio), on the theory that a live probe had shown forcing
+            # "1:1" onto a 1080x1350 reference was guaranteed-wrong while omitting it let
+            # the model infer 0.8003 against a true 0.8000 - so explicit-but-close still
+            # lost to omit-and-infer even then. Investigated 2026-08-07 against a real
+            # letterboxed draft (ad 3170893503111146, the GoPure reference): the reference
+            # was a PERFECT 1:1 square, derive_aspect_ratio correctly picked "1:1", that
+            # exact value WAS passed to ImageConfig.aspect_ratio - and the draft still came
+            # back 2752x1536 (1.79:1), not square. Forcing aspect_ratio is not just
+            # imprecise, it is unreliable even when derived correctly - but this evidence is
+            # EDIT-MODE-SPECIFIC: the attached reference image constrains output shape on
+            # its own in edit mode, which is exactly what makes omitting safe there.
+            generation_config = genai_types.GenerateContentConfig(
+                image_config=genai_types.ImageConfig(image_size=IMAGE_SIZE)
+            )
         else:
-            # Generate mode states its aspect ratio in prompt text only (Square 1:1) and
-            # never passed a config at all before this - image_size needs one regardless.
+            # Generate mode is UNCHANGED and NOT covered by the evidence above - there is
+            # no attached reference image here to constrain shape, so image_size=2K alone
+            # gives the model nothing to anchor an aspect ratio to; Meta's 1080x1350
+            # minimum makes an arbitrary shape a real risk here, not just cosmetic.
+            # Generate mode has never set an explicit aspect_ratio on this config (only
+            # the prompt-text "Square 1:1" line, unchanged) - left exactly as it was,
+            # pending its own generate-mode-specific probe before deciding whether to
+            # force one or keep relying on prompt text alone.
             generation_config = genai_types.GenerateContentConfig(
                 image_config=genai_types.ImageConfig(image_size=IMAGE_SIZE)
             )
@@ -1693,12 +1904,15 @@ def regenerate_from_stored_prompt(current_image_bytes, stored_prompt, instructio
     prompt = stored_prompt.strip() + _regenerate_delta_clause(instruction)
     try:
         client = genai.Client(vertexai=True, project="besque-martech", location="global")
-        aspect_ratio = derive_aspect_ratio(current_image_bytes)
-        if aspect_ratio is not None:
-            image_config = genai_types.ImageConfig(aspect_ratio=aspect_ratio, image_size=IMAGE_SIZE)
-        else:
-            image_config = genai_types.ImageConfig(image_size=IMAGE_SIZE)
-        generation_config = genai_types.GenerateContentConfig(image_config=image_config)
+        # Framing row (2026-08-07): never force aspect_ratio - see generate_image's own
+        # comment for the evidence (a correctly-derived "1:1" still produced a 1.79:1
+        # draft). Scoped correctly by construction, not by inference: this function is
+        # ONLY ever called from pipeline._regenerate_existing_draft, which always rebuilds
+        # in edit_mode - there is no generate-mode variant of regenerate to accidentally
+        # cover. image_size is the only knob set here.
+        generation_config = genai_types.GenerateContentConfig(
+            image_config=genai_types.ImageConfig(image_size=IMAGE_SIZE)
+        )
         call_kwargs = {
             "model": "gemini-3.1-flash-image",
             "contents": [

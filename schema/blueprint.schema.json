@@ -32,7 +32,18 @@
         "layout": { "type": "string" },
         "subject": { "type": "string" },
         "palette_mood": { "type": "string" },
-        "text_placement": { "type": "string" }
+        "text_placement": { "type": "string" },
+        "scene_lighting": {
+          "type": ["object", "null"],
+          "properties": {
+            "light_direction": { "type": "string" },
+            "hardness": { "type": "string", "enum": ["hard", "soft"] },
+            "colour_temperature": { "type": "string" },
+            "shadow_behaviour": { "type": "string" },
+            "grain": { "type": "string" },
+            "depth_of_field": { "type": "string" }
+          }
+        }
       }
     },
     "cta": { "type": "string" },

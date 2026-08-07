@@ -1008,6 +1008,18 @@ def api_fetch_status(competitor_id: int):
     return JSONResponse({"status": job["status"], "result": job["result"], "error": job["error"]})
 
 
+def _bool_or_none(body, key):
+    """None when `key` is genuinely absent from the request body - never silently
+    defaulted here. Coerced to a real bool only when the key is present, whatever its
+    own value (including a present-but-falsy `false`). Deciding what None means downstream
+    is pipeline.py's job (process_ad normalizes it to a concrete default for its own use,
+    and separately hands the raw None-or-value to the regenerate resolver) - this
+    function's only job is to preserve "was it sent at all" (Task F, point 1, 2026-08-07)."""
+    if key not in body:
+        return None
+    return bool(body[key])
+
+
 @app.post("/api/generate")
 async def api_generate(request: Request):
     """Start pipeline.generate_from_selection on a background thread and return
@@ -1043,10 +1055,18 @@ async def api_generate(request: Request):
     product_id = body.get("product_id")
     regenerate = bool(body.get("regenerate", False))
     text_in_image = bool(body.get("text_in_image", False))
-    include_product = bool(body.get("include_product", True))
-    edit_mode = bool(body.get("edit_mode", False))
+    # None when the key is genuinely ABSENT from the request body - never conflated with
+    # an explicit False (Task F, point 1, 2026-08-07). pool.html's checkboxes always send
+    # a real true/false today (confirmed: `.checked` never omits the key), so this is a
+    # no-op for that caller - but it's the only way pipeline.py's regenerate resolver
+    # (resolve_regenerate_input) can ever tell "operator explicitly set false this call"
+    # apart from "operator did not touch it this call" for ANY caller, including ones that
+    # genuinely omit the key. Scoped to exactly the three fields Task F's regenerate
+    # precedence fix covers - text_in_image/check_output are unaffected, unchanged below.
+    include_product = _bool_or_none(body, "include_product")
+    edit_mode = _bool_or_none(body, "edit_mode")
     check_output = bool(body.get("check_output", False))
-    retheme_colours = bool(body.get("retheme_colours", True))
+    retheme_colours = _bool_or_none(body, "retheme_colours")
     realism = (body.get("realism") or "").strip() or None
     if realism is not None and realism not in validator.production_styles():
         return JSONResponse(

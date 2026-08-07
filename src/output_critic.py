@@ -32,7 +32,7 @@ log = logging.getLogger("output_critic")
 HIGH_CONFIDENCE_BY_DEFAULT = (
     "unauthorised offer", "scarcity claim", "promo code", "efficacy claim", "testimonial",
     "product category mismatch", "regulatory text carried over from the reference",
-    "product rendering does not match the scene's style",
+    "product register mismatch",
 )
 
 CRITIC_SYSTEM = (
@@ -85,16 +85,23 @@ CRITIC_SYSTEM = (
     "the disclaimer plainly doesn't apply to (the disclaimer-removal instruction). Also "
     "flag a dangling asterisk or footnote marker left with no referent after disclaimer "
     "text was removed - that's its own defect, just as bad as the disclaimer surviving\n"
-    "- the product rendered in a different visual register than the surrounding scene - "
-    "most commonly a photorealistic bottle composited into an otherwise illustrated/"
-    "hand-drawn scene, or the reverse - the bottle's geometry and label CONTENT must stay "
-    "accurate, but its RENDERING must match the scene around it (the bottle-rendering-"
-    "matches-scene instruction)\n\n"
+    "- PRODUCT REGISTER MISMATCH: the product rendered in a different visual register than "
+    "the surrounding scene. This has TWO distinct shapes, both count: (1) a photorealistic "
+    "bottle composited into an otherwise illustrated/hand-drawn scene, or the reverse; (2) "
+    "WITHIN the same photographic scene, the bottle's own lighting direction, shadow "
+    "hardness, colour temperature, grain, or depth of field visibly does not match the "
+    "surrounding scene's - e.g. a crisply studio-lit, evenly-graded bottle with a soft "
+    "even highlight pasted into a warm ambient UGC frame, or a flash-lit bottle dropped "
+    "into diffuse window light, so the product reads as cut-and-pasted even though both "
+    "the scene and the product are photographic. The bottle's geometry and label CONTENT "
+    "must stay accurate in every case, but its RENDERING - including lighting, shadow, "
+    "grain, and depth of field, not just photographic-vs-illustrated - must match the "
+    "scene around it (the bottle-rendering-matches-scene instruction)\n\n"
     "Treat a hit in these categories as HIGH confidence by default unless you are quite "
     "sure it's a false read: unauthorised offer, scarcity claim, promo code, efficacy "
     "claim, testimonial, product category mismatch, regulatory text carried over from the "
-    "reference, product rendering does not match the scene's style. These are the exact "
-    "categories that have shipped in real drafts before this check existed."
+    "reference, product register mismatch. These are the exact categories that have "
+    "shipped in real drafts before this check existed."
 )
 
 # CRITIC_SYSTEM is an INDEPENDENTLY hand-written checklist, not generated from

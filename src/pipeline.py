@@ -205,11 +205,43 @@ def fetch_pool(competitor_id, cap=50, start_date_min=None, start_date_max=None, 
     return {"fetched": len(triples), "stored": stored, "skipped": skipped}
 
 
+def _reference_has_nothing_to_clone(blueprint):
+    """True when a reference blueprint shows nothing an edit-mode clone could actually
+    substitute or reproduce - no product (layout_detail.product_count == 0), no headline
+    or other text-bearing zone, and no offer. Edit mode then has nothing to change and
+    instead reproduces the reference's own human subject verbatim - proven live by drafts
+    that came back as a redrawn woman with no product and no copy at all (Task H,
+    2026-08-07).
+
+    This is "there is nothing here to clone", never a taste judgment ("this ad is bad") -
+    it reads only structural fields already in deconstruct.py's schema (product_count,
+    headline_verbatim, structural_zones, offer), never anything about quality, tone, or
+    creative merit. Deliberately reads an EXISTING blueprint only - never triggers a new
+    model call itself; the caller decides where that blueprint comes from (generate_
+    from_selection reads it from an already-generated artifact, since a never-processed
+    ad has no blueprint yet to check)."""
+    blueprint = blueprint or {}
+    layout_detail = blueprint.get("layout_detail") or {}
+    if layout_detail.get("product_count") != 0:
+        return False
+    has_headline = bool((blueprint.get("headline_verbatim") or "").strip())
+    text_zone_types = {"sub_line", "body_copy", "cta"}
+    has_text_zone = any(
+        (z or {}).get("zone_type") in text_zone_types
+        for z in (blueprint.get("structural_zones") or [])
+    )
+    if has_headline or has_text_zone:
+        return False
+    if blueprint.get("offer"):
+        return False
+    return True
+
+
 def generate_from_selection(ad_ids, angle_id=None, body_area=None, offer_text=None,
                              instruction=None, product_id=None, should_stop=None,
                              regenerate=False, on_ad_done=None,
-                             text_in_image=False, include_product=True, edit_mode=False,
-                             check_output=False, retheme_colours=True, realism=None):
+                             text_in_image=False, include_product=None, edit_mode=None,
+                             check_output=False, retheme_colours=None, realism=None):
     """Generate drafts for an EXPLICIT list of already-fetched ads, rather than
     driving generation off scrape order. No Apify call - fetch_pool already
     stored the pool; this only reads scraped_ads and calls process_ad per
@@ -259,6 +291,13 @@ def generate_from_selection(ad_ids, angle_id=None, body_area=None, offer_text=No
     "surface per-ad progress" requirement. Exceptions from this callback are
     swallowed (logged, not raised) - a progress-reporting bug must never abort an
     otherwise-successful generation.
+
+    Reference usability (Task H, 2026-08-07): see process_ad's own docstring -
+    _reference_has_nothing_to_clone runs INSIDE process_ad, right after deconstruct
+    returns and before generation, using the fresh blueprint that call just produced. Not
+    this function's concern - it's mentioned here only because an ad skipped that way
+    still comes back through this loop as an ordinary "skipped" result, same as any other
+    process_ad outcome, with nothing special for this function to do about it.
 
     product_id is checked against ENABLED_PRODUCT_IDS_FOR_GENERATION (item 4, 2026-08-06)
     before anything else runs - an out-of-scope product refuses the WHOLE selection with
@@ -378,7 +417,26 @@ def generate_from_selection(ad_ids, angle_id=None, body_area=None, offer_text=No
     return summary
 
 
-def _regenerate_existing_draft(ad, angle_id, angle_slug, delta_instruction, should_stop):
+def resolve_regenerate_input(live_value, stored_value, default_value):
+    """Precedence for one field on a regenerate call: live operator input for THIS call >
+    stored artifact value from the prior generation > hardcoded default. Returns
+    (resolved_value, source) where source is "live"/"stored"/"default" - the caller logs
+    it by name whenever source != "live" (Task F, point 1, 2026-08-07).
+
+    live_value is None exactly when the caller genuinely did not supply this field for
+    this call (see process_ad's live_include_product etc.) - never conflated with an
+    explicit False/empty-string, which is why dashboard.py had to stop pre-applying its
+    own default before pipeline ever saw the call."""
+    if live_value is not None:
+        return live_value, "live"
+    if stored_value is not None:
+        return stored_value, "stored"
+    return default_value, "default"
+
+
+def _regenerate_existing_draft(ad, angle_id, angle_slug, delta_instruction, should_stop,
+                                live_include_product=None, live_retheme_colours=None,
+                                live_realism=None, live_body_area=None, live_offer_text=None):
     """Apply delta_instruction as a targeted change to a prompt REBUILT from CURRENT code
     (generate_image_prompt.build_image_prompt) and the artifact's own stored inputs - never
     the artifact's frozen historical image_prompt text.
@@ -393,11 +451,26 @@ def _regenerate_existing_draft(ad, angle_id, angle_slug, delta_instruction, shou
     build_image_prompt at all, by design, until now. Drafts an operator regenerates were
     therefore the LEAST protected against a later fix, not the most.
 
-    Returns None (not "failed") when no artifact exists for this (ad_id, angle_id) yet -
-    signals the caller to fall through to a normal first generation instead of failing an
-    ad just for having no history (closes "regenerate requested but no existing artifact
-    for angle_id=None" too - the same root cause: this function assumed history always
-    exists once regenerate is requested)."""
+    2026-08-07, Task F point 1: live_include_product/live_retheme_colours/live_realism/
+    live_body_area/live_offer_text are process_ad's own RAW parameters for THIS call
+    (None when not supplied) - resolved against the stored artifact value via
+    resolve_regenerate_input above, live always winning when present. Before this, none
+    of process_ad's live values reached this function at all (only delta_instruction did),
+    so a live override was silently discarded in favour of whatever the artifact already
+    had stored, or a hardcoded default - exactly what ads 1888339248562394/1194229189228603
+    demonstrated (both logged "defaulted True" despite the operator having just switched
+    the toggle off).
+
+    Returns None (not "failed") when no artifact exists for this (ad_id, angle_id) yet, OR
+    when the artifact exists but its current draft image can no longer be read (2026-08-07,
+    Task F point 2 - ad 1888339248562394: the row existed, the image did not) - both signal
+    the caller to fall through to a normal first generation instead of failing an ad. That
+    fallthrough runs process_ad's OWN body from the top, which already resolved
+    edit_mode/include_product/retheme_colours from this SAME call's live values before this
+    function was ever entered - so it preserves edit_mode correctly with no extra plumbing
+    here. (Closes "regenerate requested but no existing artifact for angle_id=None" too -
+    the same root cause: this function assumed history always exists once regenerate is
+    requested.)"""
     ad_id = ad.get("ad_id")
     _stop = should_stop or (lambda: False)
     existing = dedupe.get_artifact(ad_id, angle_id=angle_id)
@@ -420,34 +493,35 @@ def _regenerate_existing_draft(ad, angle_id, angle_slug, delta_instruction, shou
     text_in_image = bool(existing.get("text_in_image"))
     stored_operator_instruction = existing.get("operator_instruction") or ""
 
-    # Every run-strip input process_ad's ORIGINAL call actually used, persisted on the
-    # artifact (2026-08-06) specifically so this rebuild can recover them. None means
-    # "never recorded" (a row from before this migration, or a caller that never passed
-    # it) - reported below, never silently treated the same as a real False/empty value.
+    # Task F, point 1 (2026-08-07): live operator input for THIS call > stored artifact
+    # value from the ORIGINAL generation > hardcoded default - resolved per field via
+    # resolve_regenerate_input, live always winning when the operator actually supplied
+    # it this run. Before this fix, every one of these five came ONLY from `existing`
+    # (the stored value), with process_ad's own live parameters never even reaching this
+    # function - exactly the bug ads 1888339248562394/1194229189228603 demonstrated.
     missing = []
-    include_product = existing.get("include_product")
-    if include_product is None:
-        missing.append("include_product -> defaulted True")
-        include_product = True
-    retheme_colours = existing.get("retheme_colours")
-    if retheme_colours is None:
-        missing.append("retheme_colours -> defaulted True")
-        retheme_colours = True
+    include_product, ip_source = resolve_regenerate_input(
+        live_include_product, existing.get("include_product"), True)
+    if ip_source != "live":
+        missing.append(f"include_product -> {ip_source} ({include_product})")
+    retheme_colours, rc_source = resolve_regenerate_input(
+        live_retheme_colours, existing.get("retheme_colours"), True)
+    if rc_source != "live":
+        missing.append(f"retheme_colours -> {rc_source} ({retheme_colours})")
     # realism/body_area/offer_text are nullable free-text inputs where None is ALSO the
-    # normal, legitimate "operator left this blank" state on a post-migration row
-    # (dashboard.py normalises a blank field to None, never "") - so unlike the two
-    # booleans and product_id above, None here can't be told apart from a real migration
-    # gap. Logged anyway, worded to not overclaim a cause that isn't actually known.
-    realism = existing.get("realism")
-    if realism is None:
-        missing.append("realism -> not stored (blank, or predates this being recorded); "
-                        "defaulting to auto (the blueprint's own detected style)")
-    body_area = existing.get("body_area")
-    if body_area is None:
-        missing.append("body_area -> not stored (blank, or predates this being recorded); defaulting to none")
-    offer_text = existing.get("offer_text")
-    if offer_text is None:
-        missing.append("offer_text -> not stored (blank, or predates this being recorded); defaulting to none")
+    # normal, legitimate "operator left this blank" state - so unlike the two booleans
+    # and product_id above, a "default" resolution here can't be told apart from a real
+    # migration gap. Logged anyway, worded to not overclaim a cause that isn't actually
+    # known.
+    realism, realism_source = resolve_regenerate_input(live_realism, existing.get("realism"), None)
+    if realism_source != "live":
+        missing.append(f"realism -> {realism_source} ({realism!r}); auto if still None")
+    body_area, body_area_source = resolve_regenerate_input(live_body_area, existing.get("body_area"), None)
+    if body_area_source != "live":
+        missing.append(f"body_area -> {body_area_source} ({body_area!r})")
+    offer_text, offer_text_source = resolve_regenerate_input(live_offer_text, existing.get("offer_text"), None)
+    if offer_text_source != "live":
+        missing.append(f"offer_text -> {offer_text_source} ({offer_text!r})")
     product_id = existing.get("product_id")
     product = dedupe.get_product(product_id) if product_id is not None else None
     if product is None:
@@ -455,8 +529,13 @@ def _regenerate_existing_draft(ad, angle_id, angle_slug, delta_instruction, shou
         missing.append(f"product_id -> defaulted to the sole enabled product (id={fallback_id})")
         product = dedupe.get_product(fallback_id)
     if missing:
-        log.warning("Ad %s: regenerate rebuild missing stored input(s), defaulted rather than "
-                    "silently guessed: %s", ad_id, "; ".join(missing))
+        # info, not warning: "stored" is the expected outcome whenever this regenerate
+        # call didn't touch a given field (the normal case) - only a "default" resolution
+        # for include_product/retheme_colours/product_id represents a genuine gap (a
+        # pre-migration row, or a caller that never passed it), and it's still named
+        # explicitly in the message either way, never silently guessed.
+        log.info("Ad %s: regenerate input resolution (live > stored > default): %s",
+                 ad_id, "; ".join(missing))
 
     cta_text = generated_copy.get("cta") or None
     panel_copy = generated_copy.get("panel_copy") or None
@@ -478,8 +557,19 @@ def _regenerate_existing_draft(ad, angle_id, angle_slug, delta_instruction, shou
 
     draft_bytes = generate_image_prompt._current_draft_bytes(ad_id, angle_slug)
     if draft_bytes is None:
-        log.error("Ad %s: regenerate requested but no current draft image could be read", ad_id)
-        return "failed"
+        # Task F, point 2 (2026-08-07): the artifact ROW existed but its image did not
+        # (ad 1888339248562394) - same "no history to regenerate from" shape as the
+        # missing-artifact case above, so it gets the same fallback: fall through to a
+        # normal first generation rather than failing the ad. process_ad's own body
+        # (which runs next) already resolved edit_mode/include_product/retheme_colours
+        # from THIS call's live values before ever entering this function, so the
+        # fallthrough preserves them correctly with no extra plumbing here - the earlier
+        # bug (a fallback silently running edit_mode=False, ad 2577024936146615) was a
+        # consequence of this branch returning "failed" outright and never reaching that
+        # already-correct fallthrough at all.
+        log.info("Ad %s: regenerate requested but no current draft image could be read - "
+                 "falling back to a normal first generation instead of failing", ad_id)
+        return None
     if _stop():
         log.info("Ad %s: stop requested, skipping before the paid regenerate call", ad_id)
         return "skipped"
@@ -523,11 +613,21 @@ def _regenerate_existing_draft(ad, angle_id, angle_slug, delta_instruction, shou
 
 
 def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
-                realism=None, text_in_image=False, include_product=True,
-                body_area=None, offer_text=None, edit_mode=False, operator_instruction=None,
-                check_output=False, retheme_colours=True, ad_index=None, total_ads=None,
-                should_stop=None, explicit_selection=False, regenerate=False):
+                realism=None, text_in_image=False, include_product=None,
+                body_area=None, offer_text=None, edit_mode=None, operator_instruction=None,
+                check_output=False, retheme_colours=None, ad_index=None, total_ads=None,
+                should_stop=None, explicit_selection=False, regenerate=False, product_count=None):
     """Run one ad through the full pipeline. Returns processed/skipped/failed.
+
+    include_product/retheme_colours/edit_mode default to None, not a concrete bool
+    (Task F, point 1, 2026-08-07) - None means "the caller genuinely did not supply this
+    for this call," never conflated with an explicit False. dashboard.py now passes None
+    when its own request body omits the key, rather than pre-applying a default before
+    pipeline ever sees the call - the ONLY way "operator explicitly set false" can be told
+    apart from "operator did not touch it." Normalized to a concrete bool a few lines
+    below, before any other use in this function, so every other line keeps working with
+    a real bool exactly as before this change. realism/body_area/offer_text were already
+    nullable and are unaffected here.
     messaging_angle, if given, is a resolved angle dict (dedupe.get_angle's shape) - it
     changes the dedup identity of this ad to (ad_id, angle_id) instead of ad_id alone, so
     the same ad can produce one draft per angle rather than being skipped as already seen
@@ -551,6 +651,18 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
     Gemini can reproduce the actual reference photo rather than a text description of it.
     The team confirmed edit-vs-generate usage is about 50/50, so this defaults to False -
     today's generate-only path is unchanged.
+
+    Reference usability (Task H, 2026-08-07): immediately after deconstruct returns, right
+    alongside content_safety.hard_block_reason, _reference_has_nothing_to_clone checks the
+    SAME fresh blueprint - layout_detail.product_count == 0 AND no headline_verbatim AND
+    no text-bearing structural_zones entry AND no offer means there is nothing for edit
+    mode to substitute or reproduce, so it ends up redrawing the reference's own human
+    subject instead. Proven live twice, including on a ad's FIRST-EVER generation - this
+    must run here, not only against an artifact from a prior run, which is where an
+    earlier version of this check wrongly lived instead. Skipped the same visible way as
+    the hard block just above (a "reference_nothing_to_clone" pipeline_warning + mark_seen
+    + return "skipped") - never failed, never silently generated, and never a taste
+    judgment on the ad, only "there is nothing here to clone."
 
     operator_instruction (Step 2) is the run-strip's free-text steering field - forwarded
     to generate_image (which clips it and hands it to both the writer and
@@ -584,6 +696,15 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
     clone unless the angle specifically calls for something else; the operator disables
     it per run for that stated exception, which also protects today's validated
     faithful-clone behaviour.
+
+    product_count (Task F, point 6, 2026-08-07): an explicit operator override for how
+    many Besque products to place, forwarded to generate_image_prompt.generate_image ->
+    build_image_prompt -> resolve_product_count. None (the default - no per-run control
+    for this exists yet) means the reference's own observed
+    blueprint.layout_detail.product_count is the baseline instead. See
+    resolve_product_count's own docstring for the full precedence and why a resolved
+    count above 1 still always renders exactly one bottle today (only one Besque SKU/
+    visual_description exists to render).
 
     ad_index/total_ads are diagnostic-only (silent-hang investigation, 2026-08-04) - purely
     for the entry-point log line below, no effect on behaviour. None/None (the default,
@@ -625,6 +746,24 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
     those stay reused from the existing artifact. Falls back to a normal first generation
     (this same function, from the top) when no artifact exists yet, rather than failing an
     ad for having no history."""
+    # Captured RAW (possibly None) before normalization, so _regenerate_existing_draft's
+    # resolver can tell "this call explicitly supplied a value" apart from "nothing came
+    # in, fall back to the stored artifact value" (Task F, point 1). This is the exact gap
+    # that let ads 1888339248562394/1194229189228603 log "defaulted True" while the
+    # operator had just switched a toggle off live - the value never reached the
+    # regenerate path to be considered in the first place.
+    live_include_product = include_product
+    live_retheme_colours = retheme_colours
+    live_realism = realism
+    live_body_area = body_area
+    live_offer_text = offer_text
+    if include_product is None:
+        include_product = True
+    if retheme_colours is None:
+        retheme_colours = True
+    if edit_mode is None:
+        edit_mode = False
+
     ad_id = ad.get("ad_id")
     if not ad_id:
         return "failed"
@@ -658,7 +797,11 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
         # artifact exists yet for this (ad_id, angle_id) - never fails an ad for having no
         # history.
         if explicit_selection and regenerate:
-            regen_result = _regenerate_existing_draft(ad, angle_id, angle_slug, operator_instruction, should_stop)
+            regen_result = _regenerate_existing_draft(
+                ad, angle_id, angle_slug, operator_instruction, should_stop,
+                live_include_product=live_include_product, live_retheme_colours=live_retheme_colours,
+                live_realism=live_realism, live_body_area=live_body_area, live_offer_text=live_offer_text,
+            )
             if regen_result is not None:
                 return regen_result
             # else: no existing artifact yet - fall through, exactly as if regenerate had
@@ -676,6 +819,10 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
             ad_text=ad.get("text", ""),
             cta=ad.get("cta", ""),
         )
+        if not (blueprint.get("visual") or {}).get("scene_lighting"):
+            log.warning("Ad %s: blueprint.visual.scene_lighting not extracted this run - "
+                        "falling back to generic register-matching wording for the bottle's "
+                        "lighting/shadow/grain/depth-of-field instead of observed facts", ad_id)
 
         # Hard block (Prompt 4, Item 3): a medical/clinical/intimate-health/anatomically
         # explicit reference must never be cloned - not a judgment call for a human to
@@ -690,6 +837,28 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
                 "hard_blocked_medical",
                 f"Ad {ad_id} ({ad.get('page_name', '?')}): {block_reason}",
             )
+            dedupe.mark_seen(ad_id, ad.get("page_name", ""), angle_id)
+            return "skipped"
+
+        # Task H, Part 1 (2026-08-07, corrected placement): assess the reference BEFORE
+        # any operator instruction is applied to it, using the FRESH blueprint THIS
+        # deconstruct call just produced - no new model call, and no dependency on an
+        # artifact already existing (the prior version of this check lived in
+        # generate_from_selection and only fired on a re-select of an already-generated
+        # ad - wrong, since ad 1572112423973290 proved this must catch a FIRST
+        # generation too). Same visible-skip shape as the hard block just above: never
+        # fail, never silently generate. This is "there is nothing here to clone", never
+        # a taste judgment on the ad.
+        if _reference_has_nothing_to_clone(blueprint):
+            reason = (
+                f"Ad {ad_id} ({ad.get('page_name', '?')}): reference has no product, no "
+                f"headline, no text-bearing zone, and no offer - nothing to substitute or "
+                f"reproduce in a clone (edit mode would instead reproduce the reference's "
+                f"own human subject). Skipped before any paid call, not a taste judgment."
+            )
+            log.info("Ad %s: not usable as a cloning reference, skipping: %s", ad_id, reason)
+            dedupe.init_pipeline_warnings()
+            dedupe.record_warning("reference_nothing_to_clone", reason)
             dedupe.mark_seen(ad_id, ad.get("page_name", ""), angle_id)
             return "skipped"
 
@@ -844,6 +1013,7 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
                     # mode, a no-op everywhere else, same forwarding pattern as cta_text.
                     panel_copy=copy.get("panel_copy") or None,
                     testimonial=testimonial,
+                    product_count=product_count,
                     **gen_kwargs,
                 )
             except Exception as e:

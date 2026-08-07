@@ -80,15 +80,22 @@ def test_generate_from_selection_forwards_the_five_toggles_to_process_ad(monkeyp
 
 def test_generate_from_selection_toggle_defaults_match_process_ad():
     """Omitted entirely, generate_from_selection's own defaults must match
-    process_ad's/run_once's exactly - same names, same defaults, nothing
-    invented."""
+    process_ad's exactly - same names, same defaults, nothing invented.
+
+    include_product/edit_mode/retheme_colours default to None, not True/False
+    (Task F, point 1, 2026-08-07) - None means "the caller genuinely did not supply
+    this," which process_ad normalizes to a concrete bool for its own use while also
+    handing the raw None-or-value to the regenerate resolver, so a live override can be
+    told apart from a caller that never touched the field at all. text_in_image/
+    check_output are unaffected - out of scope for the regenerate precedence fix (see
+    process_ad's own docstring)."""
     import inspect
     sig = inspect.signature(pipeline.generate_from_selection)
     assert sig.parameters["text_in_image"].default is False
-    assert sig.parameters["include_product"].default is True
-    assert sig.parameters["edit_mode"].default is False
+    assert sig.parameters["include_product"].default is None
+    assert sig.parameters["edit_mode"].default is None
     assert sig.parameters["check_output"].default is False
-    assert sig.parameters["retheme_colours"].default is True
+    assert sig.parameters["retheme_colours"].default is None
     assert sig.parameters["realism"].default is None
 
 
@@ -504,6 +511,84 @@ def test_generate_from_selection_regenerate_falls_back_to_normal_generation_when
         assert len(dedupe.get_artifacts(ad_id)) == 1
         row = dedupe.get_scraped_ads(competitor_id=cid)[0]
         assert row["status"] == "processed"
+    finally:
+        _cleanup(cid, [ad_id])
+
+
+def test_generate_from_selection_regenerate_live_input_overrides_stored(monkeypatch):
+    """Task F, point 1 (2026-08-07): live operator input for THIS regenerate call must
+    win over the stored artifact value - reproduces the exact bug shape ads
+    1888339248562394/1194229189228603 hit (stored False/None, operator switched it ON
+    live, artifact still ended up True/False from the stored value or a hardcoded
+    default because the live value never reached _regenerate_existing_draft at all)."""
+    cid = _make_competitor()
+    ad_id = _seed_scraped_ad(cid)
+    dedupe.init_artifacts()
+    dedupe.save_artifact(
+        ad_id=ad_id, page_name="Brand", image_path="assets/x.jpg",
+        blueprint={"format": "hero", "production_style": {"style": "high_spec_studio"}},
+        generated_copy={"headline": "Old", "image_subtext": "Sub", "cta": "Shop"},
+        draft_image="assets/x_draft.png", metadata={"cta": "Shop", "destination_url": "http://x"},
+        image_prompt="STORED PROMPT TEXT",
+        include_product=False, retheme_colours=False,
+    )
+    from src import generate_image_prompt
+    import tempfile
+    from pathlib import Path as _Path
+    tmp_asset_dir = _Path(tempfile.mkdtemp())
+    monkeypatch.setattr(generate_image_prompt, "ASSET_DIR", tmp_asset_dir)
+    (tmp_asset_dir / f"{ad_id}_draft.png").write_bytes(b"OLD-DRAFT-BYTES")
+    monkeypatch.setattr(pipeline.generate_image_prompt, "regenerate_from_stored_prompt",
+                        lambda *a, **k: str(tmp_asset_dir / f"{ad_id}_draft.png"))
+    try:
+        # Operator explicitly turns BOTH toggles ON live, overriding the stored False.
+        result = pipeline.generate_from_selection(
+            [ad_id], regenerate=True, include_product=True, retheme_colours=True,
+        )
+        assert result["by_ad"][ad_id] == "processed"
+        art = dedupe.get_artifact(ad_id)
+        assert art["include_product"] is True, "live True must win over stored False"
+        assert art["retheme_colours"] is True, "live True must win over stored False"
+    finally:
+        _cleanup(cid, [ad_id])
+
+
+def test_generate_from_selection_regenerate_missing_draft_image_falls_back_preserving_edit_mode(monkeypatch):
+    """Task F, point 2 (2026-08-07): the artifact ROW exists but its draft image does not
+    (ad 1888339248562394 - "regenerate requested but no current draft image could be
+    read") - must fall back to a normal first generation, same as the missing-artifact
+    case, rather than failing the ad. The fallback must preserve the operator's live
+    edit_mode (ad 2577024936146615 - a fallback that silently ran edit_mode=False turned
+    a requested clone into a generic ad) - proven here by asserting generate_image is
+    actually called with edit_mode=True."""
+    cid = _make_competitor()
+    ad_id = _seed_scraped_ad(cid)
+    dedupe.init_artifacts()
+    dedupe.save_artifact(
+        ad_id=ad_id, page_name="Brand", image_path="assets/x.jpg",
+        blueprint={"format": "hero", "production_style": {"style": "high_spec_studio"}},
+        generated_copy={"headline": "Old"},
+        draft_image="assets/x_draft.png", metadata={"cta": "Shop", "destination_url": "http://x"},
+    )
+    from src import generate_image_prompt
+    import tempfile
+    from pathlib import Path as _Path
+    # Deliberately empty - no {ad_id}_draft.png written, simulating the image being gone
+    # while the artifact row survives.
+    tmp_asset_dir = _Path(tempfile.mkdtemp())
+    monkeypatch.setattr(generate_image_prompt, "ASSET_DIR", tmp_asset_dir)
+
+    _mock_success(monkeypatch)
+    captured = {}
+
+    def fake_generate_image(bp, aid, product=None, reference_images=None, **k):
+        captured.update(k)
+        return "draft.png"
+    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image", fake_generate_image)
+    try:
+        result = pipeline.generate_from_selection([ad_id], regenerate=True, edit_mode=True)
+        assert result["by_ad"][ad_id] == "processed", "must fall back, never fail, on a missing draft image"
+        assert captured.get("edit_mode") is True, "the live edit_mode=True must survive the fallback"
     finally:
         _cleanup(cid, [ad_id])
 

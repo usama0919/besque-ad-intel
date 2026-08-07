@@ -2,12 +2,15 @@
 import os
 import json
 import base64
+import logging
 from pathlib import Path
 
 from src import json_response, validator
 
 # Model + key are read from env so the real key plugs in at kickoff.
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
+
+log = logging.getLogger("deconstruct")
 
 BLUEPRINT_PROMPT = """You are an expert ad analyst. Analyse the attached advertising image and return a JSON creative blueprint. Return ONLY valid JSON, no preamble or markdown.
 
@@ -22,7 +25,7 @@ The JSON must have exactly these fields:
 - angle (string): the core persuasive angle
 - awareness_stage (string): one of unaware, problem, solution, product, most_aware
 - claims (array): any of efficacy, sensory, ingredient, social_proof, offer
-- visual (object): {{ "layout": ..., "subject": ..., "palette_mood": ..., "text_placement": ... }}
+- visual (object): {{ "layout": ..., "subject": ..., "palette_mood": ..., "text_placement": ..., "scene_lighting": {{ "light_direction": where the dominant light source actually falls in THIS image relative to the camera, e.g. "upper-left, slightly behind camera" or "overhead, direct", "hardness": "hard" (a distinct, sharp-edged shadow) or "soft" (a diffuse, low-contrast shadow), "colour_temperature": e.g. "warm/golden", "neutral daylight", "cool/blue-tinted fluorescent", "shadow_behaviour": where shadows actually fall and how strong they are, "grain": e.g. "clean, no visible grain" or "visible phone-camera noise/grain", "depth_of_field": e.g. "shallow, background softly blurred" or "deep, background in focus" }} - these six fields are OBSERVATIONS of what THIS reference image's own lighting actually looks like, exactly as a photographer describing an existing photo would, never a style label and never a description of what the lighting SHOULD be. }}
 - cta (string): the call to action
 - destination_url (string): use the value "{destination_url}"
 - headline_verbatim (string): the exact main headline text in the image, or "" if none
@@ -115,9 +118,50 @@ def _b64_from_bytes(data):
     return base64.standard_b64encode(data).decode("utf-8"), media_type
 
 
+# Nudge for the retry attempt only - added after ad 1319813143652844 failed with
+# "Expecting ',' delimiter: line 21 column 26", traced to an unescaped literal quote
+# inside a captured verbatim field (headline_verbatim/typography_zones text lifted
+# straight from the ad image, which can itself contain quote marks). Not sent on
+# attempt 1 so today's byte-for-byte behaviour is unchanged when nothing goes wrong.
+JSON_ESCAPE_SYSTEM = (
+    "Return ONLY valid JSON, no markdown fences, no preamble. Any literal double-quote "
+    "character that appears WITHIN a string value - e.g. a headline or on-image text "
+    "captured verbatim that itself contains a quote mark - must be escaped as \\\" so the "
+    "JSON remains parseable. Never leave a bare unescaped \" inside a string value."
+)
+
+# (system) per attempt - None on attempt 1 (unchanged existing behaviour), the escaping
+# nudge above on the retry. Mirrors generate_copy.py's _COPY_ATTEMPTS shape, but
+# deconstruct's one observed failure mode is a malformed-JSON string, not truncation, so
+# only the system prompt changes between attempts, not max_tokens.
+_DECONSTRUCT_ATTEMPTS = (None, JSON_ESCAPE_SYSTEM)
+
+
+def _log_parse_failure(attempt, total, message, raw_text, exc):
+    """Record exactly what came back, so an intermittent failure stays diagnosable from
+    the run log even when the retry goes on to succeed - mirrors
+    generate_copy._log_parse_failure."""
+    usage = getattr(message, "usage", None)
+    log.error("deconstruct parse failed (attempt %s/%s): %s: %s",
+              attempt, total, type(exc).__name__, exc)
+    log.error("stop_reason=%r output_tokens=%s input_tokens=%s content_blocks=%s",
+              getattr(message, "stop_reason", "?"),
+              getattr(usage, "output_tokens", "?"),
+              getattr(usage, "input_tokens", "?"),
+              len(getattr(message, "content", None) or []))
+    log.error("raw_text len=%s chars", len(raw_text))
+    log.error("raw_text repr (first 2000): %r", raw_text[:2000])
+    if len(raw_text) > 2000:
+        log.error("raw_text repr (last 500): %r", raw_text[-500:])
+
+
 def deconstruct_image(image_bytes, ad_id, source_page, captured_at, destination_url="", ad_text="", cta=""):
     """Send one ad image to Claude vision and return a validated blueprint dict.
-    Makes ONE API call. Raises if the response fails schema validation."""
+
+    Normally ONE API call. If the response cannot be parsed/validated, retries ONCE with
+    a system-prompt nudge about JSON string escaping (see JSON_ESCAPE_SYSTEM). Raises if
+    the retry fails too, logging the raw response on every failed attempt so an
+    unparseable ad stays diagnosable from the run log."""
     b64, media_type = _b64_from_bytes(image_bytes)
     prompt = build_prompt(ad_id, source_page, captured_at, destination_url)
 
@@ -132,21 +176,26 @@ def deconstruct_image(image_bytes, ad_id, source_page, captured_at, destination_
     content.append({"type": "text", "text": prompt})
 
     client = anthropic.Anthropic(timeout=60.0, max_retries=1)  # reads ANTHROPIC_API_KEY from env
-    message = client.messages.create(
-        model=CLAUDE_MODEL,
-        # Part B added creative_objective/target_audience/typography (4 sub-fields) and
-        # expanded layout_detail (4 more sub-fields, one an array) on top of the existing
-        # ~15-field blueprint - estimated +200-350 tokens for the fuller JSON response.
-        # 3072 -> 4096 is a reasoned safety margin, NOT an empirically measured fix (no
-        # real ad image / API call was run to confirm truncation in this change). If a
-        # blueprint response is later seen truncated (a JSON parse failure, or
-        # message.stop_reason == "max_tokens"), raise further or add a retry ladder
-        # mirroring generate_copy.py's (3072, None)/(8192, JSON_ONLY_SYSTEM) pattern.
-        max_tokens=4096,
-        messages=[{
-            "role": "user",
-            "content": content,
-        }],
-    )
-    raw_text = message.content[0].text
-    return deconstruct_from_response(raw_text)
+    total = len(_DECONSTRUCT_ATTEMPTS)
+    for attempt, system in enumerate(_DECONSTRUCT_ATTEMPTS, 1):
+        kwargs = {
+            "model": CLAUDE_MODEL,
+            # Part B added creative_objective/target_audience/typography (4 sub-fields) and
+            # expanded layout_detail (4 more sub-fields, one an array) on top of the existing
+            # ~15-field blueprint - estimated +200-350 tokens for the fuller JSON response.
+            # 3072 -> 4096 is a reasoned safety margin, NOT an empirically measured fix.
+            "max_tokens": 4096,
+            "messages": [{"role": "user", "content": content}],
+        }
+        if system:
+            kwargs["system"] = system
+        message = client.messages.create(**kwargs)
+        raw_text = ""
+        try:
+            raw_text = message.content[0].text if message.content else ""
+            return deconstruct_from_response(raw_text)
+        except Exception as e:
+            _log_parse_failure(attempt, total, message, raw_text, e)
+            if attempt == total:
+                raise
+            log.warning("retrying deconstruct for ad %s with a JSON-escaping system prompt nudge", ad_id)

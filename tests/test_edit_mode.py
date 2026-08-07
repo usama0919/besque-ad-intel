@@ -343,10 +343,15 @@ def test_derive_aspect_ratio_unreadable_bytes_returns_none():
     assert generate_image_prompt.derive_aspect_ratio(b"\x89PNG\r\n\x1a\nnot-a-real-image") is None
 
 
-# ---- Item 6a: generate_image() sets the derived ratio on the generation config in edit
-# mode, and only in edit mode ----
+# ---- Framing row (2026-08-07, reverted Item 6a): aspect_ratio is NEVER forced onto the
+# generation config, even in edit mode with a perfectly-readable reference - a real
+# letterboxed draft (ad 3170893503111146) had a correctly-derived "1:1" explicitly set and
+# still came back 1.79:1. The model infers shape from the attached reference bytes instead. ----
 
-def test_generate_image_edit_mode_sets_aspect_ratio_config_from_reference(monkeypatch, tmp_path):
+def test_generate_image_edit_mode_never_forces_aspect_ratio_even_with_a_readable_reference(monkeypatch, tmp_path):
+    """Even with perfectly readable, perfectly square reference bytes, aspect_ratio must
+    stay None - forcing it (Item 6a's original behaviour) is what produced the real
+    letterboxed draft this reverts."""
     monkeypatch.setattr(generate_image_prompt, "genai", type("obj", (), {"Client": _CapturingGenaiClient}))
     monkeypatch.setattr(generate_image_prompt, "ASSET_DIR", tmp_path)
 
@@ -355,7 +360,7 @@ def test_generate_image_edit_mode_sets_aspect_ratio_config_from_reference(monkey
     )
     config = _CapturingGenaiClient.last_config
     assert config is not None
-    assert config.image_config.aspect_ratio == "9:16"
+    assert config.image_config.aspect_ratio is None
     assert config.image_config.image_size == "2K"
 
 
@@ -376,12 +381,11 @@ def test_generate_image_generate_mode_sets_image_size_but_no_aspect_ratio(monkey
     assert config.image_config.aspect_ratio is None
 
 
-def test_generate_image_edit_mode_missing_reference_falls_back_and_warns(monkeypatch, tmp_path):
-    """competitor_image_bytes=None (or unreadable) in edit mode must not fail the draft -
-    it OMITS aspect_ratio (not a forced "1:1" - a live probe, 2026-08-04, showed that
-    forces the wrong shape while omitting it lets the model infer the reference's own
-    ratio) and records a pipeline_warning instead. image_size is still set (2026-08-06) -
-    that's an independent knob from aspect_ratio, so the fallback must not lose it too."""
+def test_generate_image_edit_mode_missing_reference_still_succeeds_no_warning(monkeypatch, tmp_path):
+    """competitor_image_bytes=None (or unreadable) in edit mode must not fail the draft.
+    No pipeline_warning either, now - omitting aspect_ratio is the ONLY behaviour this
+    module has, not a degraded fallback from a preferred explicit value, so there's
+    nothing distinct to warn about any more."""
     from src import dedupe
     monkeypatch.setattr(generate_image_prompt, "genai", type("obj", (), {"Client": _CapturingGenaiClient}))
     monkeypatch.setattr(generate_image_prompt, "ASSET_DIR", tmp_path)
@@ -395,12 +399,9 @@ def test_generate_image_edit_mode_missing_reference_falls_back_and_warns(monkeyp
     assert dest is not None  # the draft still succeeds
     config = _CapturingGenaiClient.last_config
     assert config is not None
-    assert config.image_config.aspect_ratio is None  # not forced onto the call
+    assert config.image_config.aspect_ratio is None
     assert config.image_config.image_size == "2K"
-    assert len(warnings) == 1
-    kind, detail = warnings[0]
-    assert kind == "edit_mode_aspect_ratio_fallback"
-    assert "AD_ASPECT_FALLBACK" in detail
+    assert warnings == []
 
 
 # ---- Step 2, Part 3 (2026-08-02): urgency/CTA text must not survive with offer_text

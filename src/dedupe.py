@@ -402,18 +402,26 @@ def init_products():
         # this table are ALTER-only and not reproducible from code against a fresh DB; this
         # one shouldn't join that list.
         cur.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS shopify_product_ids JSONB DEFAULT '[]'::jsonb")
+        # certifications (Task, badge/banner substitution row, 2026-08-07): a STRUCTURED
+        # list (e.g. ["Vegan", "Cruelty Free", "100% Natural"]), never parsed out of
+        # visual_description's prose - same reasoning already established for
+        # substance_colour above ("that field is prose, not reliably parseable"). This is
+        # the one place generate_image_prompt's badge substitution reads a genuine Besque
+        # counterpart from; empty by default, so a badge with no real counterpart falls
+        # through to removal exactly as before, never a guessed cert.
+        cur.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS certifications JSONB DEFAULT '[]'::jsonb")
         conn.commit()
 
 
 _PRODUCT_COLS = ("id, name, description, ingredients, hero_claim, image_key, category, "
-                  "image_keys, visual_description, substance_colour, shopify_product_ids")
+                  "image_keys, visual_description, substance_colour, shopify_product_ids, certifications")
 
 
 def _product_row_to_dict(r):
     return {"id": r[0], "name": r[1], "description": r[2], "ingredients": r[3], "hero_claim": r[4],
             "image_key": r[5] or "", "category": r[6] or "", "image_keys": r[7] or [],
             "visual_description": r[8] or "", "substance_colour": r[9] or "",
-            "shopify_product_ids": r[10] or []}
+            "shopify_product_ids": r[10] or [], "certifications": r[11] or []}
 
 
 def get_products():
@@ -596,6 +604,143 @@ def get_reviews_for_product(product_id, exclude_medical_flag=True):
             query += " AND medical_flag IS NULL"
         cur.execute(query, (product_id,))
         return [_review_row_to_dict(r) for r in cur.fetchall()]
+
+
+# ---- Review <-> angle classification (Task E Part 1, 2026-08-07) - a many-to-many join
+# table, NOT a column on product_reviews: a review may genuinely speak to more than one
+# angle (e.g. a menopause review that also mentions crepey skin), and the team reviews/
+# corrects these after the fact, so this must stay freely editable/deletable per
+# (review, angle) pair rather than a single overwritable classification per review. ----
+
+def init_review_angle_matches():
+    """Create the review_angle_matches table if missing. UNIQUE(product_review_id,
+    angle_id) so re-running the classifier on an already-classified review is idempotent
+    (ON CONFLICT DO NOTHING in insert_review_angle_matches below), never a duplicate row."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """CREATE TABLE IF NOT EXISTS review_angle_matches (
+                id SERIAL PRIMARY KEY,
+                product_review_id INTEGER NOT NULL REFERENCES product_reviews(id),
+                angle_id INTEGER NOT NULL REFERENCES angles(id),
+                confidence TEXT NOT NULL,
+                rationale TEXT DEFAULT '',
+                corrected BOOLEAN DEFAULT false,
+                classified_at TIMESTAMPTZ DEFAULT NOW()
+            )"""
+        )
+        cur.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS review_angle_matches_uq "
+            "ON review_angle_matches (product_review_id, angle_id)"
+        )
+        conn.commit()
+
+
+def insert_review_angle_matches(rows):
+    """rows: list of dicts with product_review_id, angle_id, confidence, rationale.
+    ON CONFLICT DO NOTHING - re-classifying an already-matched (review, angle) pair never
+    errors and never overwrites a human correction (corrected=true rows are left alone,
+    since this never UPDATEs, only INSERTs)."""
+    if not rows:
+        return 0
+    with get_conn() as conn, conn.cursor() as cur:
+        for row in rows:
+            cur.execute(
+                """INSERT INTO review_angle_matches
+                   (product_review_id, angle_id, confidence, rationale)
+                   VALUES (%s, %s, %s, %s)
+                   ON CONFLICT (product_review_id, angle_id) DO NOTHING""",
+                (row["product_review_id"], row["angle_id"], row["confidence"], row.get("rationale", "")),
+            )
+        conn.commit()
+    return len(rows)
+
+
+def get_classified_review_ids():
+    """Every product_reviews.id that already has at least one row in
+    review_angle_matches - lets a classification run skip rows it's already covered,
+    the same up-front-fetch idempotency shape as get_existing_review_ids()."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT DISTINCT product_review_id FROM review_angle_matches")
+        return {r[0] for r in cur.fetchall()}
+
+
+# ---- Angle language (SUBSTITUTION AS ONE RULE task, 2026-08-07) - the per-angle
+# vocabulary docs/angle_language.md supplies: a TABLE keyed on angle slug, not a column,
+# because it's an independent axis from the angles table's own operator-curated
+# defaults (body_area/default_realism/includes_product) - this is text content, angles
+# is generation config. SCHEMA ONLY as of this commit: docs/angle_language.md did not
+# exist in the repo when this was designed (confirmed: no docs/ directory at all) and is
+# being authored now - no row has been inserted, and none of this content is invented.
+# headline/subtext generation in generate_copy.py stay documented stubs until a loader
+# populates this table from the real doc. ----
+
+def init_angle_language():
+    """Create the angle_language table if missing. angle_slug REFERENCES angles(slug) so
+    a typo'd slug fails loudly at insert time rather than silently orphaning a row no
+    query will ever join back to a real angle. common_phrases/result_phrases/
+    best_verbatims are JSONB arrays - best_verbatims entries are
+    {"quote": str, "attribution": "nickname + first initial ONLY"} per the doc's
+    non-negotiable override (no age, no full name, no platform name)."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """CREATE TABLE IF NOT EXISTS angle_language (
+                id SERIAL PRIMARY KEY,
+                angle_slug TEXT NOT NULL UNIQUE REFERENCES angles(slug),
+                core_angle TEXT NOT NULL DEFAULT '',
+                causes TEXT NOT NULL DEFAULT '',
+                main_pain_point TEXT NOT NULL DEFAULT '',
+                main_benefit TEXT NOT NULL DEFAULT '',
+                common_phrases JSONB NOT NULL DEFAULT '[]',
+                result_phrases JSONB NOT NULL DEFAULT '[]',
+                best_verbatims JSONB NOT NULL DEFAULT '[]',
+                image_direction TEXT NOT NULL DEFAULT '',
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            )"""
+        )
+        conn.commit()
+
+
+_ANGLE_LANGUAGE_COLS = ("angle_slug, core_angle, causes, main_pain_point, main_benefit, "
+                         "common_phrases, result_phrases, best_verbatims, image_direction")
+
+
+def _angle_language_row_to_dict(r):
+    return {"angle_slug": r[0], "core_angle": r[1], "causes": r[2], "main_pain_point": r[3],
+            "main_benefit": r[4], "common_phrases": r[5] or [], "result_phrases": r[6] or [],
+            "best_verbatims": r[7] or [], "image_direction": r[8]}
+
+
+def get_angle_language(angle_slug):
+    """None if this angle has no language row yet - callers must treat that as "no
+    vocabulary available for this angle," never fall back to guessing one."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(f"SELECT {_ANGLE_LANGUAGE_COLS} FROM angle_language WHERE angle_slug=%s", (angle_slug,))
+        r = cur.fetchone()
+        return _angle_language_row_to_dict(r) if r else None
+
+
+def upsert_angle_language(angle_slug, core_angle, causes, main_pain_point, main_benefit,
+                           common_phrases, result_phrases, best_verbatims, image_direction):
+    """Insert or fully replace this angle's language row - a loader re-run (e.g. the doc
+    was corrected) always reflects the doc's current content exactly, never merges stale
+    fields with new ones."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO angle_language
+               (angle_slug, core_angle, causes, main_pain_point, main_benefit,
+                common_phrases, result_phrases, best_verbatims, image_direction)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+               ON CONFLICT (angle_slug) DO UPDATE SET
+                 core_angle=EXCLUDED.core_angle, causes=EXCLUDED.causes,
+                 main_pain_point=EXCLUDED.main_pain_point, main_benefit=EXCLUDED.main_benefit,
+                 common_phrases=EXCLUDED.common_phrases, result_phrases=EXCLUDED.result_phrases,
+                 best_verbatims=EXCLUDED.best_verbatims, image_direction=EXCLUDED.image_direction,
+                 updated_at=NOW()""",
+            (angle_slug, core_angle, causes, main_pain_point, main_benefit,
+             _json.dumps(common_phrases), _json.dumps(result_phrases),
+             _json.dumps(best_verbatims), image_direction),
+        )
+        conn.commit()
 
 
 # ---- Messaging angles (operator-curated, not a Python enum - the set has already
