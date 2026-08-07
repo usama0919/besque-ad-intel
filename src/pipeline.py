@@ -845,8 +845,8 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
         # deconstruct call just produced - no new model call, and no dependency on an
         # artifact already existing (the prior version of this check lived in
         # generate_from_selection and only fired on a re-select of an already-generated
-        # ad - wrong, since ad 1572112423973290 proved this must catch a FIRST
-        # generation too). Same visible-skip shape as the hard block just above: never
+        # ad - wrong, since a real FIRST-EVER generation was observed hitting exactly
+        # this case). Same visible-skip shape as the hard block just above: never
         # fail, never silently generate. This is "there is nothing here to clone", never
         # a taste judgment on the ad.
         if _reference_has_nothing_to_clone(blueprint):

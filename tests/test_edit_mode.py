@@ -343,15 +343,15 @@ def test_derive_aspect_ratio_unreadable_bytes_returns_none():
     assert generate_image_prompt.derive_aspect_ratio(b"\x89PNG\r\n\x1a\nnot-a-real-image") is None
 
 
-# ---- Framing row (2026-08-07, reverted Item 6a): aspect_ratio is NEVER forced onto the
-# generation config, even in edit mode with a perfectly-readable reference - a real
-# letterboxed draft (ad 3170893503111146) had a correctly-derived "1:1" explicitly set and
-# still came back 1.79:1. The model infers shape from the attached reference bytes instead. ----
+# ---- Item 6a, REINSTATED 2026-08-07: aspect_ratio IS forced onto the generation config
+# in edit mode, derived per-reference via derive_aspect_ratio. Briefly removed the same
+# day (a correctly-derived "1:1" on ad 3170893503111146 still produced 1.79:1) - reinstated
+# after measuring the SAME reference (ad 893032677180797) produce a close match on one
+# omitted-ratio run (0.5581 vs 0.5625) and a badly wrong one on another (0.322 vs 0.5625) -
+# omitting is nondeterministic, not a reliable inference, so explicit forcing is the safer
+# default despite its own one documented failure. ----
 
-def test_generate_image_edit_mode_never_forces_aspect_ratio_even_with_a_readable_reference(monkeypatch, tmp_path):
-    """Even with perfectly readable, perfectly square reference bytes, aspect_ratio must
-    stay None - forcing it (Item 6a's original behaviour) is what produced the real
-    letterboxed draft this reverts."""
+def test_generate_image_edit_mode_sets_aspect_ratio_config_from_reference(monkeypatch, tmp_path):
     monkeypatch.setattr(generate_image_prompt, "genai", type("obj", (), {"Client": _CapturingGenaiClient}))
     monkeypatch.setattr(generate_image_prompt, "ASSET_DIR", tmp_path)
 
@@ -360,7 +360,7 @@ def test_generate_image_edit_mode_never_forces_aspect_ratio_even_with_a_readable
     )
     config = _CapturingGenaiClient.last_config
     assert config is not None
-    assert config.image_config.aspect_ratio is None
+    assert config.image_config.aspect_ratio == "9:16"
     assert config.image_config.image_size == "2K"
 
 
@@ -381,11 +381,12 @@ def test_generate_image_generate_mode_sets_image_size_but_no_aspect_ratio(monkey
     assert config.image_config.aspect_ratio is None
 
 
-def test_generate_image_edit_mode_missing_reference_still_succeeds_no_warning(monkeypatch, tmp_path):
-    """competitor_image_bytes=None (or unreadable) in edit mode must not fail the draft.
-    No pipeline_warning either, now - omitting aspect_ratio is the ONLY behaviour this
-    module has, not a degraded fallback from a preferred explicit value, so there's
-    nothing distinct to warn about any more."""
+def test_generate_image_edit_mode_missing_reference_falls_back_and_warns(monkeypatch, tmp_path):
+    """competitor_image_bytes=None (or unreadable) in edit mode must not fail the draft -
+    it OMITS aspect_ratio (not a forced "1:1" - forcing the wrong shape is worse than
+    omitting when there's genuinely nothing to derive from) and records a pipeline_warning
+    instead. image_size is still set - that's an independent knob from aspect_ratio, so the
+    fallback must not lose it too."""
     from src import dedupe
     monkeypatch.setattr(generate_image_prompt, "genai", type("obj", (), {"Client": _CapturingGenaiClient}))
     monkeypatch.setattr(generate_image_prompt, "ASSET_DIR", tmp_path)
@@ -399,8 +400,12 @@ def test_generate_image_edit_mode_missing_reference_still_succeeds_no_warning(mo
     assert dest is not None  # the draft still succeeds
     config = _CapturingGenaiClient.last_config
     assert config is not None
-    assert config.image_config.aspect_ratio is None
+    assert config.image_config.aspect_ratio is None  # not forced onto the call
     assert config.image_config.image_size == "2K"
+    assert len(warnings) == 1
+    kind, detail = warnings[0]
+    assert kind == "edit_mode_aspect_ratio_fallback"
+    assert "AD_ASPECT_FALLBACK" in detail
     assert warnings == []
 
 
@@ -564,6 +569,21 @@ def test_build_image_prompt_edit_mode_product_present_still_substitutes():
     prompt = generate_image_prompt.build_image_prompt(bp, product=product, edit_mode=True, include_product=True)
     assert "Remove the competitor's product entirely and place the Besque product" in prompt
     assert "Place the Besque product described below as the subject" in prompt
+
+
+def test_build_image_prompt_product_count_above_one_renders_that_many_of_the_same_product():
+    """Corrected 2026-08-07: a reference showing N products renders N of the SAME Besque
+    product, reproducing composition - never collapsed to one, and never framed as
+    "duplicating to fake a pair." The only real ban is a DIFFERENT invented SKU."""
+    bp = _blueprint()
+    bp["layout_detail"] = {"product_count": 2}
+    product = {"name": "Magic Body Oil", "description": "seven cold-pressed oils",
+               "ingredients": "almond; rosehip", "hero_claim": "Visibly firms"}
+    prompt = generate_image_prompt.build_image_prompt(bp, product=product, include_product=True)
+    assert "place 2 of the Besque product" in prompt
+    assert "reproducing the reference's own composition and count" in prompt
+    assert "do NOT duplicate" not in prompt
+    assert "only" not in prompt.split("The reference shows 2 products")[1][:80]
 
 
 # ---- Step 3, Part 2 (2026-08-03): product-derived substances must take OUR colour -
@@ -1305,11 +1325,13 @@ def test_build_image_prompt_generate_mode_unaffected_by_typography_zones():
             == generate_image_prompt.build_image_prompt(bp_with_zones))
 
 
-# ---- structural_zones generator wiring (2026-08-06) - only the zone types we have a
-# real Besque value for today: brand_wordmark (always), sub_line/body_copy/cta (only when
-# text_in_image supplies real content, else removed - never left showing the reference's
-# own words), badge/disclaimer/price_anchor/product_callout (always removed, no operator
-# input exists yet), social_proof (untouched, no instruction either way). ----
+# ---- structural_zones generator wiring (2026-08-06, generalised 2026-08-07) - every zone
+# type now has a real substitute-or-remove decision: brand_wordmark (always), sub_line/
+# body_copy/cta (only when text_in_image supplies real content, else removed), badge/
+# price_anchor/product_callout (substituted when a genuine Besque counterpart is supplied
+# this call - offer_text/certifications/product_name respectively - else removed),
+# disclaimer (always removed, no exception), social_proof (untouched, no instruction
+# either way). ----
 
 def _szone(zone_type, **overrides):
     z = {"zone_type": zone_type, "position": "top-center", "container": "none"}
@@ -1432,16 +1454,76 @@ def test_structural_zones_clause_cta_removed_when_no_text():
     assert "STRUCTURAL ZONES - REMOVE" in clause
 
 
-def test_structural_zones_clause_always_removes_badge_disclaimer_price_callout():
-    always_remove = ["badge", "disclaimer", "price_anchor", "product_callout"]
+def test_structural_zones_clause_removes_badge_price_callout_with_no_counterpart_supplied():
+    """No offer_text/certifications/product_name supplied this call - every one of these
+    falls to REMOVAL, same outcome as before this generalised, but now because no
+    counterpart was GIVEN, not because none could ever exist. disclaimer has no exception
+    either way."""
+    no_counterpart = ["badge", "disclaimer", "price_anchor", "product_callout"]
     clause, substituted = generate_image_prompt._structural_zones_clause(
-        [_szone(zt) for zt in always_remove],
+        [_szone(zt) for zt in no_counterpart],
         zone_copy_text="irrelevant", cta_text="irrelevant",  # even with text available
     )
     assert substituted == set()
-    for zt in always_remove:
+    for zt in no_counterpart:
         assert zt in clause
     assert "STRUCTURAL ZONES - SUBSTITUTE" not in clause
+
+
+def test_structural_zones_clause_badge_award_shaped_always_removes():
+    """An award/editorial/endorsement badge has no Besque counterpart - removed even when
+    certifications AND offer_text are both supplied, since award-shape wins the check
+    order unconditionally."""
+    clause, substituted = generate_image_prompt._structural_zones_clause(
+        [_szone("badge", detail="Allure Best of Beauty Award Winner")],
+        certifications=["Vegan", "Cruelty Free", "100% Natural"], offer_text="20% off",
+    )
+    assert substituted == set()
+    assert "STRUCTURAL ZONES - SUBSTITUTE" not in clause
+    assert "badge" in clause
+
+
+def test_structural_zones_clause_badge_offer_shaped_substitutes_with_offer_text():
+    clause, substituted = generate_image_prompt._structural_zones_clause(
+        [_szone("badge", detail="reads 'SAVE 16%'")], offer_text="20% off your first order",
+    )
+    assert substituted == {"badge"}
+    assert "20% off your first order" in clause
+    assert "offer/discount badge" in clause
+
+
+def test_structural_zones_clause_badge_offer_shaped_removes_when_no_offer_text():
+    clause, substituted = generate_image_prompt._structural_zones_clause(
+        [_szone("badge", detail="reads 'SAVE 16%'")], offer_text=None,
+    )
+    assert substituted == set()
+    assert "STRUCTURAL ZONES - SUBSTITUTE" not in clause
+
+
+def test_structural_zones_clause_badge_cert_shaped_substitutes_with_certifications():
+    clause, substituted = generate_image_prompt._structural_zones_clause(
+        [_szone("badge", detail="USDA Organic certification seal")],
+        certifications=["Vegan", "Cruelty Free", "100% Natural"],
+    )
+    assert substituted == {"badge"}
+    assert "Vegan, Cruelty Free, 100% Natural" in clause
+
+
+def test_structural_zones_clause_price_anchor_substitutes_with_offer_text():
+    clause, substituted = generate_image_prompt._structural_zones_clause(
+        [_szone("price_anchor", detail="was $60, now $45")], offer_text="20% off",
+    )
+    assert substituted == {"price_anchor"}
+    assert "20% off" in clause
+    assert "never the competitor's own price" in clause
+
+
+def test_structural_zones_clause_product_callout_substitutes_with_product_name():
+    clause, substituted = generate_image_prompt._structural_zones_clause(
+        [_szone("product_callout", detail="reads 'New Scent'")], product_name="Besque Magic Body Oil",
+    )
+    assert substituted == {"product_callout"}
+    assert "Besque Magic Body Oil" in clause
 
 
 def test_structural_zones_clause_social_proof_aggregate_bar_always_removed():
