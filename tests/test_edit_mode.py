@@ -525,12 +525,15 @@ def test_build_image_prompt_edit_mode_forwards_offer_ban_coverage():
         assert category in prompt
 
 
-# ---- Step 2, Part 4 (2026-08-02): don't invent a product the reference doesn't have ----
+# ---- Step 2, Part 4 (2026-08-02); REVERSED 2026-08-07 (reference usability gate
+# reversal, see CLAUDE.md) - a reference with no product is still a usable scene, so the
+# product is now ADDED, never suppressed ----
 
-def test_edit_mode_instruction_reference_has_no_product_does_not_add_one():
+def test_edit_mode_instruction_reference_has_no_product_adds_one():
     instruction = generate_image_prompt._edit_mode_instruction(reference_has_product=False)
-    assert "do NOT add a Besque product" in instruction
-    assert "there is nothing to substitute" in instruction
+    assert "there is nothing to" in instruction
+    assert "ADD the Besque product" in instruction
+    assert "do NOT add a Besque product" not in instruction
     assert "Remove the competitor's product entirely and place the Besque product" not in instruction
 
 
@@ -539,24 +542,25 @@ def test_edit_mode_instruction_reference_has_product_default_substitutes():
     assert "Remove the competitor's product entirely and place the Besque product" in instruction
 
 
-def test_build_image_prompt_edit_mode_product_count_zero_forces_no_product():
+def test_build_image_prompt_edit_mode_product_count_zero_adds_product():
     """layout_detail.product_count==0 (deconstruct.py's schema) means the reference ad has
-    no product in frame - the operator's own include_product=True toggle must not add one
-    where the source has nothing to substitute."""
+    no product in frame - REVERSED 2026-08-07: the operator's own include_product=True
+    toggle now ADDS one into the scene (derived from its own composition), rather than
+    being suppressed just because the source had nothing to substitute into."""
     bp = _blueprint()
     bp["layout_detail"] = {"product_count": 0}
     prompt = generate_image_prompt.build_image_prompt(bp, edit_mode=True, include_product=True)
-    assert "do NOT add a Besque product" in prompt
-    assert "This is a deliberately productless, educational/illustrative image" in prompt
+    assert "ADD the Besque product" in prompt
+    assert "This is a deliberately productless, educational/illustrative image" not in prompt
     assert "Remove the competitor's product entirely and place the Besque product" not in prompt
 
 
-def test_build_image_prompt_edit_mode_not_product_category_forces_no_product():
+def test_build_image_prompt_edit_mode_not_product_category_adds_product():
     bp = _blueprint()
     bp["product_category"] = {"category": "not_product"}
     prompt = generate_image_prompt.build_image_prompt(bp, edit_mode=True, include_product=True)
-    assert "do NOT add a Besque product" in prompt
-    assert "This is a deliberately productless, educational/illustrative image" in prompt
+    assert "ADD the Besque product" in prompt
+    assert "This is a deliberately productless, educational/illustrative image" not in prompt
 
 
 def test_build_image_prompt_edit_mode_product_present_still_substitutes():
@@ -569,6 +573,96 @@ def test_build_image_prompt_edit_mode_product_present_still_substitutes():
     prompt = generate_image_prompt.build_image_prompt(bp, product=product, edit_mode=True, include_product=True)
     assert "Remove the competitor's product entirely and place the Besque product" in prompt
     assert "Place the Besque product described below as the subject" in prompt
+
+
+def test_build_image_prompt_edit_mode_illustrated_no_product_adds_natively():
+    """The illustrated-register ADD branch (2026-08-07, reference usability gate
+    reversal): no product in frame, illustrated style - the bottle is drawn NATIVELY into
+    the scene's own visual language, same drawing constraints as the substitute-
+    illustrated branch, never a photographic composite and never suppressed."""
+    bp = _blueprint()
+    bp["layout_detail"] = {"product_count": 0}
+    bp["production_style"] = {"style": "illustrated"}
+    prompt = generate_image_prompt.build_image_prompt(bp, edit_mode=True, include_product=True)
+    assert "ADD the Besque product NATIVELY" in prompt
+    assert "never a photograph or photorealistic render composited into the drawing" in prompt
+    assert "This is a deliberately productless, educational/illustrative image" not in prompt
+
+
+def test_edit_mode_instruction_add_product_placement_derived_from_composition():
+    """Placement in the ADD branch must be DERIVED from the reference's own observed
+    layout/composition - never a fixed or default position, and never the same wording
+    regardless of what the reference shows."""
+    instruction = generate_image_prompt._edit_mode_instruction(
+        reference_has_product=False,
+        layout_detail={"frame_division": "three stacked horizontal bands",
+                        "zone_positions": ["headline top-center", "CTA bottom-full-width"]},
+        visual={"layout": "clean centered composition"},
+    )
+    assert "OBSERVED SCENE COMPOSITION" in instruction
+    assert "three stacked horizontal bands" in instruction
+    assert "headline top-center" in instruction
+
+    no_facts = generate_image_prompt._edit_mode_instruction(reference_has_product=False)
+    assert "OBSERVED SCENE COMPOSITION" not in no_facts
+    assert "never a fixed or default position" in no_facts
+
+
+def test_scene_composition_facts_empty_when_nothing_extracted():
+    assert generate_image_prompt._scene_composition_facts(None, None) == ""
+    assert generate_image_prompt._scene_composition_facts({}, {}) == ""
+
+
+def test_scene_composition_facts_reports_observed_fields_only():
+    facts = generate_image_prompt._scene_composition_facts(
+        {"frame_division": "single uninterrupted gradient ground", "background_type": "studio backdrop"},
+        {"layout": "product hero, centered"},
+    )
+    assert "single uninterrupted gradient ground" in facts
+    assert "studio backdrop" in facts
+    assert "product hero, centered" in facts
+
+
+# ---- reference_has_text_zone (2026-08-07, reference usability gate reversal): the
+# text-side analogue of reference_has_product - independent, a reference can have a
+# product but no text zone, text but no product, both, or neither ----
+
+def test_reference_has_text_zone_true_for_headline():
+    assert generate_image_prompt.reference_has_text_zone({"headline_verbatim": "Feel confident again"}) is True
+
+
+def test_reference_has_text_zone_true_for_text_bearing_structural_zone():
+    bp = {"structural_zones": [{"zone_type": "body_copy", "position": "mid", "container": "none", "detail": "x"}]}
+    assert generate_image_prompt.reference_has_text_zone(bp) is True
+
+
+def test_reference_has_text_zone_false_when_neither():
+    bp = {"structural_zones": [{"zone_type": "badge", "position": "top", "container": "oval", "detail": "NEW"}]}
+    assert generate_image_prompt.reference_has_text_zone(bp) is False
+    assert generate_image_prompt.reference_has_text_zone({}) is False
+
+
+def test_edit_mode_instruction_text_added_into_negative_space_when_no_reference_text_zone():
+    """TEXT branch ADD path: an authorised headline with NO existing reference text zone
+    to substitute into must be placed newly, in clean negative space derived from the
+    reference's own composition - never the "preserve the reference's text zones
+    exactly" wording, which is vacuous/wrong when no such zone exists."""
+    instruction = generate_image_prompt._edit_mode_instruction(
+        text_in_image=True, headline="Feel confident again", reference_has_text_zone=False,
+    )
+    assert "the reference has no existing text zone to substitute into" in instruction
+    assert "clean negative space" in instruction
+    assert "preserve the reference image's text zones EXACTLY as they appear" not in instruction
+
+
+def test_edit_mode_instruction_text_substituted_when_reference_has_text_zone():
+    """Regression guard: the default (reference_has_text_zone=True) must stay
+    byte-for-byte the original substitute wording."""
+    instruction = generate_image_prompt._edit_mode_instruction(
+        text_in_image=True, headline="Feel confident again",
+    )
+    assert "preserve the reference image's text zones EXACTLY as they appear" in instruction
+    assert "the reference has no existing text zone to substitute into" not in instruction
 
 
 def test_build_image_prompt_product_count_above_one_renders_that_many_of_the_same_product():
@@ -815,21 +909,25 @@ def test_build_image_prompt_non_edit_mode_unaffected_by_suppression_exception():
 # build_image_prompt and pipeline.process_ad both call, so there's one derivation to keep
 # in sync rather than two ----
 
-def test_resolve_effective_include_product_forces_false_when_reference_has_no_product():
+def test_resolve_effective_include_product_never_forces_false_when_reference_has_no_product():
+    """REVERSED 2026-08-07 (reference usability gate reversal, see CLAUDE.md): a
+    productless reference no longer forces effective_include_product off - it is always
+    exactly the operator's own toggle now. reference_has_product is still returned, but
+    only to select ADD-vs-SUBSTITUTE wording downstream, never the boolean outcome."""
     bp = {"layout_detail": {"product_count": 0}}
     effective, reference_has_product = generate_image_prompt.resolve_effective_include_product(
         bp, include_product=True, edit_mode=True
     )
-    assert effective is False
+    assert effective is True
     assert reference_has_product is False
 
 
-def test_resolve_effective_include_product_forces_false_when_not_product_category():
+def test_resolve_effective_include_product_never_forces_false_when_not_product_category():
     bp = {"product_category": {"category": "not_product"}}
     effective, reference_has_product = generate_image_prompt.resolve_effective_include_product(
         bp, include_product=True, edit_mode=True
     )
-    assert effective is False
+    assert effective is True
     assert reference_has_product is False
 
 

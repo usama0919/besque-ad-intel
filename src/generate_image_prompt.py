@@ -69,38 +69,72 @@ def resolve_product_count(reference_count, operator_count, default_count=1):
     return default_count, "default"
 
 
-def resolve_effective_include_product(blueprint, include_product, edit_mode):
-    """The single source for whether a Besque product is actually being substituted in -
-    Item 2 (2026-08-05), extracted from build_image_prompt's own inline computation so
-    pipeline.process_ad can learn the same answer instead of independently re-deriving it
-    (exactly the two-independent-derivations shape that let rule 6 and the output critic
-    drift apart on text_in_image - see effective_authorised_text above).
+def reference_has_product(blueprint):
+    """True when the reference blueprint shows a product in frame at all -
+    layout_detail.product_count != 0 and product_category.category != "not_product",
+    both already extracted by deconstruct.py, never a new signal invented for this. False
+    means there is nothing in the reference to SUBSTITUTE - see
+    resolve_effective_include_product/_edit_mode_instruction, which now ADD the product
+    into the scene in that case rather than skipping the ad (2026-08-07, reference
+    usability gate reversal - a reference with no product is still a usable scene).
 
-    In edit_mode, the reference ad governs whether there's a product to substitute at all:
-    layout_detail.product_count==0 or product_category.category=="not_product" (both from
-    deconstruct.py's blueprint schema) force this False even when the operator explicitly
-    asked for a product (include_product=True), since there's nothing in the reference to
-    substitute. Outside edit_mode this is a no-op (reference_has_product stays True,
-    effective_include_product == include_product exactly).
+    Public (no leading underscore): pipeline.py's own reference-usability detection reads
+    this exact derivation for its pool-badge/logging use, rather than re-implementing it
+    and risking drift - one source of truth, same reasoning as effective_authorised_text
+    above."""
+    blueprint = blueprint or {}
+    layout_detail_bp = blueprint.get("layout_detail") or {}
+    product_category_bp = (blueprint.get("product_category") or {}).get("category")
+    return not (product_category_bp == "not_product" or layout_detail_bp.get("product_count") == 0)
+
+
+def reference_has_text_zone(blueprint):
+    """True when the reference blueprint shows an EXISTING headline or another
+    text-bearing structural zone (sub_line/body_copy/cta) that authorised in-image copy
+    could substitute into. False means any authorised text has nothing to substitute
+    into and must be ADDED into clean negative space instead (see
+    _edit_mode_instruction's TEXT branch) - independent of reference_has_product; a
+    reference can have a product but no text, text but no product, both, or neither.
+
+    Public for the same reason as reference_has_product above - pipeline.py's pool-badge
+    detection reads this exact derivation, never a re-implementation of it."""
+    blueprint = blueprint or {}
+    if (blueprint.get("headline_verbatim") or "").strip():
+        return True
+    text_zone_types = {"sub_line", "body_copy", "cta"}
+    return any(
+        (z or {}).get("zone_type") in text_zone_types
+        for z in (blueprint.get("structural_zones") or [])
+    )
+
+
+def resolve_effective_include_product(blueprint, include_product, edit_mode):
+    """The single source for whether a Besque product is actually being placed in the
+    scene - Item 2 (2026-08-05), extracted from build_image_prompt's own inline
+    computation so pipeline.process_ad can learn the same answer instead of independently
+    re-deriving it (exactly the two-independent-derivations shape that let rule 6 and the
+    output critic drift apart on text_in_image - see effective_authorised_text above).
+
+    REVERSED 2026-08-07 (reference usability gate reversal): effective_include_product is
+    now ALWAYS exactly the operator's include_product toggle - a reference with no product
+    in frame no longer forces this False. This must generalise across every reference
+    shape, not special-case any one ad: a productless reference is still a usable scene,
+    it just means the product gets ADDED rather than substituted (see
+    _edit_mode_instruction). reference_has_product (reference_has_product() above) is
+    still computed and returned - callers use it ONLY to choose ADD vs SUBSTITUTE wording,
+    never to override the operator's explicit choice again.
 
     Returns (effective_include_product, reference_has_product) - the caller needs
-    reference_has_product too, since include_product and reference_has_product
-    independently select one of three explanations for a productless outcome (operator
-    disabled it / nothing to substitute / both), the same distinction
-    _edit_mode_instruction's docstring already establishes.
+    reference_has_product too, to choose which explanation/wording applies, the same
+    distinction _edit_mode_instruction's docstring establishes.
 
     Deliberately a plain function, not a build_image_prompt return value (~55 existing
     call sites treat that function's return as a bare string) and not a module-level
     attribute like generate_image.last_prompt (the exact kind of hidden coupling that
     made the text_in_image bug possible - state one function sets and another reads, with
     nothing in either signature saying so)."""
-    reference_has_product = True
-    if edit_mode:
-        layout_detail_bp = (blueprint or {}).get("layout_detail") or {}
-        product_category_bp = ((blueprint or {}).get("product_category") or {}).get("category")
-        reference_has_product = not (product_category_bp == "not_product"
-                                      or layout_detail_bp.get("product_count") == 0)
-    return include_product and reference_has_product, reference_has_product
+    ref_has_product = reference_has_product(blueprint) if edit_mode else True
+    return include_product, ref_has_product
 
 
 def build_image_prompt(blueprint: dict, product: dict = None, include_product: bool = True,
@@ -185,10 +219,16 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
     scene_lighting = visual.get("scene_lighting") or {}
     prod_style = (blueprint.get("production_style") or {}).get("style", "")
 
+    layout_detail_bp = blueprint.get("layout_detail") or {}
     effective_include_product, reference_has_product = resolve_effective_include_product(
         blueprint, include_product, edit_mode
     )
-    reference_product_count = (blueprint.get("layout_detail") or {}).get("product_count")
+    # reference_has_text_zone (2026-08-07, reference usability gate reversal): the
+    # text-side analogue of reference_has_product, only meaningful in edit_mode (outside
+    # it there's no reference zone to substitute into or add alongside at all - generate
+    # mode always "adds" from scratch, see build_image_prompt's own docstring).
+    ref_has_text_zone = reference_has_text_zone(blueprint) if edit_mode else True
+    reference_product_count = layout_detail_bp.get("product_count")
     resolved_product_count, product_count_source = resolve_product_count(
         reference_product_count, product_count
     )
@@ -272,15 +312,18 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
                         headline=headline, subtext=subtext, edit_mode=True) +
             _operator_instruction_clause(operator_instruction) +
             _critic_feedback_clause(critic_feedback) +
-            # include_product here is the RAW operator toggle, not effective_include_product -
-            # the two booleans (include_product, reference_has_product) independently select
-            # one of three distinct explanations (substitute / nothing-to-substitute /
-            # operator-disabled), but the ADD-vs-DON'T-ADD outcome they produce always
-            # matches effective_include_product exactly (same combining logic), so this can
-            # never contradict product_clause below, which IS built from the effective value.
+            # include_product here is the RAW operator toggle - identical to
+            # effective_include_product since the 2026-08-07 reference usability gate
+            # reversal (reference_has_product no longer forces effective_include_product
+            # off; see resolve_effective_include_product). reference_has_product/
+            # reference_has_text_zone independently select SUBSTITUTE-vs-ADD wording per
+            # element, never the boolean outcome itself - product_clause below is built
+            # from the same effective_include_product, so this can never contradict it.
             _edit_mode_instruction(text_in_image=text_in_image, headline=headline, subtext=subtext,
                                    offer_text=offer_text, include_product=include_product,
                                    reference_has_product=reference_has_product,
+                                   reference_has_text_zone=ref_has_text_zone,
+                                   layout_detail=layout_detail_bp, visual=visual,
                                    retheme_colours=retheme_colours, palette=brand_palette,
                                    substance_colour=(product or {}).get("substance_colour"),
                                    style=(realism or "").strip() or prod_style,
@@ -1008,6 +1051,36 @@ def _scene_lighting_facts(scene_lighting):
     return "OBSERVED SCENE LIGHTING (facts about this reference, not a style label): " + "; ".join(facts) + ". "
 
 
+def _scene_composition_facts(layout_detail=None, visual=None):
+    """Turn deconstruct.py's OBSERVED layout_detail/visual fields into a facts sentence
+    describing the reference's EXISTING composition - same "observe, never guess"
+    contract _scene_lighting_facts already established, just for placement instead of
+    light. Used ONLY when ADDING a new element (product or text) to a scene that has
+    nothing of that kind to substitute into (2026-08-07, reference usability gate
+    reversal): the new element's position/scale must be derived from what THIS reference
+    actually shows - its layout, how the frame divides, and where its existing elements
+    already sit - never a fixed or default position, and never the same regardless of
+    which reference this runs against. Returns "" when nothing was extracted (a
+    pre-migration blueprint, or the model omitted these fields this run) - callers fall
+    back to a generic composition-aware instruction in that case, never a guessed
+    position."""
+    layout_detail = layout_detail or {}
+    visual = visual or {}
+    facts = []
+    if visual.get("layout"):
+        facts.append(f"overall layout: {visual['layout']}")
+    if layout_detail.get("frame_division"):
+        facts.append(f"frame divides as: {layout_detail['frame_division']}")
+    if layout_detail.get("zone_positions"):
+        facts.append("existing elements sit at: " + "; ".join(layout_detail["zone_positions"]))
+    if layout_detail.get("background_type"):
+        facts.append(f"background: {layout_detail['background_type']}")
+    if not facts:
+        return ""
+    return ("OBSERVED SCENE COMPOSITION (facts about THIS reference's existing layout, "
+            "never a fixed position): " + "; ".join(facts) + ". ")
+
+
 def _bottle_register_clause(scene_lighting):
     """Replaces the generic 'match the rendering register' instruction with concrete
     observed facts about THIS reference's own lighting, whenever deconstruct.py extracted
@@ -1060,6 +1133,7 @@ def _register_clause(style, scene_lighting=None):
 
 def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, offer_text=None,
                             include_product=True, reference_has_product=True,
+                            reference_has_text_zone=True, layout_detail=None, visual=None,
                             retheme_colours=True, palette=None,
                             substance_colour=None, style=None, scene_lighting=None,
                             typography_zones=None,
@@ -1087,12 +1161,26 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
     product but the reference had none" into "operator disabled it", losing exactly the
     distinction Part 4 exists to state.
 
-    reference_has_product=False (Step 2, Part 4) only changes WHICH sentence explains an
-    outcome where no product is added: the reference ad itself has no product in frame
-    (blueprint.layout_detail.product_count==0 or product_category=="not_product"), so the
-    wording says there's nothing to substitute rather than a generic productless-mode
-    sentence - distinguishing "the operator asked for no product" from "the source had
-    none to substitute" without changing the actual (non-contradictory) outcome.
+    reference_has_product=False (Step 2, Part 4; REVERSED 2026-08-07, reference usability
+    gate reversal) now changes WHICH ACTION is taken, not just which sentence explains a
+    no-op: the reference ad itself has no product in frame
+    (blueprint.layout_detail.product_count==0 or product_category=="not_product"), but
+    include_product=True still means a Besque product belongs in the output - there is
+    just nothing to SUBSTITUTE, so it is ADDED into the scene instead, at a position and
+    scale DERIVED from layout_detail/visual (see _scene_composition_facts), never a fixed
+    or default placement and never skipped. This must generalise identically across every
+    reference shape - no ad_id/competitor/page special-casing anywhere in this function.
+
+    reference_has_text_zone (2026-08-07, same reversal) is the text-side analogue,
+    independent of reference_has_product - a reference can have a product but no
+    headline/text zone, text but no product, both, or neither. False means an authorised
+    headline/subtext has no existing zone to substitute into, so it is ADDED into clean
+    negative space instead (see the TEXT branch below) - never suppressed just because
+    the reference itself had nothing there.
+
+    layout_detail/visual (2026-08-07) are the raw blueprint sub-objects, forwarded only so
+    _scene_composition_facts can derive ADD placement from them - never read for anything
+    else here.
 
     retheme_colours=True (Prompt 4, Item 5, default) states palette substitution as ONE
     instruction integrated with the reproduce-faithfully instruction, not two that could
@@ -1235,12 +1323,70 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             "Everything else in the scene stays exactly as it "
             "appears in the source image. "
         )
-    elif include_product and not reference_has_product:
+    elif include_product and not reference_has_product and style == "illustrated":
+        # ADD, illustrated register (2026-08-07, reference usability gate reversal): the
+        # reference has no product to substitute, but include_product=True still means
+        # one belongs in the output - added natively into the scene's own illustrated
+        # visual language, same drawing constraints as the substitute-illustrated branch
+        # above (no reference photo attached, work from silhouette/colour/name alone),
+        # just with no competitor product to remove first. Placement is DERIVED from this
+        # reference's own observed composition, never a fixed position.
+        name = product_name or "Besque"
+        composition_facts = _scene_composition_facts(layout_detail, visual)
+        placement_instruction = composition_facts or (
+            "Integrate it naturally into this scene's own existing composition and open "
+            "space, at a scale consistent with the surrounding elements - never a fixed "
+            "or default position invented independently of what this scene shows. "
+        )
         base = opening + (
-            "The reference image has NO product in frame - do NOT add a Besque product, "
-            "bottle, or packaging anywhere in the scene; there is nothing to substitute "
-            "here. Everything else in the scene stays exactly as it appears in the "
-            "source image. "
+            "The reference image has NO product in frame - there is nothing to "
+            "substitute, so instead ADD the Besque product NATIVELY into this scene's "
+            f"own illustrated visual language: flat, matching the surrounding artwork's "
+            f"own line weight and shading, never a photograph or photorealistic render "
+            f"composited into the drawing. No product reference photo is attached this "
+            f"run, on purpose: work from silhouette, colour, and the label name alone - "
+            f"\"{name}\". " + placement_instruction +
+            "Secondary label content (sub-lines, certification icons, fine print) does "
+            "not need to be legible at this scale in this style; name and colour "
+            "accuracy matter, secondary-text legibility does not. "
+            # No _substance_recolour_clause here, deliberately: that instruction only
+            # makes sense when a product-derived substance is ALREADY in frame, which
+            # correlates with the reference already having a product - a reference with
+            # none almost certainly has no such substance to recolour either, so this
+            # would be dead weight text (same reasoning the substitute branches' use of
+            # it doesn't need to restate).
+            "Everything else in the scene stays exactly as it appears in the source "
+            "image, aside from this addition. "
+        )
+    elif include_product and not reference_has_product:
+        # ADD, photographic register (2026-08-07, reference usability gate reversal):
+        # same "nothing to substitute, so add instead" logic as the illustrated branch
+        # above, for every other production style. Placement/scale is DERIVED from this
+        # reference's own observed composition (_scene_composition_facts) - never a fixed
+        # or default position, and lighting still comes from the scene's own observed
+        # facts exactly as the substitute branch above already does.
+        lighting_facts = _scene_lighting_facts(scene_lighting)
+        lighting_instruction = lighting_facts or (
+            "Light it to match THIS SCENE's own lighting register - never the separate, "
+            "unrelated lighting the product's reference photo(s) happen to have been "
+            "shot under. "
+        )
+        composition_facts = _scene_composition_facts(layout_detail, visual)
+        placement_instruction = composition_facts or (
+            "Integrate it naturally into this scene's own existing composition and open "
+            "space, at a scale and depth consistent with the surrounding elements - "
+            "never a fixed or default position invented independently of what this "
+            "scene shows. "
+        )
+        base = opening + (
+            "The reference image has NO product in frame - there is nothing to "
+            "substitute, so instead ADD the Besque product (shown in the reference "
+            "photo(s) that follow, if any) newly into this scene. " + placement_instruction
+            + lighting_instruction
+            # No _substance_recolour_clause here either - see the illustrated ADD
+            # branch's own comment above for why.
+            + "Everything else in the scene stays exactly as it appears in the source "
+            "image, aside from this addition. "
         )
     else:
         base = opening + (
@@ -1286,18 +1432,43 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
                 "no ingredient list, mechanism or benefit paragraph, additional body "
                 "copy, or CTA sentence may ALSO be rendered"
             )
-        base += (
-            f"TEXT: preserve the reference image's text zones EXACTLY as they appear - "
-            f"same size, position, weight, casing, and text colour - and replace ONLY "
-            f"the wording with {permitted}, same layout, our words. Typography (typeface "
-            f"weight, casing, placement) and text colour are INHERITED from the "
-            f"reference exactly as shown, never re-themed or restyled to a different "
-            f"look - the wording is the ONLY thing that changes. This is the ENTIRE text "
-            f"budget for this image - {budget_ban}, even if such text exists in the "
-            f"product description, generated copy, or reference ad. "
-            f"The competitor's brand name, product name, and claims must NEVER survive "
-            f"into the output, even inside this inherited styling. "
-        )
+        if reference_has_text_zone:
+            base += (
+                f"TEXT: preserve the reference image's text zones EXACTLY as they appear - "
+                f"same size, position, weight, casing, and text colour - and replace ONLY "
+                f"the wording with {permitted}, same layout, our words. Typography (typeface "
+                f"weight, casing, placement) and text colour are INHERITED from the "
+                f"reference exactly as shown, never re-themed or restyled to a different "
+                f"look - the wording is the ONLY thing that changes. This is the ENTIRE text "
+                f"budget for this image - {budget_ban}, even if such text exists in the "
+                f"product description, generated copy, or reference ad. "
+                f"The competitor's brand name, product name, and claims must NEVER survive "
+                f"into the output, even inside this inherited styling. "
+            )
+        else:
+            # ADD, no existing text zone to substitute into (2026-08-07, reference
+            # usability gate reversal): "preserve the reference's text zones exactly"
+            # would be vacuous/wrong when none exist - instead place the authorised copy
+            # newly into clean negative space, positioned per this reference's OWN
+            # observed composition, never a fixed position and never an invented
+            # container/badge shape that isn't already part of the scene.
+            composition_facts = _scene_composition_facts(layout_detail, visual)
+            placement_instruction = composition_facts or (
+                "Place it in clean open space consistent with this scene's own "
+                "composition - never a fixed or default position invented "
+                "independently of what this scene shows. "
+            )
+            base += (
+                f"TEXT: the reference has no existing text zone to substitute into - "
+                f"place {permitted} newly into the scene as in-scene typography, in "
+                f"clean negative space. " + placement_instruction +
+                f"Do not invent a container, badge, banner, or bubble shape that isn't "
+                f"already part of the scene to hold it. This is the ENTIRE text "
+                f"budget for this image - {budget_ban}, even if such text exists in the "
+                f"product description, generated copy, or reference ad. "
+                f"The competitor's brand name, product name, and claims must NEVER "
+                f"survive into the output. "
+            )
     else:
         base += (
             f"TEXT: any container that held the suppressed text - {_container_list_phrase()} "

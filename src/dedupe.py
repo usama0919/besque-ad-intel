@@ -176,6 +176,16 @@ def init_artifacts():
         cur.execute("ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS body_area TEXT")
         cur.execute("ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS offer_text TEXT")
         cur.execute("ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS product_id INTEGER")
+        # element_provenance (2026-08-07, reference usability gate reversal): which
+        # elements were ADDED (no existing reference zone, placed newly into the scene)
+        # vs SUBSTITUTED (an existing reference zone replaced) vs never rendered at all -
+        # {"product": "added"|"substituted"|"none", "text": "added"|"substituted"|"none"}.
+        # Replaces the old product_override_note mechanism (kept for historical rows,
+        # but nothing sets it any more) now that a productless/textless reference is
+        # never skipped and never suppressed - a reviewer needs to see WHICH path each
+        # element took, not just that generation happened. DEFAULT '{}' so a
+        # pre-migration row reads as "nothing recorded", never guessed.
+        cur.execute("ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS element_provenance JSONB DEFAULT '{}'")
         conn.commit()
 
 
@@ -183,7 +193,7 @@ def save_artifact(ad_id, page_name, image_path, blueprint, generated_copy, draft
                    image_prompt="", copy_prompt="", model_info="", angle_id=None, text_in_image=False,
                    operator_instruction="", format_flag="", product_override_note="", regenerate=None,
                    include_product=None, retheme_colours=None, realism=None, body_area=None,
-                   offer_text=None, product_id=None):
+                   offer_text=None, product_id=None, element_provenance=None):
     """Persist all artifacts for one (ad_id, angle_id) pair with a timestamp. Skips if that
     exact pair is already stored. angle_id=None reproduces the pre-angle behaviour exactly -
     one artifact per ad_id. A different angle_id for an already-processed ad is a distinct
@@ -217,7 +227,14 @@ def save_artifact(ad_id, page_name, image_path, blueprint, generated_copy, draft
     historical one - see pipeline._regenerate_existing_draft. All default None/NULL, never
     guessed at here - a caller that doesn't pass them (every pre-existing call site until
     updated) reproduces today's schema exactly, and a regenerate reading NULL back knows
-    to log that it defaulted rather than assume a real recorded value."""
+    to log that it defaulted rather than assume a real recorded value.
+
+    element_provenance (2026-08-07, reference usability gate reversal): {"product": ...,
+    "text": ...}, each one of "added"/"substituted"/"none" - which path each element
+    actually took for THIS generation, computed by process_ad from the blueprint's own
+    fields (never a fixed value, never keyed off ad_id/competitor/page). None (a caller
+    that doesn't pass it) stores '{}', read back as "nothing recorded" by any future
+    reader, never guessed at."""
     effective_regenerate = FORCE_REPROCESS if regenerate is None else regenerate
     with get_conn() as conn, conn.cursor() as cur:
         if effective_regenerate:
@@ -231,14 +248,14 @@ def save_artifact(ad_id, page_name, image_path, blueprint, generated_copy, draft
                (ad_id, page_name, image_path, blueprint, generated_copy, draft_image, metadata,
                 image_prompt, copy_prompt, model_info, angle_id, text_in_image, operator_instruction,
                 format_flag, product_override_note, include_product, retheme_colours, realism,
-                body_area, offer_text, product_id)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                body_area, offer_text, product_id, element_provenance)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (ad_id, page_name, image_path,
              _json.dumps(blueprint), _json.dumps(generated_copy),
              draft_image, _json.dumps(metadata), image_prompt, copy_prompt, model_info,
              angle_id, text_in_image, operator_instruction or "", format_flag or "",
              product_override_note or "", include_product, retheme_colours, realism,
-             body_area, offer_text, product_id),
+             body_area, offer_text, product_id, _json.dumps(element_provenance or {})),
         )
         conn.commit()
 
@@ -329,7 +346,7 @@ def get_artifacts_full(limit=50):
                    a.generated_copy, a.draft_image, a.metadata, a.created_at,
                    d.decision, a.image_prompt, a.copy_prompt, a.model_info,
                    a.angle_id, a.text_in_image, a.operator_instruction, a.critic_findings,
-                   a.format_flag, a.product_override_note
+                   a.format_flag, a.product_override_note, a.element_provenance
             FROM artifacts a
             LEFT JOIN LATERAL (
                 SELECT decision FROM review_decisions r
@@ -343,7 +360,7 @@ def get_artifacts_full(limit=50):
                 "draft_image", "metadata", "created_at", "decision",
                 "image_prompt", "copy_prompt", "model_info",
                 "angle_id", "text_in_image", "operator_instruction", "critic_findings",
-                "format_flag", "product_override_note"]
+                "format_flag", "product_override_note", "element_provenance"]
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
@@ -982,8 +999,10 @@ def get_artifact(ad_id, angle_id=None):
     Returns angle_id/text_in_image too - callers editing a draft (dashboard.py's
     api_edit_image) need these to restore the ORIGINAL generation's rule-6 mode rather
     than falling back to brand_rules()'s hardcoded defaults. Also returns image_path/
-    metadata/image_prompt/copy_prompt/model_info/format_flag/product_override_note -
-    pipeline.py's regenerate path carries these forward unchanged onto the new row.
+    metadata/image_prompt/copy_prompt/model_info/format_flag/product_override_note/
+    element_provenance - pipeline.py's regenerate path carries these forward unchanged
+    onto the new row (element_provenance is recomputed fresh there, same as testimonial -
+    see pipeline._regenerate_existing_draft).
 
     Also returns include_product/retheme_colours/realism/body_area/offer_text/product_id
     (2026-08-06) AS STORED - None for any of these means "never recorded" (a row from
@@ -995,7 +1014,7 @@ def get_artifact(ad_id, angle_id=None):
         cur.execute(
             "SELECT ad_id, page_name, blueprint, generated_copy, draft_image, angle_id, text_in_image, "
             "image_path, metadata, image_prompt, copy_prompt, model_info, format_flag, product_override_note, "
-            "include_product, retheme_colours, realism, body_area, offer_text, product_id "
+            "include_product, retheme_colours, realism, body_area, offer_text, product_id, element_provenance "
             "FROM artifacts WHERE ad_id=%s AND angle_id IS NOT DISTINCT FROM %s ORDER BY id DESC LIMIT 1",
             (ad_id, angle_id),
         )
@@ -1006,13 +1025,15 @@ def get_artifact(ad_id, angle_id=None):
         bp = r[2] if isinstance(r[2], dict) else _j.loads(r[2] or "{}")
         cp = r[3] if isinstance(r[3], dict) else _j.loads(r[3] or "{}")
         meta = r[8] if isinstance(r[8], dict) else _j.loads(r[8] or "{}")
+        elem_prov = r[20] if isinstance(r[20], dict) else _j.loads(r[20] or "{}")
         return {"ad_id": r[0], "page_name": r[1], "blueprint": bp, "generated_copy": cp,
                 "draft_image": r[4], "angle_id": r[5], "text_in_image": r[6],
                 "image_path": r[7] or "", "metadata": meta, "image_prompt": r[9] or "",
                 "copy_prompt": r[10] or "", "model_info": r[11] or "",
                 "format_flag": r[12] or "", "product_override_note": r[13] or "",
                 "include_product": r[14], "retheme_colours": r[15], "realism": r[16],
-                "body_area": r[17], "offer_text": r[18], "product_id": r[19]}
+                "body_area": r[17], "offer_text": r[18], "product_id": r[19],
+                "element_provenance": elem_prov}
 
 
 def set_suggested_name(competitor_id, suggested):

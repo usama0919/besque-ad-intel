@@ -33,7 +33,7 @@ log = logging.getLogger("output_critic")
 HIGH_CONFIDENCE_BY_DEFAULT = (
     "unauthorised offer", "scarcity claim", "promo code", "efficacy claim", "testimonial",
     "product category mismatch", "regulatory text carried over from the reference",
-    "product register mismatch",
+    "product register mismatch", "nudity or sexualised content",
 )
 
 CRITIC_SYSTEM = (
@@ -45,6 +45,14 @@ CRITIC_SYSTEM = (
     "{\"violations\": [{\"category\": \"...\", \"description\": \"...\", \"confidence\": "
     "\"high\"|\"medium\"|\"low\"}, ...]} - an empty violations array if you find nothing.\n\n"
     "Check specifically for:\n"
+    "- NUDITY OR SEXUALISED CONTENT (C6): bare breasts/chest, genitals, or a sexualised "
+    "pose, camera framing, or narrative context in the GENERATED image itself - "
+    "regardless of what the reference ad showed or implied, and regardless of whether "
+    "the reference's own human subject was nude or sexualised. This is a check on OUR "
+    "OUTPUT only, never a judgment on the reference: depicting bare skin or body areas "
+    "relevant to product application (legs, torso, underarms) is expected for a body-oil "
+    "ad and is NOT itself a violation - only actual nudity or sexualisation in what was "
+    "generated is\n"
     "- a competitor logo, seal, badge, or brand mark anywhere in the image (rule 9)\n"
     "- a competitor brand or product name in any rendered text (rules 1-2). If the "
     "Besque product's own documented label/bottle design is supplied below, judge the "
@@ -106,8 +114,8 @@ CRITIC_SYSTEM = (
     "Treat a hit in these categories as HIGH confidence by default unless you are quite "
     "sure it's a false read: unauthorised offer, scarcity claim, promo code, efficacy "
     "claim, testimonial, product category mismatch, regulatory text carried over from the "
-    "reference, product register mismatch. These are the exact categories that have "
-    "shipped in real drafts before this check existed."
+    "reference, product register mismatch, nudity or sexualised content. These are the "
+    "exact categories that have shipped in real drafts before this check existed."
 )
 
 # CRITIC_SYSTEM is an INDEPENDENTLY hand-written checklist, not generated from
@@ -117,7 +125,7 @@ CRITIC_SYSTEM = (
 # tripwire, not a fix for that risk - it only catches the citation disappearing from
 # CRITIC_SYSTEM's own text, not the cited rule drifting out of sync with brand_rules()
 # itself. See test_output_critic.py's rule-citation tests.
-CITED_RULE_IDS = ("rule 9", "rules 1-2", "C3", "C2", "rule 7", "rule 5", "rule 6")
+CITED_RULE_IDS = ("C6", "rule 9", "rules 1-2", "C3", "C2", "rule 7", "rule 5", "rule 6")
 assert all(rule_id in CRITIC_SYSTEM for rule_id in CITED_RULE_IDS), (
     "CRITIC_SYSTEM no longer cites one of CITED_RULE_IDS - the checklist and the actual "
     "rule numbering have drifted apart"

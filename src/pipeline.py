@@ -206,12 +206,20 @@ def fetch_pool(competitor_id, cap=50, start_date_min=None, start_date_max=None, 
 
 
 def _reference_has_nothing_to_clone(blueprint):
-    """True when a reference blueprint shows nothing an edit-mode clone could actually
-    substitute or reproduce - no product (layout_detail.product_count == 0), no headline
-    or other text-bearing zone, and no offer. Edit mode then has nothing to change and
-    instead reproduces the reference's own human subject verbatim - proven live by drafts
-    that came back as a redrawn woman with no product and no copy at all (Task H,
-    2026-08-07).
+    """INFORMATIONAL ONLY (2026-08-07, reference usability gate reversal - this used to
+    be a skip gate, and that was wrong; see process_ad's own note where this is read
+    now). True when a reference blueprint shows no product (layout_detail.product_count
+    == 0), no headline or other text-bearing zone, and no offer - reused for the pool
+    badge and for logging, never again to skip an ad.
+
+    A reference like this is STILL a usable scene: with include_product/text_in_image
+    on, the correct output is that scene reproduced with the Besque product and copy
+    ADDED into it, never substituted (there is nothing to substitute into) and never
+    skipped. See generate_image_prompt.reference_has_product/reference_has_text_zone,
+    which drive the actual per-element ADD-vs-SUBSTITUTE wording in generation - this
+    function is a coarser, combined signal for the badge/log line only, built from those
+    same two predicates plus the offer check, so it can never drift from what generation
+    actually does.
 
     This is "there is nothing here to clone", never a taste judgment ("this ad is bad") -
     it reads only structural fields already in deconstruct.py's schema (product_count,
@@ -221,16 +229,9 @@ def _reference_has_nothing_to_clone(blueprint):
     from_selection reads it from an already-generated artifact, since a never-processed
     ad has no blueprint yet to check)."""
     blueprint = blueprint or {}
-    layout_detail = blueprint.get("layout_detail") or {}
-    if layout_detail.get("product_count") != 0:
+    if generate_image_prompt.reference_has_product(blueprint):
         return False
-    has_headline = bool((blueprint.get("headline_verbatim") or "").strip())
-    text_zone_types = {"sub_line", "body_copy", "cta"}
-    has_text_zone = any(
-        (z or {}).get("zone_type") in text_zone_types
-        for z in (blueprint.get("structural_zones") or [])
-    )
-    if has_headline or has_text_zone:
+    if generate_image_prompt.reference_has_text_zone(blueprint):
         return False
     if blueprint.get("offer"):
         return False
@@ -544,6 +545,28 @@ def _regenerate_existing_draft(ad, angle_id, angle_slug, delta_instruction, shou
     # deterministic by ad_id, so this reproduces the SAME pick a normal generation would
     # make with this same blueprint/product, no separate storage needed (2026-08-06).
     testimonial = select_testimonial_review(blueprint, product, ad_id)
+    # element_provenance (2026-08-07, reference usability gate reversal): recomputed
+    # fresh here too, same reasoning as testimonial above - regenerate always rebuilds
+    # against edit_mode=True (this function's only mode, see build_image_prompt call
+    # below), so reference_has_product/reference_has_text_zone are read the same way
+    # process_ad reads them for a first generation, never a separate derivation.
+    reference_has_product = generate_image_prompt.reference_has_product(blueprint)
+    reference_has_text_zone = generate_image_prompt.reference_has_text_zone(blueprint)
+    eff_headline, _ = generate_image_prompt.effective_authorised_text(
+        text_in_image, generated_copy.get("headline"), generated_copy.get("image_subtext") or None,
+    )
+    element_provenance = {
+        "product": (
+            "none" if not include_product
+            else "substituted" if reference_has_product
+            else "added"
+        ),
+        "text": (
+            "none" if not eff_headline
+            else "substituted" if reference_has_text_zone
+            else "added"
+        ),
+    }
 
     rebuilt_prompt = generate_image_prompt.build_image_prompt(
         blueprint, product=product, include_product=include_product,
@@ -606,6 +629,7 @@ def _regenerate_existing_draft(ad, angle_id, angle_slug, delta_instruction, shou
         body_area=body_area,
         offer_text=offer_text,
         product_id=(product or {}).get("id"),
+        element_provenance=element_provenance,
         regenerate=True,
     )
     dedupe.mark_seen(ad_id, ad.get("page_name", ""), angle_id)
@@ -652,17 +676,16 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
     The team confirmed edit-vs-generate usage is about 50/50, so this defaults to False -
     today's generate-only path is unchanged.
 
-    Reference usability (Task H, 2026-08-07): immediately after deconstruct returns, right
-    alongside content_safety.hard_block_reason, _reference_has_nothing_to_clone checks the
-    SAME fresh blueprint - layout_detail.product_count == 0 AND no headline_verbatim AND
-    no text-bearing structural_zones entry AND no offer means there is nothing for edit
-    mode to substitute or reproduce, so it ends up redrawing the reference's own human
-    subject instead. Proven live twice, including on a ad's FIRST-EVER generation - this
-    must run here, not only against an artifact from a prior run, which is where an
-    earlier version of this check wrongly lived instead. Skipped the same visible way as
-    the hard block just above (a "reference_nothing_to_clone" pipeline_warning + mark_seen
-    + return "skipped") - never failed, never silently generated, and never a taste
-    judgment on the ad, only "there is nothing here to clone."
+    Reference usability (Task H, 2026-08-07; REVERSED same day - see CLAUDE.md): a
+    reference with no product and no text zone is still a usable scene, never skipped.
+    _reference_has_nothing_to_clone is now read purely for logging/the pool badge - see
+    element_provenance below, which is what actually varies per reference: with
+    include_product/text_in_image on, the product and/or copy are ADDED into the scene
+    (derived from the blueprint's own observed composition - see
+    generate_image_prompt._scene_composition_facts) whenever the reference has nothing
+    of that kind to substitute into, rather than the ad being skipped or the element
+    being suppressed. This must behave identically across every reference shape - no
+    ad_id/competitor/page ever gates this decision, only the blueprint's own fields.
 
     operator_instruction (Step 2) is the run-strip's free-text steering field - forwarded
     to generate_image (which clips it and hands it to both the writer and
@@ -840,27 +863,16 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
             dedupe.mark_seen(ad_id, ad.get("page_name", ""), angle_id)
             return "skipped"
 
-        # Task H, Part 1 (2026-08-07, corrected placement): assess the reference BEFORE
-        # any operator instruction is applied to it, using the FRESH blueprint THIS
-        # deconstruct call just produced - no new model call, and no dependency on an
-        # artifact already existing (the prior version of this check lived in
-        # generate_from_selection and only fired on a re-select of an already-generated
-        # ad - wrong, since a real FIRST-EVER generation was observed hitting exactly
-        # this case). Same visible-skip shape as the hard block just above: never
-        # fail, never silently generate. This is "there is nothing here to clone", never
-        # a taste judgment on the ad.
+        # Reference usability (Task H, 2026-08-07; gate REVERSED same day, see CLAUDE.md):
+        # a reference with nothing to clone is NOT skipped - it's logged, purely
+        # informational, so the pool badge/logs can tell an operator what to expect
+        # (product/copy ADDED rather than substituted) without ever blocking generation.
         if _reference_has_nothing_to_clone(blueprint):
-            reason = (
-                f"Ad {ad_id} ({ad.get('page_name', '?')}): reference has no product, no "
-                f"headline, no text-bearing zone, and no offer - nothing to substitute or "
-                f"reproduce in a clone (edit mode would instead reproduce the reference's "
-                f"own human subject). Skipped before any paid call, not a taste judgment."
+            log.info(
+                "Ad %s: reference has no product, no headline, no text-bearing zone, "
+                "and no offer - product/copy will be ADDED into the scene rather than "
+                "substituted, generation proceeds normally", ad_id,
             )
-            log.info("Ad %s: not usable as a cloning reference, skipping: %s", ad_id, reason)
-            dedupe.init_pipeline_warnings()
-            dedupe.record_warning("reference_nothing_to_clone", reason)
-            dedupe.mark_seen(ad_id, ad.get("page_name", ""), angle_id)
-            return "skipped"
 
         # Format flag (Prompt 4, Item 4): a FLAG, never a filter - computed purely from
         # blueprint data already extracted (no vision call), carried through to
@@ -868,28 +880,28 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
         # whether the ad is approved, rejected, or still pending.
         format_flag = reference_format.format_flag_reason(blueprint) or ""
 
-        # Silent-override audit (2026-08-05): a real HIGH critic false positive traced
-        # back to include_product being silently overridden off, with no feedback anywhere
-        # that the tool had overruled an explicit operator choice. effective_include_product
-        # is the SAME value build_image_prompt will use internally for this exact blueprint -
-        # resolve_effective_include_product is the single source both call, so there's one
-        # derivation to keep in sync, not two (see effective_authorised_text above, added
-        # after rule 6 and the critic drifted apart on exactly this shape of duplication).
+        # effective_include_product is the SAME value build_image_prompt will use
+        # internally for this exact blueprint - resolve_effective_include_product is the
+        # single source both call, so there's one derivation to keep in sync, not two
+        # (see effective_authorised_text above, added after rule 6 and the critic
+        # drifted apart on exactly this shape of duplication).
+        #
+        # REVERSED 2026-08-07 (reference usability gate reversal): this used to silently
+        # override include_product off when the reference had no product, with a
+        # "product_override_no_reference_product" warning as the only feedback. That
+        # premise is gone - effective_include_product now always equals include_product
+        # exactly (see resolve_effective_include_product); reference_has_product only
+        # selects ADD-vs-SUBSTITUTE wording downstream, never the boolean outcome. See
+        # element_provenance below, computed after copy generation, for the new
+        # "which elements were added vs substituted" signal that replaces this override
+        # note going forward - product_override_note itself is kept (still read by
+        # dashboard.html/regenerate for historical rows written under the old behaviour)
+        # but nothing sets it to a non-empty value for a NEW generation any more.
         effective_include_product, reference_has_product = generate_image_prompt.resolve_effective_include_product(
             blueprint, include_product, edit_mode
         )
+        reference_has_text_zone = generate_image_prompt.reference_has_text_zone(blueprint) if edit_mode else True
         product_override_note = ""
-        if include_product and not effective_include_product:
-            product_override_note = (
-                "Product suppressed for this draft: the reference ad has no product to "
-                "substitute, so include_product was overridden off for this run."
-            )
-            dedupe.init_pipeline_warnings()
-            dedupe.record_warning(
-                "product_override_no_reference_product",
-                f"Ad {ad_id} ({ad.get('page_name', '?')}): include_product was True but "
-                f"the reference ad has no product in frame - overridden to off for this draft.",
-            )
 
         # Silent-override audit (2026-08-05): a pasted operator brief past
         # MAX_OPERATOR_INSTRUCTION_CHARS is silently truncated by clip_operator_instruction
@@ -945,6 +957,32 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
                 f"Ad {ad_id} ({ad.get('page_name', '?')}): text_in_image was requested but "
                 f"generated copy had no headline - image rendered without in-image text.",
             )
+        # element_provenance (2026-08-07, reference usability gate reversal): which
+        # elements were ADDED vs SUBSTITUTED vs not rendered at all, persisted on the
+        # artifact for a reviewer to see - replaces the removed product-override note
+        # above with a signal that's accurate under the new (never-skip, never-suppress)
+        # behaviour. Derived purely from blueprint/authorisation state - a reference with
+        # both a product and a text zone always reads "substituted"/"substituted" here
+        # (byte-for-byte the only outcome before this task), one with neither reads
+        # "added"/"added" whenever the operator authorised that element this run. Must
+        # generalise across every reference shape - nothing here keys off ad_id/
+        # competitor/page, only the blueprint's own fields plus this run's toggles.
+        eff_headline, eff_subtext = generate_image_prompt.effective_authorised_text(
+            text_in_image, copy.get("headline"), copy.get("image_subtext") or None,
+        )
+        element_provenance = {
+            "product": (
+                "none" if not effective_include_product
+                else "substituted" if (edit_mode and reference_has_product)
+                else "added"
+            ),
+            "text": (
+                "none" if not eff_headline
+                else "substituted" if (edit_mode and reference_has_text_zone)
+                else "added"
+            ),
+        }
+
         if _stop():
             log.info("Ad %s: stop requested, skipping before the paid image generation call", ad_id)
             return "skipped"
@@ -1060,13 +1098,13 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
                 # copy.get("headline") alone (which is always truthy regardless of
                 # text_in_image - generate_copy_live produces a headline whether or not
                 # the operator asked for it in-image).
-                critic_headline, critic_subtext = generate_image_prompt.effective_authorised_text(
-                    text_in_image, copy.get("headline"), copy.get("image_subtext") or None,
-                )
+                # eff_headline/eff_subtext: computed ONCE above (element_provenance) -
+                # reused here rather than recomputed, since text_in_image/copy don't
+                # change between attempts; same value either way, one derivation not two.
                 log.info("Ad %s: output critic starting (attempt %s/%s)", ad_id, image_attempt, MAX_IMAGE_ATTEMPTS)
                 findings = output_critic.check_draft(
-                    draft_bytes, brand_rules_text, headline=critic_headline,
-                    subtext=critic_subtext, offer_text=offer_text,
+                    draft_bytes, brand_rules_text, headline=eff_headline,
+                    subtext=eff_subtext, offer_text=offer_text,
                     include_product=effective_include_product,
                     # PART 1G (2026-08-06): the critic must be told the SAME documented
                     # bottle facts build_image_prompt's product_clause already gives the
@@ -1106,7 +1144,7 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
             dropped_count = len(findings)
             findings = output_critic.drop_findings_contradicted_by_authorised(
                 findings, testimonial=testimonial, offer_text=offer_text,
-                headline=critic_headline, subtext=critic_subtext,
+                headline=eff_headline, subtext=eff_subtext,
             )
             if len(findings) != dropped_count:
                 log.info(
@@ -1165,6 +1203,7 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
             body_area=body_area,
             offer_text=offer_text,
             product_id=(product or {}).get("id"),
+            element_provenance=element_provenance,
             # None (not explicit_selection) preserves save_artifact's own
             # FORCE_REPROCESS-driven default exactly - only an explicit-selection
             # regenerate passes an explicit True, per Item 7b.

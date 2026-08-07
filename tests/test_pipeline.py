@@ -124,9 +124,10 @@ def test_process_ad_does_not_hard_block_ordinary_skincare_reference(monkeypatch)
     assert pipeline.process_ad(ad) == "processed"
 
 
-# ---- Task H, Part 1 (2026-08-07): a reference with nothing to clone (no product, no
-# headline, no text zone, no offer) must be skipped INSIDE process_ad, right after
-# deconstruct - including on a FIRST-EVER generation, never only against a prior artifact.
+# ---- Task H, Part 1 (2026-08-07); REVERSED same day (reference usability gate
+# reversal, see CLAUDE.md): a reference with nothing to clone (no product, no headline,
+# no text zone, no offer) is STILL a usable scene - the ad proceeds to generation, with
+# the product/copy ADDED rather than substituted, never skipped.
 
 def _nothing_to_clone_blueprint(**overrides):
     bp = {
@@ -139,30 +140,25 @@ def _nothing_to_clone_blueprint(**overrides):
     return bp
 
 
-def test_process_ad_skips_reference_with_nothing_to_clone(monkeypatch):
-    """product_count==0 AND no headline AND no text zone AND no offer - proven live as a
-    redrawn woman with no product and no copy. Must skip, never fail, never generate."""
+def test_process_ad_proceeds_and_adds_when_reference_has_nothing_to_clone(monkeypatch):
+    """product_count==0 AND no headline AND no text zone AND no offer - REVERSED
+    2026-08-07: this is still a usable scene, never skipped. With include_product and
+    text_in_image on, both elements are ADDED (nothing in the reference to substitute
+    into), and that provenance is persisted for a reviewer to see."""
     dedupe.init_db()
     dedupe.init_artifacts()
-    dedupe.init_pipeline_warnings()
     ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
     ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
           "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
-    monkeypatch.setattr(pipeline.assets, "download_image", lambda url, aid: "fake.jpg")
-    monkeypatch.setattr(pipeline.assets, "download_image_bytes", lambda url: b"fake-bytes")
+    _mock_all_stages(monkeypatch)
     monkeypatch.setattr(pipeline.deconstruct, "deconstruct_image",
                         lambda **k: _nothing_to_clone_blueprint())
-    copy_calls, image_calls = [], []
-    monkeypatch.setattr(pipeline.generate_copy, "generate_copy_live", lambda *a, **k: copy_calls.append(1))
-    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image", lambda *a, **k: image_calls.append(1))
-    warnings = []
-    monkeypatch.setattr(pipeline.dedupe, "record_warning", lambda kind, detail: warnings.append((kind, detail)))
+    captured = {}
+    monkeypatch.setattr(pipeline.dedupe, "save_artifact", lambda **k: captured.update(k))
     try:
-        assert pipeline.process_ad(ad) == "skipped"
-        assert copy_calls == []  # never reaches copy generation
-        assert image_calls == []  # never reaches image generation
-        assert any(kind == "reference_nothing_to_clone" for kind, detail in warnings)
-        assert dedupe.is_new(ad_id) is False  # marked seen - never re-analysed on a future run
+        result = pipeline.process_ad(ad, edit_mode=True, include_product=True, text_in_image=True)
+        assert result == "processed"
+        assert captured["element_provenance"] == {"product": "added", "text": "added"}
     finally:
         with dedupe.get_conn() as conn, conn.cursor() as cur:
             cur.execute("DELETE FROM seen_ads WHERE ad_id = %s", (ad_id,))
@@ -265,17 +261,17 @@ def test_process_ad_format_flag_empty_string_when_no_mismatch(monkeypatch):
     assert captured["format_flag"] == ""
 
 
-# ---- Silent-override audit (2026-08-05): a derived value silently overriding an
-# explicit operator input is the actual defect, not just the critic false positives it
-# also caused - both cases now record a pipeline_warning AND surface on the card. ----
+# ---- Silent-override audit (2026-08-05); REVERSED 2026-08-07 (reference usability gate
+# reversal, see CLAUDE.md): resolve_effective_include_product no longer overrides
+# include_product off, so the override warning/note this audit added can never fire
+# again - replaced by element_provenance, which now records the ADD outcome instead. ----
 
 def _no_product_in_reference_blueprint():
-    """product_count == 0 to exercise the silent-override audit below - but WITH a
-    headline, deliberately, so this stays a "no product, but something else to clone"
-    reference, distinct from Task H's "nothing here to clone at all" (product_count == 0
-    AND no headline AND no text zone AND no offer) - the two are different bugs with
-    different fixes, and this fixture must not accidentally trip the second one while
-    testing the first."""
+    """product_count == 0, but WITH a headline, deliberately, so this stays a "no
+    product, but something else to clone" reference, distinct from Task H's "nothing
+    here to clone at all" (product_count == 0 AND no headline AND no text zone AND no
+    offer) - the two are different fixtures, and this one must not accidentally trip the
+    other while testing the product-specific ADD path."""
     return {
         "format": "before_after",
         "layout_detail": {"product_count": 0},
@@ -285,9 +281,10 @@ def _no_product_in_reference_blueprint():
     }
 
 
-def test_process_ad_records_warning_when_reference_has_no_product_to_substitute(monkeypatch):
-    """Behavioural, not a string check on the prompt: a real warning ROW must be written
-    when resolve_effective_include_product overrides an explicit include_product=True."""
+def test_process_ad_never_overrides_include_product_off_when_reference_has_no_product(monkeypatch):
+    """REVERSED 2026-08-07: the "product_override_no_reference_product" warning must
+    never fire again - a productless reference now gets the product ADDED, never
+    silently suppressed, so there's nothing to warn about."""
     dedupe.init_db()
     dedupe.init_artifacts()
     dedupe.init_pipeline_warnings()
@@ -301,10 +298,15 @@ def test_process_ad_records_warning_when_reference_has_no_product_to_substitute(
     monkeypatch.setattr(pipeline.dedupe, "record_warning", lambda kind, detail: warnings.append((kind, detail)))
 
     assert pipeline.process_ad(ad, edit_mode=True, include_product=True) == "processed"
-    assert any(kind == "product_override_no_reference_product" for kind, detail in warnings)
+    assert not any(kind == "product_override_no_reference_product" for kind, detail in warnings)
 
 
-def test_process_ad_persists_product_override_note_on_artifact(monkeypatch):
+def test_process_ad_persists_added_provenance_when_reference_has_no_product(monkeypatch):
+    """REVERSED 2026-08-07: product_override_note is now always empty for a new
+    generation (nothing sets it any more) - element_provenance is the new signal, and it
+    must read "added" for the product here (there was nothing in the reference to
+    substitute into), never "none" (the product still renders - it just wasn't
+    suppressed) and never "substituted" (there was nothing to substitute)."""
     dedupe.init_db()
     dedupe.init_artifacts()
     ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
@@ -317,13 +319,15 @@ def test_process_ad_persists_product_override_note_on_artifact(monkeypatch):
     monkeypatch.setattr(pipeline.dedupe, "save_artifact", lambda **k: captured.update(k))
 
     assert pipeline.process_ad(ad, edit_mode=True, include_product=True) == "processed"
-    assert "no product to substitute" in captured["product_override_note"]
-    assert "overridden off" in captured["product_override_note"]
+    assert captured["product_override_note"] == ""
+    assert captured["element_provenance"]["product"] == "added"
 
 
 def test_process_ad_no_override_note_when_operator_already_disabled_product(monkeypatch):
     """include_product=False is the operator's own choice, not an override - nothing to
-    report, since there was nothing to overrule."""
+    report, and element_provenance reads "none" for the product (never authorised, so
+    never rendered at all - distinct from "added"/"substituted", which both mean it WAS
+    rendered)."""
     dedupe.init_db()
     dedupe.init_artifacts()
     ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
@@ -339,10 +343,11 @@ def test_process_ad_no_override_note_when_operator_already_disabled_product(monk
 
     assert pipeline.process_ad(ad, edit_mode=True, include_product=False) == "processed"
     assert captured["product_override_note"] == ""
+    assert captured["element_provenance"]["product"] == "none"
     assert warnings == []
 
 
-def test_process_ad_no_override_when_reference_has_a_product(monkeypatch):
+def test_process_ad_persists_substituted_provenance_when_reference_has_a_product(monkeypatch):
     dedupe.init_db()
     dedupe.init_artifacts()
     ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
@@ -360,13 +365,15 @@ def test_process_ad_no_override_when_reference_has_a_product(monkeypatch):
 
     assert pipeline.process_ad(ad, edit_mode=True, include_product=True) == "processed"
     assert captured["product_override_note"] == ""
+    assert captured["element_provenance"]["product"] == "substituted"
     assert warnings == []
 
 
-def test_process_ad_critic_receives_effective_include_product_not_raw(monkeypatch, tmp_path):
-    """The other live false positive this closes: "Missing authorised product" on a run
-    where the reference had none to substitute - the critic must be told the SAME
-    effective value the generator actually used, not the pre-override operator toggle."""
+def test_process_ad_critic_receives_same_include_product_generator_used(monkeypatch, tmp_path):
+    """REVERSED 2026-08-07: effective_include_product no longer diverges from the
+    operator's raw toggle (a reference with no product to substitute now gets one ADDED,
+    never suppressed) - the critic must still be told the SAME value the generator
+    actually used, which is now always just include_product itself."""
     dedupe.init_db()
     dedupe.init_artifacts()
     ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
@@ -385,7 +392,7 @@ def test_process_ad_critic_receives_effective_include_product_not_raw(monkeypatc
     monkeypatch.setattr(pipeline.dedupe, "update_artifact_findings", lambda *a, **k: None)
 
     assert pipeline.process_ad(ad, edit_mode=True, include_product=True, check_output=True) == "processed"
-    assert captured["include_product"] is False
+    assert captured["include_product"] is True
 
 
 # ---- Silent-override audit item 2: a pasted operator brief past
