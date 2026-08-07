@@ -299,6 +299,21 @@ blueprint reused). Final failure is recorded via
   both defaulting on independently.
 - **OPEN, 2026-08-06: competitor product text still leaks into drafts.** Not yet
   root-caused this session — flagged for follow-up, no fix direction identified yet.
+- **OPEN, 2026-08-07: pregnancy as a use context is not covered by any compliance rule
+  (C1-C6).** Found live on artifact 1136 (`ad_id=1653458269057951`, OSEA): a corrective
+  retry (triggered by the output-critic testimonial false positive fixed this session —
+  see the testimonial-critic-awareness fix below) produced fabricated copy including "My
+  baby bump is so so soft" — pregnancy framing rendered on an ad for Besque, a brand
+  explicitly positioned for women 40+. `compliance_rules.py`'s own docstring already
+  states C1/C4/C6 are prompt-only and only C2 has a mechanical backstop; pregnancy isn't
+  even a prompt-only case — no rule among C1-C6 names it at all. C5 (medical/
+  pharmaceutical claims, GLP-1) is the nearest neighbour but doesn't cover this: pregnancy
+  appropriateness is an age/use-context question, not a drug-substitution claim. The
+  output critic's own checklist doesn't have a dedicated category either — it happened to
+  flag this specific instance at medium confidence, mislabeled as "C5 / brand-safety",
+  which isn't really what C5 says. Not fixed — no rule added, no critic checklist item
+  added. Needs a decision on what the actual policy should be (e.g. "never depict or
+  imply pregnancy use") before writing a rule for it, not a guessed wording.
 - **`DATABASE_URL` in `.env` pointing at a raw IP is correct, not a misconfiguration** —
   that's the documented local-dev route to Cloud SQL; Cloud Run itself connects via the
   socket path instead. `.env.example`'s `localhost` value is the thing that's out of date,
