@@ -16,6 +16,7 @@ own. A flag is something a human sees and decides on; this module surfaces, it n
 no auto-reject, no auto-regenerate.
 """
 import os
+import re
 import logging
 import anthropic
 
@@ -62,7 +63,12 @@ CRITIC_SYSTEM = (
     "(the OFFER instruction)\n"
     "- a quantified efficacy claim (a percentage, ratio, or \"X% more\"-style claim) not "
     "explicitly authorised below (C3, the EFFICACY CLAIMS instruction)\n"
-    "- a testimonial, quote, or star rating (C2)\n"
+    "- a testimonial, quote, or star rating (C2). If an authorised testimonial is supplied "
+    "below, judge quotes/attributions in the image against THAT: text matching the "
+    "authorised quote and/or attribution is the real, approved review, not a violation, "
+    "even though it's a quote with a name attached - only a quote or attribution matching "
+    "NEITHER the authorised testimonial NOR nothing (when none was authorised at all) is a "
+    "genuine violation of this category\n"
     "- a Besque product present when none was authorised, or more than one product where "
     "only one was authorised (rule 7)\n"
     "- the product shown or described as any category OTHER than a body oil - a mist, "
@@ -130,6 +136,76 @@ def has_high_confidence(findings):
     return any((f.get("confidence") or "").lower() == "high" for f in (findings or []))
 
 
+MIN_CONTRADICTION_SNIPPET_LEN = 6
+
+
+def _normalize_for_match(text):
+    """Lowercase, and collapse quote/dash punctuation to a space, so a finding's own
+    quoted text - which may use curly quotes or an em-dash when Claude echoes content back
+    (confirmed live: the critic wrote 'SANDY O.' with a curly apostrophe-style quote) -
+    still matches the authorised value it's quoting, punctuation style aside."""
+    text = (text or "").lower()
+    return re.sub(r"[\"'‘’“”–—-]+", " ", text)
+
+
+def drop_findings_contradicted_by_authorised(findings, testimonial=None, offer_text=None,
+                                              headline=None, subtext=None):
+    """Defense in depth, general - NOT testimonial-specific (2026-08-07): a finding whose
+    description quotes back content THIS generation's own prompt explicitly authorised
+    (the real testimonial select_testimonial_review picked, the operator's own offer_text,
+    the authorised headline/subtext) is not a real defect - it's the critic re-flagging
+    something the SAME prompt told Gemini to render. Feeding a finding like that into the
+    corrective retry as-is produces a self-contradictory prompt (one clause says render
+    it, the critic-feedback clause says remove it) and spends a paid generation trying to
+    satisfy an instruction that can't be satisfied. Confirmed live: ad 1653458269057951
+    (2026-08-07) - a real product_reviews-sourced testimonial ("Works like magic!" -
+    SANDY O.) was correctly authorised, the critic flagged it as fabricated anyway, and
+    the retry that followed asked Gemini to remove the exact quote the structural-zones
+    clause was still instructing it to render in the same prompt.
+
+    This is independent of, and a backstop for, telling the critic what's authorised up
+    front (see check_draft's testimonial/offer_text/headline params) - an LLM critic can
+    still misjudge even when told; the whole reason this module exists is that prompt-only
+    instructions don't reliably bind, and that applies to the critic's own prompt just as
+    much as the generator's.
+
+    Matching is substring containment against the finding's OWN description (normalised -
+    see _normalize_for_match), not a category-name match - this confirms the SPECIFIC
+    quoted content is what was authorised, so a genuinely different or additional
+    violation reported under the same category (e.g. a second, uninvited quote) still
+    gets through untouched. Candidate snippets shorter than
+    MIN_CONTRADICTION_SNIPPET_LEN are skipped - a short authorised string (a single
+    initial, a two-letter word) would false-match unrelated findings on common substrings
+    otherwise.
+
+    Never mutates `findings`; returns a new, possibly-shorter list. Every drop is logged -
+    a finding silently disappearing here must still be visible to whoever reads the logs."""
+    authorised = []
+    if testimonial:
+        authorised.append(testimonial.get("quote"))
+        authorised.append(testimonial.get("attribution"))
+    authorised.extend([offer_text, headline, subtext])
+    snippets = [
+        _normalize_for_match(s) for s in authorised
+        if s and len(s.strip()) >= MIN_CONTRADICTION_SNIPPET_LEN
+    ]
+    snippets = [s for s in snippets if s.strip()]
+    if not snippets:
+        return list(findings or [])
+    kept = []
+    for finding in (findings or []):
+        desc = _normalize_for_match(finding.get("description"))
+        hit = next((s for s in snippets if s in desc), None)
+        if hit:
+            log.info(
+                "Output critic finding dropped as contradicted by authorised content "
+                "(matches %r): %s", hit.strip(), finding,
+            )
+            continue
+        kept.append(finding)
+    return kept
+
+
 def _sniff_mime_type(data):
     """Magic-byte sniff - duplicated rather than imported from deconstruct.py/
     generate_image_prompt.py, matching this codebase's existing precedent for this exact
@@ -144,7 +220,8 @@ def _sniff_mime_type(data):
 
 
 def _build_user_prompt(brand_rules_text, headline=None, subtext=None, offer_text=None,
-                        include_product=True, visual_description=None, ingredients=None):
+                        include_product=True, visual_description=None, ingredients=None,
+                        testimonial=None):
     """Pure and side-effect free so it's directly testable without mocking the API.
 
     visual_description/ingredients (2026-08-06, PART 1G): the product's OWN documented
@@ -155,7 +232,16 @@ def _build_user_prompt(brand_rules_text, headline=None, subtext=None, offer_text
     violation of rule 1's bare "name only" wording, because the critic had never been told
     what the real label actually says beyond the name. Both are optional and additive -
     omitting them (every pre-existing caller, until pipeline.py is updated alongside this)
-    reproduces today's prompt byte-for-byte."""
+    reproduces today's prompt byte-for-byte.
+
+    testimonial (2026-08-07): the SAME dict select_testimonial_review picked and handed to
+    build_image_prompt for this generation - {"quote", "attribution"}, or None. Closes the
+    same class of false positive as visual_description/ingredients above, this time on the
+    fabricated-testimonials fix (808ddee) itself: that fix substitutes a REAL
+    product_reviews row into a social_proof zone, but the critic was never told a
+    testimonial had actually been authorised, so its checklist's "a testimonial, quote, or
+    star rating (C2)" line flagged the fix's own correct output as fabricated - confirmed
+    live, ad 1653458269057951, real review id 13308 ("Works like magic!" - SANDY O.)."""
     if headline:
         text_line = f'headline {headline!r}' + (f', subtext {subtext!r}' if subtext else '')
     else:
@@ -174,6 +260,18 @@ def _build_user_prompt(brand_rules_text, headline=None, subtext=None, offer_text
         f"category above): {ingredients}\n"
         if ingredients else ""
     )
+    if testimonial and (testimonial.get("quote") or "").strip():
+        quote = testimonial["quote"].strip()
+        attribution = (testimonial.get("attribution") or "").strip()
+        testimonial_line = (
+            f"Authorised testimonial (judge C2 against THIS, not a bare "
+            f"any-quote-is-fabricated reading - see the C2 instruction above): the quote "
+            f"{quote!r}" + (f", attributed to {attribution!r},"
+                             if attribution else ", with no attribution,")
+            + " is a REAL, approved customer review and is authorised to appear.\n"
+        )
+    else:
+        testimonial_line = "Authorised testimonial: NONE - no testimonial was authorised for this image.\n"
     return (
         "RULES THIS IMAGE WAS GENERATED UNDER:\n"
         f"{brand_rules_text.strip()}\n\n"
@@ -181,14 +279,16 @@ def _build_user_prompt(brand_rules_text, headline=None, subtext=None, offer_text
         f"{ingredients_line}"
         f"Authorised text_in_image content: {text_line}.\n"
         f"Authorised offer: {offer_line}.\n"
-        f"Product presence authorised: {product_line}.\n\n"
+        f"Product presence authorised: {product_line}.\n"
+        f"{testimonial_line}\n"
         "Review the attached image against these rules and report every violation you "
         "actually see, per the categories in your instructions."
     )
 
 
 def check_draft(image_bytes, brand_rules_text, headline=None, subtext=None, offer_text=None,
-                 include_product=True, visual_description=None, ingredients=None):
+                 include_product=True, visual_description=None, ingredients=None,
+                 testimonial=None):
     """Ask Claude to inspect a GENERATED draft image for rule violations.
 
     Returns a list of {"category", "description", "confidence"} dicts, medium/high
@@ -198,7 +298,8 @@ def check_draft(image_bytes, brand_rules_text, headline=None, subtext=None, offe
     violations found" - see this module's docstring."""
     user_prompt = _build_user_prompt(brand_rules_text, headline=headline, subtext=subtext,
                                       offer_text=offer_text, include_product=include_product,
-                                      visual_description=visual_description, ingredients=ingredients)
+                                      visual_description=visual_description, ingredients=ingredients,
+                                      testimonial=testimonial)
     try:
         import base64
         media_type = _sniff_mime_type(image_bytes)

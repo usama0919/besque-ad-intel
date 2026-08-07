@@ -1076,6 +1076,11 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
                     # positive on the L'Occitane run's own (correct) label.
                     visual_description=(product or {}).get("visual_description"),
                     ingredients=(product or {}).get("ingredients"),
+                    # testimonial (2026-08-07): the SAME real-review-or-nothing pick the
+                    # generator was given - closes the false positive where the critic
+                    # flagged select_testimonial_review's own correct output as a
+                    # fabricated quote (C2), never having been told one was authorised.
+                    testimonial=testimonial,
                 )
             except Exception as e:
                 log.warning("Ad %s: output critic block raised (%s: %s), draft left unflagged",
@@ -1091,6 +1096,23 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
                     f"not automatically re-checked.",
                 )
                 break
+            # Mechanical backstop, general - not testimonial-specific (2026-08-07): drop
+            # any finding that quotes back content THIS prompt actually authorised
+            # (testimonial/offer_text/headline/subtext) before it can trigger a retry -
+            # feeding such a finding into gen_kwargs["critic_feedback"] tells Gemini to
+            # remove content the SAME rebuilt prompt is simultaneously instructing it to
+            # render, spending a paid generation on an unsatisfiable prompt. See
+            # output_critic.drop_findings_contradicted_by_authorised.
+            dropped_count = len(findings)
+            findings = output_critic.drop_findings_contradicted_by_authorised(
+                findings, testimonial=testimonial, offer_text=offer_text,
+                headline=critic_headline, subtext=critic_subtext,
+            )
+            if len(findings) != dropped_count:
+                log.info(
+                    "Ad %s: %s critic finding(s) dropped as contradicted by authorised "
+                    "content, %s remain", ad_id, dropped_count - len(findings), len(findings),
+                )
             if not output_critic.has_high_confidence(findings):
                 break  # clean, or medium/low only - keep this draft
             if image_attempt >= MAX_IMAGE_ATTEMPTS:
