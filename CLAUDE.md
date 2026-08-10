@@ -740,3 +740,94 @@ Seven items, ordered by risk, each its own commit so they can be bisected indepe
    instruction, palette, typography, efficacy ban, offer ban...) — nobody has yet checked
    the total against Gemini's actual input token/character limit, so a long prompt could
    be silently truncated with no visible symptom beyond a worse draft.
+
+## 2026-08-07
+
+**SESSION 7 AUG 2026 — pushed: `e27b9eb`, `5cfa8d6`, `d4eab44`, `b5de089`.**
+
+### Landed
+- **FRAMING.** Explicit `aspect_ratio` REINSTATED in edit mode. Omitting it is
+  NONDETERMINISTIC, not merely imprecise: the same reference produced 0.5581 on one run
+  and 0.322 on another with no ratio set. Forcing has one documented failure (a perfect
+  1:1 reference with `"1:1"` explicitly set still returned 1.79:1) but usually
+  constrains. Derived per reference via `derive_aspect_ratio`, never hardcoded. Generate
+  mode never set it on the config at all — only the prompt-text "Square 1:1" line — and
+  is unchanged pending its own probe. This answers the 6a question open since 3 Aug.
+- **PRODUCT COUNT.** `layout_detail.product_count` now reaches the product clause.
+  Rendering N of the SAME authorised bottle when the reference shows N products is
+  CORRECT — reproducing composition, not faking a second SKU. Earlier "do not
+  duplicate" wording was wrong and collapsed every reference to one bottle.
+- **ZONE REPRODUCTION, generalised by zone TYPE not by string.** award/editorial/
+  endorsement always REMOVES (Besque cannot imply an award it has not won); offer-shaped
+  substitutes `offer_text`; cert-shaped substitutes `products.certifications`;
+  price_anchor substitutes `offer_text`; product_callout substitutes product name.
+- `products.certifications` JSONB added. Product 1 = `["Vegan","Cruelty Free","100%
+  Natural"]`, verified against the real label image.
+- **REGENERATE PRECEDENCE:** live operator input > stored artifact value > default. Live
+  input was previously not consulted AT ALL on regenerate. Missing/unreadable draft
+  image now falls back to a first generation preserving `edit_mode` instead of
+  hard-failing.
+- **CRITIC TESTIMONIAL-AWARENESS.** `check_draft` now receives the authorised
+  testimonial; it previously flagged EVERY quote as a C2 fabrication, including real
+  reviews `select_testimonial_review` had correctly picked.
+- **PRE-RETRY CONTRADICTION FILTER**, general not testimonial-specific.
+
+### Biggest finding
+A false-positive critic finding fed back into a retry produced a prompt that
+simultaneously demanded and forbade the same element. Gemini resolved the contradiction
+by inventing THREE genuinely fabricated testimonials plus copy implying pregnancy use on
+a 40+ product (artifact 1136). **A false positive did not just waste a paid call — it
+manufactured a real violation.**
+
+### Nothing-to-clone gate — added and REVERSED the same day
+Skipping a reference with no product and no text zone contradicts the agreed order —
+CLONE THE REFERENCE, THEN APPLY THE OPERATOR'S INSTRUCTION. Such a scene is still
+usable: with `include_product` and `text_in_image` on, product and copy are ADDED rather
+than substituted. Detection and the pool badge are kept as information, never a block.
+The residual hard block on nudity or sexualised OUTPUT stays — it applies to what we
+generate, never to which references are permitted.
+
+### Open bugs, priority order
+1. `/api/artifacts` 500s with `MemoryError`. `get_artifacts_full` returns every column
+   including `image_prompt` and `copy_prompt` (~15KB/row) and the LIMIT was raised; the
+   dashboard polls it every few seconds. Split into a card-shaped list endpoint plus a
+   single-artifact detail endpoint, and paginate.
+2. Offer pill not baked into the image — reference had an offer zone, `offer_text` was
+   supplied, no pill appeared; the offer renders only as the HTML overlay outside the
+   frame. `structural_zones` came back `None` on at least one artifact — suspected
+   deconstruct extraction gap, unproven.
+3. Stray product callout — a white rectangle with the product name appeared between two
+   bottles in a position no reference zone occupied.
+4. Substance properties not extracted — thin pale translucent oil in the reference
+   rendered as a thick opaque blob reading as honey. `substance_colour` exists;
+   behaviour (viscosity, opacity, how it pools and runs) does not. Same shape as
+   `scene_lighting`.
+5. Product placement not reproduced — reference bottle entered frame tipped from one
+   side; draft rendered it upright, centred, mirrored. Count and size carry over;
+   placement is re-invented.
+6. Relative product size — a small-vs-jumbo reference rendered two near-identical
+   bottles, losing the contrast that was the ad's argument.
+7. Pregnancy as a use context is not covered by compliance_rules C1-C6 (see the
+   2026-08-07 note under Known gaps above).
+8. Several artifacts point at draft images that no longer exist.
+
+### Text is still the biggest gap
+`generate_copy.py` untouched. Every draft paraphrases `products.description`. The
+`angle_language` table schema exists with ZERO ROWS and `docs/angle_language.md` is NOT
+in the repo. Three standing overrides for when it lands: never invent a statistic or
+timeframe; mechanism never asserted as fact outside a real quote; nickname and first
+initial only — no ages, no full names, no platform name.
+
+### Working rules reconfirmed
+- Restart uvicorn after every commit, FROM THE PROJECT DIRECTORY. Apify failed all
+  morning with "authentication token is not valid" purely because uvicorn never loaded
+  `.env`; the same token worked from the terminal. Cost three separate diagnoses in one
+  day.
+- Verify via GENERATE on a never-drafted ad, never via Regenerate.
+- Prompt-only rules DO NOT BIND on the image path. A prompt stating PRODUCTLESS MODE
+  four times still rendered a bottle.
+- Name the files in every task; unscoped tasks cost 20+ minutes.
+- Never run the full suite. The five `:5433` failures are a missing local test Postgres,
+  not regressions.
+- No `ad_id`, `page_id` or `competitor_id` in `src/`. Example ads are evidence of a
+  failure, never the scope of a fix.
