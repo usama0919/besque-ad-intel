@@ -1149,8 +1149,7 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
             # output_critic.drop_findings_contradicted_by_authorised.
             dropped_count = len(findings)
             findings = output_critic.drop_findings_contradicted_by_authorised(
-                findings, testimonial=testimonial, offer_text=offer_text,
-                headline=eff_headline, subtext=eff_subtext,
+                findings, testimonial=testimonial,
             )
             if len(findings) != dropped_count:
                 log.info(

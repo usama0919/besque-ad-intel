@@ -204,3 +204,63 @@ def test_has_high_confidence_false_for_empty_or_none():
 def test_has_high_confidence_case_insensitive_and_never_raises_on_malformed_entries():
     assert critic.has_high_confidence([{"confidence": "HIGH"}]) is True
     assert critic.has_high_confidence([{"category": "x"}]) is False
+
+
+# ---- drop_findings_contradicted_by_authorised: TESTIMONIAL ONLY, fail-open (2026-08-10) ----
+
+def test_drop_contradicted_keeps_findings_that_merely_quote_the_authorised_headline():
+    # Live failure: three genuine, distinct violations on one ad, all wrongly dropped by
+    # the prior version because each description quotes the authorised headline
+    # ("years of sun damage — and the skin to prove it.") while reporting something else
+    # entirely - an unauthorised leaked label, a missing headline, a missing subtext.
+    # None of these is a testimonial re-flag; all three must survive.
+    headline = "years of sun damage — and the skin to prove it."
+    findings = [
+        {"category": "unauthorised text", "confidence": "high", "description": (
+            "The labels 'Without' and 'With Besque' appear as in-scene typography. "
+            "These words are not part of the authorised text budget - the authorised "
+            f"headline was {headline!r}, and no other text is permitted."
+        )},
+        {"category": "missing authorised text", "confidence": "high", "description": (
+            f"The authorised headline {headline!r} is not rendered anywhere in the image."
+        )},
+        {"category": "missing authorised text", "confidence": "high", "description": (
+            "The authorised supporting text is not rendered anywhere in the image."
+        )},
+    ]
+    kept = critic.drop_findings_contradicted_by_authorised(
+        findings, testimonial={"quote": "Works like magic!", "attribution": "SANDY O."},
+    )
+    assert kept == findings
+
+
+def test_drop_contradicted_drops_testimonial_reflag_when_both_conditions_hold():
+    # The one CONFIRMED motivating case (ad 1653458269057951): a real, authorised
+    # testimonial re-flagged as fabricated under a testimonial-shaped category.
+    findings = [
+        {"category": "testimonial", "confidence": "high",
+         "description": "A customer quote \"Works like magic!\" - SANDY O. appears as a fabricated review."},
+    ]
+    kept = critic.drop_findings_contradicted_by_authorised(
+        findings, testimonial={"quote": "Works like magic!", "attribution": "SANDY O."},
+    )
+    assert kept == []
+
+
+def test_drop_contradicted_keeps_finding_when_quote_matches_but_category_does_not():
+    # FAIL OPEN: quote text present is not enough on its own - an unrelated category
+    # (e.g. a leaked competitor prop) that happens to quote the testimonial text for
+    # context is not a testimonial re-flag and must be kept.
+    findings = [
+        {"category": "carried-over prop", "confidence": "medium",
+         "description": "A citrus prop from the reference sits beside text reading 'Works like magic!'."},
+    ]
+    kept = critic.drop_findings_contradicted_by_authorised(
+        findings, testimonial={"quote": "Works like magic!", "attribution": "SANDY O."},
+    )
+    assert kept == findings
+
+
+def test_drop_contradicted_keeps_everything_when_no_testimonial_authorised():
+    findings = [{"category": "testimonial", "confidence": "high", "description": "some quote appears"}]
+    assert critic.drop_findings_contradicted_by_authorised(findings, testimonial=None) == findings

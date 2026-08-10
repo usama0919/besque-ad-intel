@@ -68,7 +68,12 @@ CRITIC_SYSTEM = (
     "include it. This is a NEW, flag-only category: nothing in the generator's own prompt "
     "bans this yet, so report it for a human to weigh, don't assume it's necessarily wrong\n"
     "- an unauthorised offer, price, discount, promo code, scarcity, or stock-count claim "
-    "(the OFFER instruction)\n"
+    "(the OFFER instruction). If an authorised offer is supplied below, judge offer text "
+    "in the image against THAT exact wording: text matching the authorised offer is the "
+    "real, approved offer, not a violation. If NO offer is supplied below (empty or "
+    "absent), NONE is authorised - any offer, price, discount, promo code, scarcity, or "
+    "stock-count content appearing anywhere in the image is a violation of this category, "
+    "full stop, even if the reference ad had one\n"
     "- a quantified efficacy claim (a percentage, ratio, or \"X% more\"-style claim) not "
     "explicitly authorised below (C3, the EFFICACY CLAIMS instruction)\n"
     "- a testimonial, quote, or star rating (C2). If an authorised testimonial is supplied "
@@ -92,7 +97,12 @@ CRITIC_SYSTEM = (
     "content\n"
     "- garbled or illegible rendered text\n"
     "- text rendered when none was authorised below, or missing when it was authorised "
-    "(rule 6)\n"
+    "(rule 6). If an authorised headline and/or supporting text is supplied below, judge "
+    "rendered in-scene text against THOSE exact strings: text matching the authorised "
+    "headline or subtext is correctly rendered, not a violation - report this category "
+    "only for text matching NEITHER authorised string (an unauthorised addition) or for "
+    "authorised text that is genuinely absent from the image (not rendered anywhere), "
+    "never for authorised text that IS rendered as given\n"
     "- regulatory, legal, or medical disclaimer text carried over from the reference - an "
     "FDA/dietary-supplement statement, drug facts, a clinical-trial footnote, "
     "country-specific legal text, or a competitor's own T&Cs - on ANY product, even one "
@@ -156,58 +166,64 @@ def _normalize_for_match(text):
     return re.sub(r"[\"'‘’“”–—-]+", " ", text)
 
 
-def drop_findings_contradicted_by_authorised(findings, testimonial=None, offer_text=None,
-                                              headline=None, subtext=None):
-    """Defense in depth, general - NOT testimonial-specific (2026-08-07): a finding whose
-    description quotes back content THIS generation's own prompt explicitly authorised
-    (the real testimonial select_testimonial_review picked, the operator's own offer_text,
-    the authorised headline/subtext) is not a real defect - it's the critic re-flagging
-    something the SAME prompt told Gemini to render. Feeding a finding like that into the
-    corrective retry as-is produces a self-contradictory prompt (one clause says render
-    it, the critic-feedback clause says remove it) and spends a paid generation trying to
-    satisfy an instruction that can't be satisfied. Confirmed live: ad 1653458269057951
-    (2026-08-07) - a real product_reviews-sourced testimonial ("Works like magic!" -
-    SANDY O.) was correctly authorised, the critic flagged it as fabricated anyway, and
-    the retry that followed asked Gemini to remove the exact quote the structural-zones
-    clause was still instructing it to render in the same prompt.
+# Category keywords recognising the testimonial/quote/review shape CRITIC_SYSTEM's own
+# checklist names for C2 ("a testimonial, quote, or star rating"). category is
+# model-authored free text, not an enum - this is a best-effort, fragile match, exactly
+# as fragile as the description match below. That is why BOTH conditions are required
+# and the default is KEEP, not why this list tries to be exhaustive.
+_TESTIMONIAL_CATEGORY_KEYWORDS = ("testimonial", "quote", "review", "star rating")
 
-    This is independent of, and a backstop for, telling the critic what's authorised up
-    front (see check_draft's testimonial/offer_text/headline params) - an LLM critic can
-    still misjudge even when told; the whole reason this module exists is that prompt-only
-    instructions don't reliably bind, and that applies to the critic's own prompt just as
-    much as the generator's.
 
-    Matching is substring containment against the finding's OWN description (normalised -
-    see _normalize_for_match), not a category-name match - this confirms the SPECIFIC
-    quoted content is what was authorised, so a genuinely different or additional
-    violation reported under the same category (e.g. a second, uninvited quote) still
-    gets through untouched. Candidate snippets shorter than
-    MIN_CONTRADICTION_SNIPPET_LEN are skipped - a short authorised string (a single
-    initial, a two-letter word) would false-match unrelated findings on common substrings
-    otherwise.
+def _is_testimonial_shaped_category(category):
+    lowered = (category or "").lower()
+    return any(kw in lowered for kw in _TESTIMONIAL_CATEGORY_KEYWORDS)
+
+
+def drop_findings_contradicted_by_authorised(findings, testimonial=None):
+    """TESTIMONIAL ONLY (narrowed 2026-08-10, was general - offer_text/headline/subtext
+    removed from scope entirely, not merely deprioritised): a live false-positive sweep
+    found three genuine, distinct violations on one ad - a leaked unauthorised
+    comparison-label, a missing headline, a missing subtext - ALL wrongly dropped by the
+    prior version because their descriptions happened to quote the authorised headline
+    text while reporting something else entirely (an absence, or an unrelated leak).
+    Containment of an authorised string inside a finding's free-text description proves
+    nothing about polarity: it cannot tell "this authorised text rendered correctly,
+    re-flagged" from "this authorised text is MISSING" or "something unrelated is quoted
+    alongside it." Testimonial re-flagging (ad 1653458269057951, 2026-08-07 - a real
+    product_reviews quote correctly authorised via select_testimonial_review, flagged as
+    fabricated anyway) remains the ONE CONFIRMED motivating case for this filter existing
+    at all. offer_text/headline/subtext are dropped from scope, not narrowed, because
+    there is no confirmed case for them, and a separate live sweep the same day this was
+    narrowed found three drafts rendering a fabricated "20% OFF" with offer_text empty -
+    if offer findings were ever being dropped here, this filter is a plausible reason
+    nothing surfaced it. (The real fix for offer/headline/subtext false positives is
+    CRITIC_SYSTEM itself now telling the critic what's authorised up front - see the
+    OFFER and rule-6 bullets above - not this post-hoc filter.)
+
+    FAIL OPEN: category is model-authored free text (CRITIC_SYSTEM never gives Claude a
+    fixed enum), so matching on it is exactly as fragile as matching on description - the
+    fix is not a smarter match, it's making the DEFAULT outcome KEEP. A finding is
+    dropped ONLY when BOTH hold: its category reads as testimonial-shaped (see
+    _is_testimonial_shaped_category) AND the authorised quote text itself (not
+    attribution alone - a name matching proves nothing about the quote) appears in its
+    description. Anything unmatched or ambiguous on either condition is kept,
+    unconditionally.
 
     Never mutates `findings`; returns a new, possibly-shorter list. Every drop is logged -
     a finding silently disappearing here must still be visible to whoever reads the logs."""
-    authorised = []
-    if testimonial:
-        authorised.append(testimonial.get("quote"))
-        authorised.append(testimonial.get("attribution"))
-    authorised.extend([offer_text, headline, subtext])
-    snippets = [
-        _normalize_for_match(s) for s in authorised
-        if s and len(s.strip()) >= MIN_CONTRADICTION_SNIPPET_LEN
-    ]
-    snippets = [s for s in snippets if s.strip()]
-    if not snippets:
+    if not testimonial:
         return list(findings or [])
+    quote = testimonial.get("quote")
+    if not quote or len(quote.strip()) < MIN_CONTRADICTION_SNIPPET_LEN:
+        return list(findings or [])
+    snippet = _normalize_for_match(quote)
     kept = []
     for finding in (findings or []):
-        desc = _normalize_for_match(finding.get("description"))
-        hit = next((s for s in snippets if s in desc), None)
-        if hit:
+        if (_is_testimonial_shaped_category(finding.get("category"))
+                and snippet in _normalize_for_match(finding.get("description"))):
             log.info(
-                "Output critic finding dropped as contradicted by authorised content "
-                "(matches %r): %s", hit.strip(), finding,
+                "Output critic finding dropped as contradicted by authorised testimonial "
+                "(matches %r): %s", snippet.strip(), finding,
             )
             continue
         kept.append(finding)
