@@ -1,16 +1,122 @@
 """Persistent dedupe store. Tracks which competitor ad IDs we've already seen."""
+import logging
 import os
+import threading
 import psycopg2
+import psycopg2.pool
 from dotenv import load_dotenv
 
 load_dotenv()
 
+log = logging.getLogger("dedupe")
+
 DB_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/besque")
 FORCE_REPROCESS = os.getenv("FORCE_REPROCESS") == "1"
 
+# Cloud SQL max_connections=25; 7 are held by background workers, and the Cloud Run Job
+# (job_runner.py, imports this same module for the pipeline) needs its own headroom
+# alongside the dashboard - 10 leaves margin on both sides, not a number chosen to fill
+# whatever's left of the ceiling.
+POOL_MINCONN = 1
+POOL_MAXCONN = 10
+
+_pool = None
+_pool_lock = threading.Lock()
+
+
+def _get_pool():
+    """Created on FIRST USE, not at import (double-checked locking under _pool_lock) -
+    every process that imports dedupe.py (the dashboard AND the Cloud Run Job) must not
+    open POOL_MINCONN connections just from `import dedupe`, especially for any script
+    or test that imports this module without ever calling get_conn()."""
+    global _pool
+    if _pool is None:
+        with _pool_lock:
+            if _pool is None:
+                log.info(
+                    "dedupe: creating connection pool (minconn=%s, maxconn=%s)",
+                    POOL_MINCONN, POOL_MAXCONN,
+                )
+                _pool = psycopg2.pool.ThreadedConnectionPool(POOL_MINCONN, POOL_MAXCONN, DB_URL)
+    return _pool
+
+
+class _PooledConnection:
+    """Wraps a real psycopg2 connection so every existing `with get_conn() as conn,
+    conn.cursor() as cur:` call site keeps working UNCHANGED - .cursor(), .commit(),
+    etc. all proxy straight to the real connection via __getattr__, and no call site
+    needs to know pooling exists, or ever call .close() itself (closing here would hand
+    a dead connection back to the pool).
+
+    __enter__/__exit__ replicate psycopg2's own connection context-manager contract
+    (commit on clean exit, rollback on exception via self._conn.__exit__) and ADD
+    returning the connection to the pool afterwards. If commit/rollback itself raises -
+    the connection is actually broken (e.g. the server dropped it) - it is discarded
+    (putconn(..., close=True)), never returned to the pool for the next caller to
+    inherit in a bad state. A commit failure with no original exception is re-raised
+    rather than swallowed - the caller's write must never look like it silently
+    succeeded when it didn't; a rollback failure that follows a REAL exception is only
+    logged, so the original, more informative exception is what actually propagates."""
+    __slots__ = ("_pool", "_conn", "_key")
+
+    def __init__(self, pool, conn, key):
+        self._pool = pool
+        self._conn = conn
+        self._key = key
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def __enter__(self):
+        self._conn.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            self._conn.__exit__(exc_type, exc_val, exc_tb)
+        except Exception:
+            log.warning(
+                "dedupe: connection errored during commit/rollback, discarding from "
+                "pool rather than returning it dirty", exc_info=True,
+            )
+            try:
+                self._pool.putconn(self._conn, key=self._key, close=True)
+            except Exception:
+                log.warning("dedupe: failed to discard broken connection", exc_info=True)
+            if exc_type is None:
+                raise
+            return False
+        else:
+            self._pool.putconn(self._conn, key=self._key)
+            return False
+
 
 def get_conn():
-    return psycopg2.connect(DB_URL)
+    """Returns a _PooledConnection borrowed from the module-level pool (created lazily
+    on first call - see _get_pool). A fresh, unique key per call (NOT
+    ThreadedConnectionPool's own default thread-id key) - the default keying would hand
+    the SAME connection back to a second get_conn() call from the same thread while an
+    outer one is still open, and that inner call's __exit__ would return the shared
+    connection to the pool while the outer block still believes it owns it. A unique
+    key per call makes every get_conn() an independent checkout, exactly like today's
+    unpooled behaviour, just bounded to POOL_MAXCONN instead of unbounded."""
+    pool = _get_pool()
+    key = object()
+    try:
+        conn = pool.getconn(key)
+    except psycopg2.pool.PoolError:
+        # The failure mode that cost an hour undiagnosed today: this must be loud and
+        # specific, never a bare exception with no context about why a request just
+        # failed. Re-raised, not swallowed - callers still see and handle the failure.
+        log.error(
+            "dedupe: connection pool exhausted (maxconn=%s) - no connection available. "
+            "Check for a caller not returning connections (a with-block that never "
+            "exits, or a bare get_conn() call with no `with` at all) or genuine "
+            "concurrent DB load exceeding the pool size.",
+            POOL_MAXCONN,
+        )
+        raise
+    return _PooledConnection(pool, conn, key)
 
 
 def init_db():
