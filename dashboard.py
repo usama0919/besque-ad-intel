@@ -17,6 +17,30 @@ from src import dedupe, assets, validator
 
 app = FastAPI(title="Besque Ad Intelligence")
 
+
+@app.on_event("startup")
+def _init_tables():
+    """Every dedupe.init_* call is CREATE TABLE IF NOT EXISTS - idempotent, and safe to
+    run once per process start rather than once per request. Until this commit, each of
+    the 25 call sites below ran on EVERY matching request, each opening its own
+    connection (dedupe.get_conn has no pooling until the next commit) - /api/artifacts
+    alone made 3 of these on every 3-second dashboard poll tick, before it ever touched a
+    row of actual data. Moved here, once, covering every init_* this file calls anywhere
+    in a request handler."""
+    dedupe.init_artifacts()
+    dedupe.init_angles()
+    dedupe.init_angle_language()
+    dedupe.init_decisions()
+    dedupe.init_run_progress()
+    dedupe.init_competitors()
+    dedupe.init_products()
+    dedupe.init_brand_settings()
+    dedupe.init_pipeline_warnings()
+    dedupe.init_scraped_ads()
+    dedupe.init_fetch_jobs()
+    dedupe.init_generate_jobs()
+
+
 # Serve the saved ad images
 ASSET_DIR = Path("assets")
 ASSET_DIR.mkdir(exist_ok=True)
@@ -70,9 +94,6 @@ def pool_page(request: Request):
 
 @app.get("/api/artifacts")
 def api_artifacts():
-    dedupe.init_artifacts()
-    dedupe.init_angles()
-    dedupe.init_angle_language()
     rows = dedupe.get_artifacts_full(limit=500)
     # id -> angle dict, so each card can show which angle it was generated for without
     # a per-row lookup. Small table, fetched once per request.
@@ -122,7 +143,6 @@ def api_artifacts():
 
 @app.get("/api/decisions")
 def api_decisions():
-    dedupe.init_decisions()
     rows = dedupe.get_decisions()[-20:][::-1]
     return JSONResponse([
         {"ad_id": r[0], "decision": r[1], "at": r[2].strftime("%Y-%m-%d %H:%M"), "reason": (r[3] if len(r) > 3 else "") or ""}
@@ -283,7 +303,6 @@ def _current_progress():
     when nothing is running, never raises - this is supplementary status, never
     load-bearing for running/last_summary."""
     try:
-        dedupe.init_run_progress()
         p = dedupe.get_run_progress()
         if not p or not p.get("competitor_name"):
             return None
@@ -522,7 +541,6 @@ def api_accept_name(competitor_id: int, accept: bool = True):
 def api_page_lookup(q: str = ""):
     """Read-only: group existing artifacts by page_name into Meta-style cards.
     q filters by name (case-insensitive substring). Empty q returns all pages."""
-    dedupe.init_artifacts()
     rows = dedupe.get_artifacts_full(limit=500)
     ql = (q or "").strip().lower()
     pages = {}
@@ -546,7 +564,6 @@ def api_page_lookup(q: str = ""):
                 p["preview"] = preview
     # include tracked competitors that have no scraped ads yet
     try:
-        dedupe.init_competitors()
         existing_lower = {k.lower() for k in pages.keys()}
         for comp in dedupe.get_competitors():
             cname = (comp.get("name") or "").strip()
@@ -569,7 +586,6 @@ def api_page_lookup(q: str = ""):
 
 @app.get("/api/products")
 def api_products():
-    dedupe.init_products()
     return JSONResponse(dedupe.get_products())
 
 
@@ -665,7 +681,6 @@ def api_delete_product(product_id: int):
 
 @app.get("/api/brand_settings")
 def api_brand_settings():
-    dedupe.init_brand_settings()
     return JSONResponse(dedupe.get_brand_settings())
 
 
@@ -673,15 +688,12 @@ def api_brand_settings():
 async def api_update_brand_settings(request: Request):
     body = await request.json()
     palette = (body.get("palette") or "").strip()
-    dedupe.init_brand_settings()
     dedupe.update_brand_settings(palette)
     return JSONResponse(dedupe.get_brand_settings())
 
 
 @app.get("/api/angles")
 def api_angles():
-    dedupe.init_angles()
-    dedupe.init_angle_language()
     return JSONResponse(dedupe.get_angles())
 
 
@@ -724,7 +736,6 @@ def api_delete_angle(angle_id: int):
 
 @app.get("/api/warnings")
 def api_warnings():
-    dedupe.init_pipeline_warnings()
     rows = dedupe.get_recent_warnings()
     # created_at is a raw datetime (dedupe.py never serialises it, same convention as
     # get_artifacts_full/get_decisions) - this table being empty until 30 Jul is the only
@@ -740,7 +751,6 @@ def api_warnings():
 
 @app.get("/api/competitors")
 def api_competitors():
-    dedupe.init_competitors()
     rows = dedupe.get_competitors()
     return JSONResponse([{"id": r["id"], "name": r["name"], "page_id": r["page_id"],
                           "suggested_name": r.get("suggested_name") or "",
@@ -751,7 +761,6 @@ def api_competitors():
 def api_add_competitor(name: str, page_id: str = "", category: str = ""):
     """Append a new competitor to the watchlist table. Never overwrites existing rows.
     page_id falls back to name when omitted, matching the PUT handler below."""
-    dedupe.init_competitors()
     resolved_page_id = page_id or name
     new_id = dedupe.add_competitor(name=name, page_id=resolved_page_id, category=category)
     return JSONResponse({"ok": True, "id": new_id, "name": name, "page_id": resolved_page_id, "category": category})
@@ -782,7 +791,6 @@ def api_pool(competitor_id: int = None, status: str = "pool", limit: int = 100, 
     GET /api/pool/cards below, so this endpoint's own contract (raw_meta in full,
     real SQL LIMIT/OFFSET) never changes underneath an existing caller. limit
     defaults to 100 (explicit, not the get_artifacts_full-style 50)."""
-    dedupe.init_scraped_ads()
     rows = dedupe.get_scraped_ads(competitor_id=competitor_id, status=status, limit=limit, offset=offset)
     total = dedupe.count_scraped_ads(competitor_id=competitor_id, status=status)
     return JSONResponse({
@@ -896,8 +904,6 @@ def api_pool_cards(competitor_id: int = None, status: str = None, limit: int = 2
     6, Part A, Item 1) - DCO ads store Meta's UNRENDERED template, not the
     resolved copy, and the resolved text isn't in the data anywhere to recover.
     Suppressing the slot, not attempting to resolve the token."""
-    dedupe.init_scraped_ads()
-    dedupe.init_artifacts()
     rows = dedupe.get_scraped_ads(competitor_id=competitor_id, status=status, limit=None)
     generated_ad_ids = dedupe.get_artifact_ad_ids([r["ad_id"] for r in rows], angle_id=angle_id)
     cards = []
@@ -965,12 +971,10 @@ async def api_fetch_pool(request: Request):
     if active_status not in ("active", "inactive", "all"):
         return JSONResponse({"ok": False, "error": "active_status must be 'active', 'inactive', or 'all'"}, status_code=400)
 
-    dedupe.init_competitors()
     competitor = next((c for c in dedupe.get_competitors() if c["id"] == competitor_id), None)
     if not competitor:
         return JSONResponse({"ok": False, "error": f"competitor {competitor_id} not found"}, status_code=404)
 
-    dedupe.init_fetch_jobs()
     if not dedupe.try_start_fetch_job(competitor_id):
         return JSONResponse(
             {"ok": False, "error": f"a fetch is already running for competitor {competitor_id}"},
@@ -1003,7 +1007,6 @@ def api_fetch_status(competitor_id: int):
     fetch has ever run for it. result is fetch_pool's dict once status is 'done';
     error is the exception message once status is 'error'. Both are None
     otherwise."""
-    dedupe.init_fetch_jobs()
     job = dedupe.get_fetch_job(competitor_id)
     if job is None:
         return JSONResponse({"status": "none", "result": None, "error": None})
@@ -1077,7 +1080,6 @@ async def api_generate(request: Request):
         )
 
     job_id = uuid.uuid4().hex
-    dedupe.init_generate_jobs()
     dedupe.start_generate_job(job_id, ad_ids)
 
     from src import pipeline
@@ -1113,7 +1115,6 @@ def api_generate_status(job_id: str):
     """Poll one generation job - 'running'/'done'/'error', or 'none' if job_id is
     unrecognised. progress is {ad_id: result} filled in live as each ad finishes;
     result is generate_from_selection's final summary dict once status is 'done'."""
-    dedupe.init_generate_jobs()
     job = dedupe.get_generate_job(job_id)
     if job is None:
         return JSONResponse({"status": "none", "progress": {}, "result": None, "error": None})
@@ -1132,14 +1133,12 @@ async def api_generate_stop(request: Request):
     job_id = body.get("job_id")
     if not job_id:
         return JSONResponse({"ok": False, "error": "job_id required"}, status_code=400)
-    dedupe.init_generate_jobs()
     dedupe.request_generate_job_stop(job_id)
     return JSONResponse({"ok": True})
 
 
 @app.get("/api/stats")
 def api_stats():
-    dedupe.init_artifacts()
     with dedupe.get_conn() as conn, conn.cursor() as cur:
         cur.execute("SELECT COUNT(*) FROM artifacts")
         total = cur.fetchone()[0]
