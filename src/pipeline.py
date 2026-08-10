@@ -438,10 +438,32 @@ def resolve_regenerate_input(live_value, stored_value, default_value):
 
 def _regenerate_existing_draft(ad, angle_id, angle_slug, delta_instruction, should_stop,
                                 live_include_product=None, live_retheme_colours=None,
-                                live_realism=None, live_body_area=None, live_offer_text=None):
+                                live_realism=None, live_body_area=None, live_offer_text=None,
+                                check_output=False):
     """Apply delta_instruction as a targeted change to a prompt REBUILT from CURRENT code
     (generate_image_prompt.build_image_prompt) and the artifact's own stored inputs - never
     the artifact's frozen historical image_prompt text.
+
+    check_output (2026-08-10): CHECK-ONLY, deliberately no corrective retry - the retry
+    process_ad's own generation loop gets would mean composing a SECOND delta clause
+    (critic feedback) on top of delta_instruction against an already-rendered image via
+    regenerate_from_stored_prompt, which has no hook for this at all today (confirmed:
+    its only composition is stored_prompt + ONE delta clause). Forcing a second one in
+    risks the exact shape that produced artifact 1136 - a prompt that simultaneously
+    demands and forbids the same element. Regenerate is already operator-driven: a
+    failed-review result here is the operator's own cue to regenerate again with a
+    better instruction, not something the pipeline should try to self-correct.
+
+    review_status/critic_findings are ALWAYS rewritten via update_artifact_findings
+    after save_artifact below, never conditionally skipped - save_artifact's own
+    regenerate=True path DELETEs and re-INSERTs the row, and critic_findings/
+    review_status are NOT in that INSERT's column list, so they'd silently reset to
+    their column defaults ('[]'/'ok') regardless of what this function does UNLESS the
+    prior value is explicitly carried forward and rewritten afterward. When
+    check_output=False, or the critic block itself fails, the EXISTING stored
+    findings/review_status (from `existing`, fetched via dedupe.get_artifact above) are
+    what get carried forward - an unchecked regenerate must never look like it was
+    freshly verified clean.
 
     2026-08-06, the regenerate-freezes-the-prompt-forever fix: before this, every
     regenerate replayed the artifact's stored image_prompt verbatim and just appended a
@@ -553,7 +575,7 @@ def _regenerate_existing_draft(ad, angle_id, angle_slug, delta_instruction, shou
     # process_ad reads them for a first generation, never a separate derivation.
     reference_has_product = generate_image_prompt.reference_has_product(blueprint)
     reference_has_text_zone = generate_image_prompt.reference_has_text_zone(blueprint)
-    eff_headline, _ = generate_image_prompt.effective_authorised_text(
+    eff_headline, eff_subtext = generate_image_prompt.effective_authorised_text(
         text_in_image, generated_copy.get("headline"), generated_copy.get("image_subtext") or None,
     )
     element_provenance = {
@@ -609,6 +631,48 @@ def _regenerate_existing_draft(ad, angle_id, angle_slug, delta_instruction, shou
         log.error("Ad %s: regenerate failed - no draft image produced", ad_id)
         return "failed"
     img_prompt = getattr(generate_image_prompt.regenerate_from_stored_prompt, "last_prompt", "")
+
+    # CHECK-ONLY critic pass (2026-08-10) - see this function's own docstring for why no
+    # retry happens here. Mirrors process_ad's own check/drop/confidence sequence exactly.
+    findings = None
+    if check_output:
+        try:
+            from pathlib import Path as _Path
+            draft_bytes_for_check = _Path(new_draft).read_bytes()
+            brand_rules_text = generate_image_prompt.brand_rules(
+                include_product=include_product, text_in_image=text_in_image,
+                headline=generated_copy.get("headline"), subtext=generated_copy.get("image_subtext") or None,
+                edit_mode=True,
+            )
+            findings = output_critic.check_draft(
+                draft_bytes_for_check, brand_rules_text, headline=eff_headline,
+                subtext=eff_subtext, offer_text=offer_text, include_product=include_product,
+                visual_description=(product or {}).get("visual_description"),
+                ingredients=(product or {}).get("ingredients"),
+                testimonial=testimonial,
+            )
+        except Exception as e:
+            log.warning("Ad %s: output critic block raised on regenerate (%s: %s), "
+                        "review_status carried forward unchanged", ad_id, type(e).__name__, e)
+        if findings is None:
+            dedupe.init_pipeline_warnings()
+            dedupe.record_warning(
+                "critic_failed",
+                f"Ad {ad_id} ({ad.get('page_name', '?')}): output critic check failed or was "
+                f"unparseable on regenerate - review_status carried forward unchanged.",
+            )
+        else:
+            findings = output_critic.drop_findings_contradicted_by_authorised(findings, testimonial=testimonial)
+
+    if findings is None:
+        # check_output was off, or the critic block failed/errored - no fresh verdict to
+        # trust. Carry the EXISTING findings/review_status forward unchanged - see the
+        # docstring for why this must be an explicit rewrite, not a skipped call.
+        findings = existing.get("critic_findings") or []
+        review_status = existing.get("review_status") or "ok"
+    else:
+        review_status = "failed-review" if output_critic.has_high_confidence(findings) else "ok"
+
     dedupe.save_artifact(
         ad_id=ad_id, page_name=ad.get("page_name", ""),
         image_path=existing.get("image_path", ""),
@@ -633,6 +697,7 @@ def _regenerate_existing_draft(ad, angle_id, angle_slug, delta_instruction, shou
         element_provenance=element_provenance,
         regenerate=True,
     )
+    dedupe.update_artifact_findings(ad_id, findings, angle_id=angle_id, review_status=review_status)
     dedupe.mark_seen(ad_id, ad.get("page_name", ""), angle_id)
     return "processed"
 
@@ -825,6 +890,7 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
                 ad, angle_id, angle_slug, operator_instruction, should_stop,
                 live_include_product=live_include_product, live_retheme_colours=live_retheme_colours,
                 live_realism=live_realism, live_body_area=live_body_area, live_offer_text=live_offer_text,
+                check_output=check_output,
             )
             if regen_result is not None:
                 return regen_result

@@ -1138,7 +1138,8 @@ def get_artifact(ad_id, angle_id=None):
         cur.execute(
             "SELECT ad_id, page_name, blueprint, generated_copy, draft_image, angle_id, text_in_image, "
             "image_path, metadata, image_prompt, copy_prompt, model_info, format_flag, product_override_note, "
-            "include_product, retheme_colours, realism, body_area, offer_text, product_id, element_provenance "
+            "include_product, retheme_colours, realism, body_area, offer_text, product_id, element_provenance, "
+            "critic_findings, review_status "
             "FROM artifacts WHERE ad_id=%s AND angle_id IS NOT DISTINCT FROM %s ORDER BY id DESC LIMIT 1",
             (ad_id, angle_id),
         )
@@ -1150,6 +1151,7 @@ def get_artifact(ad_id, angle_id=None):
         cp = r[3] if isinstance(r[3], dict) else _j.loads(r[3] or "{}")
         meta = r[8] if isinstance(r[8], dict) else _j.loads(r[8] or "{}")
         elem_prov = r[20] if isinstance(r[20], dict) else _j.loads(r[20] or "{}")
+        crit_findings = r[21] if isinstance(r[21], list) else _j.loads(r[21] or "[]")
         return {"ad_id": r[0], "page_name": r[1], "blueprint": bp, "generated_copy": cp,
                 "draft_image": r[4], "angle_id": r[5], "text_in_image": r[6],
                 "image_path": r[7] or "", "metadata": meta, "image_prompt": r[9] or "",
@@ -1157,7 +1159,8 @@ def get_artifact(ad_id, angle_id=None):
                 "format_flag": r[12] or "", "product_override_note": r[13] or "",
                 "include_product": r[14], "retheme_colours": r[15], "realism": r[16],
                 "body_area": r[17], "offer_text": r[18], "product_id": r[19],
-                "element_provenance": elem_prov}
+                "element_provenance": elem_prov, "critic_findings": crit_findings,
+                "review_status": r[22] or "ok"}
 
 
 def set_suggested_name(competitor_id, suggested):

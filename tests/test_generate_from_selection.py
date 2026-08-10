@@ -449,6 +449,108 @@ def test_generate_from_selection_regenerate_versions_draft_and_applies_delta_to_
         _cleanup(cid, [ad_id])
 
 
+# ---- Critic gate on regenerate (2026-08-10) - CHECK-ONLY, no retry. See
+# pipeline._regenerate_existing_draft's own docstring for why: regenerate_from_stored_prompt
+# has no hook for a second, critic-feedback delta on top of the operator's own delta, and
+# forcing one in risks the artifact-1136 failure mode (a prompt that simultaneously demands
+# and forbids the same element). ----
+
+def test_generate_from_selection_regenerate_check_output_high_sets_failed_review(monkeypatch):
+    cid = _make_competitor()
+    ad_id = _seed_scraped_ad(cid)
+    dedupe.init_artifacts()
+    dedupe.save_artifact(
+        ad_id=ad_id, page_name="Brand", image_path="assets/x.jpg",
+        blueprint={"format": "hero"}, generated_copy={"headline": "Old"},
+        draft_image="assets/x_draft.png", metadata={"cta": "Shop", "destination_url": "http://x"},
+        image_prompt="STORED PROMPT TEXT",
+    )
+    from src import generate_image_prompt
+    import tempfile
+    from pathlib import Path as _Path
+    tmp_asset_dir = _Path(tempfile.mkdtemp())
+    monkeypatch.setattr(generate_image_prompt, "ASSET_DIR", tmp_asset_dir)
+    (tmp_asset_dir / f"{ad_id}_draft.png").write_bytes(b"OLD-DRAFT-BYTES")
+    new_draft = tmp_asset_dir / f"{ad_id}_draft_new.png"
+    new_draft.write_bytes(b"NEW-DRAFT-BYTES")
+    monkeypatch.setattr(pipeline.generate_image_prompt, "regenerate_from_stored_prompt",
+                        lambda *a, **k: str(new_draft))
+    monkeypatch.setattr(pipeline.output_critic, "check_draft",
+                        lambda *a, **k: [{"category": "unauthorised text", "description": "x", "confidence": "high"}])
+    try:
+        result = pipeline.generate_from_selection([ad_id], regenerate=True, instruction="fix it", check_output=True)
+        assert result["by_ad"][ad_id] == "processed"
+        row = dedupe.get_artifact(ad_id)
+        assert row["review_status"] == "failed-review"
+    finally:
+        _cleanup(cid, [ad_id])
+
+
+def test_generate_from_selection_regenerate_check_output_clean_sets_ok(monkeypatch):
+    cid = _make_competitor()
+    ad_id = _seed_scraped_ad(cid)
+    dedupe.init_artifacts()
+    dedupe.save_artifact(
+        ad_id=ad_id, page_name="Brand", image_path="assets/x.jpg",
+        blueprint={"format": "hero"}, generated_copy={"headline": "Old"},
+        draft_image="assets/x_draft.png", metadata={"cta": "Shop", "destination_url": "http://x"},
+        image_prompt="STORED PROMPT TEXT",
+    )
+    from src import generate_image_prompt
+    import tempfile
+    from pathlib import Path as _Path
+    tmp_asset_dir = _Path(tempfile.mkdtemp())
+    monkeypatch.setattr(generate_image_prompt, "ASSET_DIR", tmp_asset_dir)
+    (tmp_asset_dir / f"{ad_id}_draft.png").write_bytes(b"OLD-DRAFT-BYTES")
+    new_draft = tmp_asset_dir / f"{ad_id}_draft_new.png"
+    new_draft.write_bytes(b"NEW-DRAFT-BYTES")
+    monkeypatch.setattr(pipeline.generate_image_prompt, "regenerate_from_stored_prompt",
+                        lambda *a, **k: str(new_draft))
+    monkeypatch.setattr(pipeline.output_critic, "check_draft", lambda *a, **k: [])
+    try:
+        result = pipeline.generate_from_selection([ad_id], regenerate=True, instruction="fix it", check_output=True)
+        assert result["by_ad"][ad_id] == "processed"
+        row = dedupe.get_artifact(ad_id)
+        assert row["review_status"] == "ok"
+    finally:
+        _cleanup(cid, [ad_id])
+
+
+def test_generate_from_selection_regenerate_check_output_false_leaves_review_status_untouched(monkeypatch):
+    cid = _make_competitor()
+    ad_id = _seed_scraped_ad(cid)
+    dedupe.init_artifacts()
+    dedupe.save_artifact(
+        ad_id=ad_id, page_name="Brand", image_path="assets/x.jpg",
+        blueprint={"format": "hero"}, generated_copy={"headline": "Old"},
+        draft_image="assets/x_draft.png", metadata={"cta": "Shop", "destination_url": "http://x"},
+        image_prompt="STORED PROMPT TEXT",
+    )
+    dedupe.update_artifact_findings(
+        ad_id, [{"category": "x", "description": "y", "confidence": "high"}], review_status="failed-review",
+    )
+    from src import generate_image_prompt
+    import tempfile
+    from pathlib import Path as _Path
+    tmp_asset_dir = _Path(tempfile.mkdtemp())
+    monkeypatch.setattr(generate_image_prompt, "ASSET_DIR", tmp_asset_dir)
+    (tmp_asset_dir / f"{ad_id}_draft.png").write_bytes(b"OLD-DRAFT-BYTES")
+    new_draft = tmp_asset_dir / f"{ad_id}_draft_new.png"
+    new_draft.write_bytes(b"NEW-DRAFT-BYTES")
+    monkeypatch.setattr(pipeline.generate_image_prompt, "regenerate_from_stored_prompt",
+                        lambda *a, **k: str(new_draft))
+    critic_calls = []
+    monkeypatch.setattr(pipeline.output_critic, "check_draft", lambda *a, **k: critic_calls.append(1) or [])
+    try:
+        result = pipeline.generate_from_selection([ad_id], regenerate=True, instruction="fix it", check_output=False)
+        assert result["by_ad"][ad_id] == "processed"
+        assert critic_calls == [], "check_output=False must never call the critic"
+        row = dedupe.get_artifact(ad_id)
+        assert row["review_status"] == "failed-review"  # untouched, NOT reset to 'ok' by the regenerate
+    finally:
+        _cleanup(cid, [ad_id])
+
+
 def test_generate_from_selection_regenerate_rebuilds_prompt_from_current_code(monkeypatch):
     """THE property that was silently false until 2026-08-06: a rule present in CURRENT
     build_image_prompt/brand_rules/compliance code must appear in a regenerated draft's
