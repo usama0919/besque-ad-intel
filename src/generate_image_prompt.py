@@ -1243,7 +1243,21 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
     substituted from a photo. product_name falls back to "Besque" when not given, the same
     fallback rule 4 already states for the unbranded case. Every other style is
     byte-for-byte unaffected - reference photos are still attached and still demanded for
-    every photographic register."""
+    every photographic register.
+
+    PERSON (2026-08-10): the person in a competitor's ad is their licensed model or a real
+    customer, not a Besque asset - reproducing their actual likeness is a rights
+    violation, not a fidelity setting. C1 (compliance_rules.py) already says this once,
+    globally, in the shared compliance block; it was losing to the opening's own "carry
+    over EXACTLY"/"geometry is preserved" language and the five "everything else stays
+    exactly as it appears" catch-all lines below, none of which named the person either
+    way. Fixed the same way colour/text/offer already are: a new named PERSON row in
+    this same enumerated partition (added once, unconditionally, after the product
+    branches - see below), stating REPRODUCE for the person's pose/framing/lighting and
+    SUBSTITUTE for the person themselves, PLUS carving the person out of all five
+    "everything else" catch-all lines so they no longer contradict it. Without the
+    catch-all edit the new clause would just be demanded and forbidden in the same
+    prompt - the exact shape that produced artifact 1136's fabricated testimonials."""
     suppressing_text = not (text_in_image and headline)
     suppressing_offer = not offer_text
     # Always True: the EFFICACY CLAIMS clause below bans efficacy-claim wording
@@ -1297,8 +1311,8 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             f"this scale in this style; name and colour accuracy matter, secondary-text "
             f"legibility does not. "
             + _substance_recolour_clause(substance_colour) +
-            "Everything else in the scene stays exactly as it "
-            "appears in the source image. "
+            "Everything else in the scene - EXCEPT THE PERSON, see PERSON below - stays "
+            "exactly as it appears in the source image. "
         )
     elif include_product and reference_has_product:
         lighting_facts = _scene_lighting_facts(scene_lighting)
@@ -1320,8 +1334,8 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             "any) in its position, at its scale, matching the original shot's composition "
             "as faithfully as possible. " + lighting_instruction
             + _substance_recolour_clause(substance_colour) +
-            "Everything else in the scene stays exactly as it "
-            "appears in the source image. "
+            "Everything else in the scene - EXCEPT THE PERSON, see PERSON below - stays "
+            "exactly as it appears in the source image. "
         )
     elif include_product and not reference_has_product and style == "illustrated":
         # ADD, illustrated register (2026-08-07, reference usability gate reversal): the
@@ -1355,8 +1369,8 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             # none almost certainly has no such substance to recolour either, so this
             # would be dead weight text (same reasoning the substitute branches' use of
             # it doesn't need to restate).
-            "Everything else in the scene stays exactly as it appears in the source "
-            "image, aside from this addition. "
+            "Everything else in the scene - EXCEPT THE PERSON, see PERSON below - stays "
+            "exactly as it appears in the source image, aside from this addition. "
         )
     elif include_product and not reference_has_product:
         # ADD, photographic register (2026-08-07, reference usability gate reversal):
@@ -1385,15 +1399,40 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             + lighting_instruction
             # No _substance_recolour_clause here either - see the illustrated ADD
             # branch's own comment above for why.
-            + "Everything else in the scene stays exactly as it appears in the source "
-            "image, aside from this addition. "
+            + "Everything else in the scene - EXCEPT THE PERSON, see PERSON below - stays "
+            "exactly as it appears in the source image, aside from this addition. "
         )
     else:
         base = opening + (
             "This is a deliberately productless edit - do NOT add any Besque product, "
-            "bottle, or packaging anywhere in the scene. Everything else in the scene "
-            "stays exactly as it appears in the source image. "
+            "bottle, or packaging anywhere in the scene. Everything else in the scene - "
+            "EXCEPT THE PERSON, see PERSON below - stays exactly as it appears in the "
+            "source image. "
         )
+
+    # PERSON (2026-08-10): unconditional, appended once regardless of which product
+    # branch fired above - person substitution is independent of product SUBSTITUTE vs
+    # ADD vs productless, same reasoning TEXT/OFFER/EFFICACY CLAIMS below already use for
+    # being appended once rather than duplicated per branch. Placed right after the
+    # product branches and before TEXT, so the enumerated partition reads in scene order:
+    # composition (opening) -> product -> person -> text -> offer -> efficacy claims.
+    base += (
+        "PERSON: if a person appears anywhere in the reference image, this is one "
+        "instruction with two parts, not two competing ones, the same shape as the "
+        "colour instruction above. REPRODUCE exactly as shown: pose, body position, "
+        "framing, crop, camera angle, distance, lighting on the subject, wardrobe "
+        "silhouette, and where the person sits in the composition. SUBSTITUTE the person "
+        "themselves: face, hair, and every other identifying feature must belong to a "
+        "different, generic, non-identifiable model - never the reference's own "
+        "individual, even partially or approximately. Match the same apparent age "
+        "bracket and the same skin-condition presentation shown in the reference - that "
+        "presentation is the ad's argument - but never the same face, hair, or identity. "
+        "The person in a competitor's ad is their licensed model or a real customer, not "
+        "a Besque asset; reproducing their actual likeness is a rights violation, not a "
+        "fidelity choice. This is compliance rule C1 above, made specific at the point "
+        "of use for this reference. "
+    )
+
     eff_headline, eff_subtext = effective_authorised_text(text_in_image, headline, subtext)
     # structural_zones' sub_line/body_copy/cta substitution must never be offered when
     # text_in_image itself is off - same gating headline/subtext already use, so these
@@ -1761,7 +1800,8 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
                     "FIRST IMAGE ABOVE: the competitor's own advertisement - this is THE "
                     "AD TO REPRODUCE (its composition, background, camera angle, lighting, "
                     "palette, text placement, and layout). Its product, packaging, logo, "
-                    "and brand name must NOT survive - see the instructions below. "
+                    "brand name, and any person's actual likeness must NOT survive - see "
+                    "the instructions below. "
                 )
             if reference_images:
                 image_parts += [genai_types.Part.from_bytes(data=img, mime_type="image/png")
