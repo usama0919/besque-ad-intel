@@ -811,12 +811,15 @@ generate, never to which references are permitted.
    2026-08-07 note under Known gaps above).
 8. Several artifacts point at draft images that no longer exist.
 
-### Text is still the biggest gap
-`generate_copy.py` untouched. Every draft paraphrases `products.description`. The
-`angle_language` table schema exists with ZERO ROWS and `docs/angle_language.md` is NOT
-in the repo. Three standing overrides for when it lands: never invent a statistic or
-timeframe; mechanism never asserted as fact outside a real quote; nickname and first
-initial only — no ages, no full names, no platform name.
+### Text is DONE — angle vocabulary now feeds copy generation (2026-08-10)
+`angle_language` has six rows (crepey_skin, glp1, bruising, sun_damage, loose_skin,
+menopause), loaded from `docs/angle_language.md` — now committed in the repo — via
+`scripts/load_angle_language.py`. `generate_copy.py` reads it through
+`dedupe.get_angle_language(angle_slug)`, threaded into `build_copy_prompt`'s ANGLE
+LANGUAGE section. See the 2026-08-10 section below for the three-tier treatment and the
+TIER 1 headline requirement. The three standing overrides carry forward unchanged: never
+invent a statistic or timeframe; mechanism never asserted as fact outside a real quote;
+nickname and first initial only — no ages, no full names, no platform name.
 
 ### Working rules reconfirmed
 - Restart uvicorn after every commit, FROM THE PROJECT DIRECTORY. Apify failed all
@@ -831,3 +834,193 @@ initial only — no ages, no full names, no platform name.
   not regressions.
 - No `ad_id`, `page_id` or `competitor_id` in `src/`. Example ads are evidence of a
   failure, never the scope of a fix.
+
+## 2026-08-10
+
+**SESSION 10 AUG 2026 — pushed: `f38cd51`, `d042151`, `01e756e`, `88f979f`, `bb9dfe7`,
+plus the earlier `92875cd`, `e480b57`, `d08e779`, `091c3b0` from the same day.**
+
+### Angle language — complete
+`scripts/load_angle_language.py` parses `docs/angle_language.md` into `angle_language`
+(six rows, one per angle). `dedupe.init_angle_language()` is wired at five production
+call sites: `classify_review_angles.py`, `dashboard.py` (one call inside the app-startup
+`_init_tables()` hook — see below, not per-request), `seed_angles.py`, and
+`src/pipeline.py` (twice — `generate_from_selection` and `run_once`).
+
+`generate_copy._angle_language_clause` (commit `3cce4cb`, escalated `d08e779`) presents
+three tiers, never flattened into one bag of vocabulary:
+- **TIER 1 — WRITE FROM THIS (REQUIRED).** `common_phrases`. The headline MUST come from
+  one of these, selected or adapted — escalated from "prefer" after two drafts from the
+  same angle diverged (one used a TIER 1 phrase, one paraphrased `products.description`).
+  No schema-changing escape hatch for a "no fit" case: lists run 22-45 entries per angle,
+  so the model is told to pick the closest and adapt, never to fall back to product
+  facts or invented phrasing.
+- **TIER 2 — TONE ONLY, NEVER EMIT.** `core_angle`/`main_pain_point`. Context for
+  register; no sentence may appear in output.
+- **TIER 3 — REFERENCE ONLY, EXPLICITLY FORBIDDEN AS COPY.** `result_phrases`/
+  `main_benefit` — customer-reported OUTCOMES, unsubstantiated efficacy claims if Besque
+  asserts them directly. Permissible only inside a real stored quote (which this prompt
+  never produces).
+
+`PRODUCT` in `COPY_PROMPT` was reworded the same day to state outright it's a
+**constraint** ("bounds what may be CLAIMED"), not a copy source — the two sections were
+competing for the same job before this. `image_direction`/`best_verbatims` are never
+read into the copy prompt at all (image-path-only / `select_testimonial_review`'s job).
+
+**Watch item, not yet tripped**: TIER 3 lists forbidden phrases inside the prompt itself
+— the same demand-and-forbid shape that produced artifact 1136. If a result phrase ever
+shows up in a real headline, the fix is deleting TIER 3 from the prompt, not adding more
+prohibition wording.
+
+### `products.description` trimmed; `hero_claim` NOT yet fixed — open
+`products.description` (id=1) no longer asserts mechanism as fact — this is what the 4
+Aug "compliance false positive" entry (`"blend of 7 cold-pressed oils that"` flagged as a
+reused competitor phrase) actually was: not a false positive at all, but a real violation
+of the "mechanism never asserted outside a real quote" override, sitting in Besque's own
+product copy. **`hero_claim` is a separate, still-open gap**: verified live today via
+`dedupe.get_product(1)`, it still reads `"Visibly firms and tightens the skin with
+consistent use"` — an unsubstantiated efficacy claim handed to every copy/image prompt
+as an authoritative "Key claim." Discussed, not executed. Don't assume it's been dealt
+with; check the live value before relying on it for anything compliance-sensitive.
+
+### Critic gate — `review_status`, badge, export exclusion, backfill, check-only regenerate
+Live trigger: ad `820540537722129` — critic attempt 1 found 2 HIGH findings, the
+corrective retry ran, attempt 2 STILL found 2 HIGH, and the artifact saved with no
+failure signal anywhere. The retry loop worked; nothing acted on its result.
+
+- `artifacts.review_status TEXT DEFAULT 'ok'` (`'ok'` | `'failed-review'`), added to both
+  `CREATE TABLE` and the `ALTER TABLE` migration block — the 4 Aug schema-gap class (a
+  column in `CREATE` but never in `ALTER`, so unreproducible against a fresh DB) must not
+  repeat.
+- `dedupe.update_artifact_findings` now writes `review_status` in the SAME `UPDATE` as
+  `critic_findings` — the flag and the findings that justify it land together, never one
+  without the other.
+- Dashboard: a distinct amber "Failed Review" badge (`templates/dashboard.html`), driven
+  directly by the stored `review_status` field, shown alongside (not instead of) the
+  approve/reject/pending badge — they're independent axes.
+- `export_drafts.py` excludes `review_status='failed-review'` by default; `--include-failed`
+  overrides; prints the excluded count so an operator never silently gets fewer files
+  with no signal why.
+- **Backfilled 27 rows** live (`UPDATE artifacts SET review_status='failed-review' WHERE
+  critic_findings @> '[{"confidence":"high"}]'::jsonb`), matching an independent direct
+  count. Artifact 1136 (the fabricated-testimonials/pregnancy-framing incident) confirmed
+  among them.
+- `_regenerate_existing_draft` now runs the critic too, but **CHECK-ONLY, no retry, by
+  design**: `regenerate_from_stored_prompt` has no hook for a second, critic-feedback
+  delta layered on top of the operator's own delta — building one risks the exact
+  artifact-1136 shape (a prompt that simultaneously demands and forbids the same
+  element). Regenerate is already operator-driven: a `failed-review` result there is the
+  operator's own cue to regenerate again with a better instruction, not something the
+  pipeline should try to self-correct.
+
+### `save_artifact(regenerate=True)` DELETE+INSERT resets any column absent from its INSERT list — a trap for future columns
+`save_artifact`'s regenerate path is `DELETE FROM artifacts WHERE ad_id=... ` then a
+fresh `INSERT` with an explicit column list (`dedupe.py`, ~22 columns). **Any column not
+in that list silently resets to its schema default on every regenerate**, independent of
+what any caller does before or after. This is exactly how `review_status`/
+`critic_findings` were getting silently cleared — fixed in two places (`_regenerate_
+existing_draft`, and `process_ad`'s own fallthrough path when an existing row's draft
+image is unreadable) by fetching the PRIOR value via `dedupe.get_artifact` *before*
+calling `save_artifact` (the DELETE destroys it) and explicitly rewriting it afterward
+via `update_artifact_findings` — never by skipping the write, which does nothing against
+a DELETE+INSERT that already fired. Audited the full column list: `archived` is also
+missing from the INSERT and resets the same way, but it has zero readers/writers
+anywhere in the codebase today (grepped, one hit total — its own column definition), so
+it's a live no-op, not a current bug. **The general trap remains**: any NEW column added
+to `artifacts` in the future needs either a place in this INSERT list, or the same
+fetch-before-DELETE/rewrite-after pattern, or it will silently reset on every regenerate.
+
+### Contradiction filter narrowed to testimonial-only, fail-open
+`output_critic.drop_findings_contradicted_by_authorised` used to drop any finding whose
+description merely *quoted* an authorised string (testimonial/offer/headline/subtext),
+on the theory that quoting it proved the finding was re-flagging authorised content.
+Live counter-evidence, one ad, one attempt: three TRUE POSITIVES — a leaked unauthorised
+comparison label, a missing headline, a missing subtext — all quoted the authorised
+headline while reporting something else entirely (an absence, or an unrelated leak), and
+all three got silently dropped. Fixed: scope narrowed to testimonial only (the one
+CONFIRMED motivating case, ad `1653458269057951`); a finding is dropped now ONLY when
+BOTH the category reads as testimonial-shaped AND the authorised quote text itself
+appears in the description — default is KEEP, category is model-authored free text so
+matching it is treated as fragile by design, not smarter. `offer_text`/`headline`/
+`subtext` real false positives are handled instead by telling the critic directly what's
+authorised in `CRITIC_SYSTEM` (the OFFER and rule-6 bullets), the same pattern already
+used for testimonials/labels — fixing the false positive at the source, not filtering it
+after the fact.
+
+### Connection pool — `maxconn=10`; Cloud SQL exhaustion looks like random 500s and blank images
+`dedupe.get_conn()` was a bare `psycopg2.connect()` per call, no pooling, connections
+never explicitly closed (only `with`-block commit/rollback, which doesn't close a
+psycopg2 connection). Now `psycopg2.pool.ThreadedConnectionPool(minconn=1, maxconn=10)`,
+created lazily on first `get_conn()` call (never at import — the Cloud Run Job and the
+dashboard both import `dedupe.py` and must not open connections they never use). A
+unique key per call (not the pool's own default thread-id key) — the default would hand
+a nested same-thread `get_conn()` call the SAME connection and let it get returned to the
+pool early while an outer block still held it.
+
+**Cloud SQL `max_connections=25`, 7 held by background workers** — 10 leaves headroom for
+both the dashboard and the Job. Confirmed live: exhaustion doesn't look like a clean
+error — it looks like **random 500s and pool-card images going blank on a subset of
+reloads while the exact same files return 200 in the log and exist on disk**. Root cause
+traced two levels deep: `/assets/{filename}` (`dashboard.py`) is a plain `def` route, not
+`StaticFiles` — it shares the SAME sync-handler thread pool as every DB-bound route
+(`api_artifacts`, etc., also plain `def`). When DB-bound handlers block waiting on an
+exhausted connection pool, their threads sit occupied, and asset requests queue behind
+them for a thread slot — which specific request stalls on any given reload is
+essentially arrival-order, hence apparently random. Not expiry (a SEPARATE, also-real bug
+fixed the same day — see the `image_url` refresh-on-refetch note in `dedupe.py`'s
+`upsert_scraped_ad`), and not a bug in the image-serving code itself.
+
+### PERSON clause — DISPROVEN live; do not re-attempt prompt-only
+Commit `92875cd` added an explicit `PERSON:` row to `_edit_mode_instruction`'s enumerated
+partition — REPRODUCE pose/framing/lighting, SUBSTITUTE the person's actual identity —
+plus carved the person out of all five "everything else stays exactly" catch-alls, so
+the new clause wouldn't be contradicted by them. **Tested live today: it did not work.**
+The model still reproduced the real person's likeness from the attached reference photo.
+This is the same "prompt-only guardrails do not bind on the image path" pattern already
+proven (six times over, see the top note) for testimonials, disclaimers, and the
+illustrated-bottle leak — PERSON now joins that list. **Do not re-attempt this as a
+prompt-only fix** — writing a tenth sentence has the same failure mode as the ninth.
+Next direction, structural not textual: **face → body** — crop or otherwise remove the
+face from what's actually attached to Gemini as an image Part, the same class of fix
+that worked for the illustrated-bottle leak (drop the photographic reference entirely
+rather than ask the model not to look at it). Not built yet.
+
+### Batch degradation is shared run-strip settings, NOT a state leak — verified by full code read, do not go looking for one again
+Reported symptom: run one ad, output correct; run 15-20, later ads read like they were
+built from the FIRST ad's idea, text repeats across images, copy goes generic. Full read
+of `generate_from_selection`/`process_ad` today found **zero** state-leak mechanism:
+grepped for mutation of shared dicts (`product`/`messaging_angle`/`blueprint`/
+`angle_language`) via item-assignment or `.update()` — zero matches. Zero mutable
+default arguments anywhere in `src/`. Zero module-level caches (`lru_cache`, `@cache`,
+or a bare `{}`/`[]` accumulator). Every Claude/Gemini API client is instantiated fresh,
+inside the function, on every call — none are module-level singletons, none thread
+conversation history.
+
+**The actual mechanism is structural, not a bug**: `generate_from_selection` resolves
+`product`/`messaging_angle`/`reference_images` ONCE per batch call and passes the SAME
+objects into `process_ad` for every `ad_id` in the loop — every creative control
+(`angle_id`, `realism`, `body_area`, `offer_text`, `instruction`, `text_in_image`,
+`include_product`, `edit_mode`, `retheme_colours`) is singular on this function's own
+signature, not per-ad. `run_once` has the identical shape and says so in its own
+docstring. Only the reference (blueprint) varies per ad; the angle's `common_phrases`
+list, `core_angle`, product facts, and every run-strip toggle are identical for the
+whole batch — which, given TIER 1's new headline requirement pulling from one finite
+shared phrase list, is sufficient on its own to produce visible convergence/repetition
+across a large batch. **Do not go looking for a code-level leak here again** — this was
+checked exhaustively and the explanation is the run-strip's own by-design shape, not a
+bug in `pipeline.py`.
+
+### `.last_prompt` must be removed before any parallelism
+`generate_image`/`edit_image`/`regenerate_from_stored_prompt` (`generate_image_prompt.py`),
+`generate_copy_live` (`generate_copy.py`), and `write_creative_description`
+(`generate_image_prompt_writer.py`) each stash their assembled prompt onto their OWN
+function object as a single shared mutable attribute (`fn.last_prompt = prompt`), read
+back by `pipeline.py`/`dashboard.py` immediately after the call that set it, purely for
+persistence/logging. `generate_image_prompt.py:131-135`'s own comment already names this
+as "the exact kind of hidden coupling" that caused a real past bug (the `text_in_image`
+bug). It is safe TODAY only because processing is strictly sequential — no two ads or
+requests ever run through the same function concurrently, so the write-then-immediate-
+read pattern never crosses call boundaries. **This must be removed (return values
+threaded explicitly instead) before any parallelism work starts** — the moment two calls
+to the same function can overlap, this becomes a genuine cross-request data leak, not
+just an architectural smell.
