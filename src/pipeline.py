@@ -1246,6 +1246,25 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
             # HIGH finding(s), and a retry remains - loop continues into the next
             # attempt, which feeds `findings` back as gen_kwargs["critic_feedback"] above.
 
+        # Critic-gate continuation (2026-08-10): save_artifact(regenerate=True) DELETEs
+        # then re-INSERTs, and critic_findings/review_status are not in that INSERT's
+        # column list (see the dedupe.py schema audit) - they would silently reset to
+        # '[]'/'ok' on every regenerate unless the PRIOR values are captured before the
+        # DELETE destroys them and explicitly rewritten afterward. Mirrors
+        # _regenerate_existing_draft's own fix exactly - this is the sibling gap that
+        # fix didn't close, because THIS save_artifact call belongs to process_ad's own
+        # fresh-generation body, reached via the Task F point 2 fallthrough (existing
+        # row, unreadable draft image) when explicit_selection+regenerate are both true.
+        # Gated on the SAME condition save_artifact's own `regenerate=` argument below
+        # resolves truthy on - a genuine first generation has no prior row and must not
+        # fetch one.
+        prior_critic_findings, prior_review_status = None, None
+        if explicit_selection and regenerate:
+            prior_artifact = dedupe.get_artifact(ad_id, angle_id=angle_id)
+            if prior_artifact is not None:
+                prior_critic_findings = prior_artifact.get("critic_findings") or []
+                prior_review_status = prior_artifact.get("review_status") or "ok"
+
         cp_prompt = getattr(generate_copy.generate_copy_live, "last_prompt", "")
         dedupe.save_artifact(
             ad_id=ad_id,
@@ -1291,6 +1310,13 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
         # still needs writing so critic_findings reflects an actual clean check.
         if findings is not None:
             dedupe.update_artifact_findings(ad_id, findings, angle_id=angle_id, review_status=review_status)
+        elif prior_review_status is not None:
+            # No fresh verdict this run, but this WAS a regenerate of an existing row -
+            # carry the prior findings/review_status forward explicitly. Skipping this
+            # write would NOT preserve it - the save_artifact call above already reset it
+            # via its DELETE+INSERT; this is the only way to undo that.
+            dedupe.update_artifact_findings(ad_id, prior_critic_findings, angle_id=angle_id,
+                                             review_status=prior_review_status)
 
         dedupe.mark_seen(ad_id, ad.get("page_name", ""), angle_id)
 

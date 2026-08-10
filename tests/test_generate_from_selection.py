@@ -551,6 +551,39 @@ def test_generate_from_selection_regenerate_check_output_false_leaves_review_sta
         _cleanup(cid, [ad_id])
 
 
+def test_process_ad_regenerate_fallthrough_check_output_false_leaves_review_status_untouched(monkeypatch):
+    """Task F point 2 fallthrough (existing row, unreadable draft image) + check_output=False:
+    process_ad's OWN save_artifact(regenerate=True) call must not silently clear a prior
+    failed-review flag via its DELETE+INSERT - the prior critic_findings/review_status must
+    be fetched BEFORE that DELETE and explicitly carried forward, same pattern as
+    _regenerate_existing_draft's own fix."""
+    cid = _make_competitor()
+    ad_id = _seed_scraped_ad(cid)
+    dedupe.init_artifacts()
+    dedupe.save_artifact(
+        ad_id=ad_id, page_name="Brand", image_path="assets/x.jpg",
+        blueprint={"format": "hero"}, generated_copy={"headline": "Old"},
+        draft_image="assets/x_draft.png", metadata={"cta": "Shop", "destination_url": "http://x"},
+    )
+    dedupe.update_artifact_findings(
+        ad_id, [{"category": "x", "description": "y", "confidence": "high"}], review_status="failed-review",
+    )
+    _mock_success(monkeypatch)
+    # Force _regenerate_existing_draft's own "no current draft image could be read" branch
+    # (Task F point 2), so it returns None and process_ad falls through to a fresh generation.
+    monkeypatch.setattr(pipeline.generate_image_prompt, "_current_draft_bytes", lambda aid, slug: None)
+    critic_calls = []
+    monkeypatch.setattr(pipeline.output_critic, "check_draft", lambda *a, **k: critic_calls.append(1) or [])
+    try:
+        result = pipeline.generate_from_selection([ad_id], regenerate=True, check_output=False)
+        assert result["by_ad"][ad_id] == "processed"
+        assert critic_calls == [], "check_output=False must never call the critic"
+        row = dedupe.get_artifact(ad_id)
+        assert row["review_status"] == "failed-review"  # carried forward, NOT reset to 'ok'
+    finally:
+        _cleanup(cid, [ad_id])
+
+
 def test_generate_from_selection_regenerate_rebuilds_prompt_from_current_code(monkeypatch):
     """THE property that was silently false until 2026-08-06: a rule present in CURRENT
     build_image_prompt/brand_rules/compliance code must appear in a regenerated draft's
