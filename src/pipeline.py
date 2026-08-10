@@ -920,13 +920,18 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
 
         MAX_COPY_ATTEMPTS = 2
         ok, issues = False, []
+        # angle_language lookup lives HERE, not inside generate_copy.py - that module
+        # imports only json_response and compliance_rules today and stays free of a
+        # dedupe dependency; it receives a plain dict (or None) and never queries the DB
+        # itself. messaging_angle is None (no angle selected) or its slug has no language
+        # row yet: both resolve angle_language to None, which generate_copy.py's own
+        # NO_ANGLE_LANGUAGE fallback treats as "no angle-specific language supplied" -
+        # never a substituted/guessed vocabulary from a different angle.
+        angle_language = dedupe.get_angle_language(messaging_angle["slug"]) if messaging_angle else None
         for copy_attempt in range(1, MAX_COPY_ATTEMPTS + 1):
-            # Deliberately angle-blind for now: messaging_angle is not passed here, only
-            # into the image side below. Fine while the image's baked-in text is off by
-            # default, but once text_in_image renders an angle-specific headline into the
-            # image, copy that doesn't know the angle is likely to read mismatched - revisit
-            # generate_copy_live's inputs if that mismatch shows up in practice.
             copy_kwargs = {"product": product, "offer_text": offer_text}
+            if angle_language:
+                copy_kwargs["angle_language"] = angle_language
             if copy_attempt > 1:
                 # Fail-soft: feed the SPECIFIC prior failure back rather than discarding
                 # the ad outright. On-category pool is small (36 ads) - throwing one away

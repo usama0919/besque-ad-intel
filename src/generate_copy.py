@@ -39,6 +39,9 @@ APPROVED TESTIMONIALS:
 PRODUCT (use ONLY these facts, never invent claims or ingredients):
 {product_info}
 
+ANGLE LANGUAGE (real customer language for the selected messaging angle, tiered strictly by how it may be used - see the tier rules inside):
+{angle_language_clause}
+
 OFFER (per-run operator input - governs what offer language, if any, may appear; overrides anything the CREATIVE BLUEPRINT below shows the competitor ad had):
 {offer_clause}
 
@@ -73,6 +76,12 @@ NO_OFFER_TEXT = (
     "competitor, not Besque. A real incident produced \"50% off - ONLY while stock "
     "lasts\" this way, lifted from the competitor's own clearance sale."
 )
+NO_ANGLE_LANGUAGE = (
+    "No angle-specific customer language supplied for this run (no angle selected, or "
+    "the angle has no language row yet). Write from the PRODUCT facts and blueprint "
+    "only - do not invent customer phrasing to fill this gap, and do not substitute "
+    "vocabulary from a different angle."
+)
 
 PRODUCT_FACT_KEYS = ("name", "description", "ingredients", "hero_claim")
 
@@ -99,6 +108,50 @@ def _product_facts(product):
     facts = {k: product.get(k) for k in PRODUCT_FACT_KEYS
              if str(product.get(k) or "").strip()}
     return json.dumps(facts, indent=2) if facts else NO_PRODUCT
+
+
+def _angle_language_clause(angle_language):
+    """angle_language is a plain dict shaped like dedupe.get_angle_language()'s return
+    value (or None) - this module never imports dedupe; the caller (pipeline.py) does
+    the lookup and hands over a dict or None. Deliberately NOT flattened into one bag of
+    "angle vocabulary": common_phrases is safe to write from directly (the customer's own
+    problem language); core_angle/main_pain_point set tone but must never be echoed
+    verbatim; result_phrases/main_benefit are customer-REPORTED outcomes that Besque
+    cannot assert in its own voice without becoming an unsubstantiated efficacy claim
+    (compliance rule C2 above) - permissible only inside a real stored quote, which this
+    prompt does not produce (that's select_testimonial_review, image path only).
+    image_direction and best_verbatims are never read here at all - image_direction is
+    image-path-only context, and quote sourcing for best_verbatims-shaped content stays
+    with select_testimonial_review, not this prompt."""
+    if not angle_language:
+        return NO_ANGLE_LANGUAGE
+    common_phrases = angle_language.get("common_phrases") or []
+    result_phrases = angle_language.get("result_phrases") or []
+    phrase_lines = "\n".join(f"- {p}" for p in common_phrases) or "(none)"
+    result_line = ", ".join(result_phrases) if result_phrases else "(none)"
+    return (
+        "TIER 1 - WRITE FROM THIS. The customer's own words for her PROBLEM:\n"
+        f"{phrase_lines}\n"
+        "Prefer selecting and lightly adapting a phrase from this list over inventing new "
+        "phrasing - this is the primary source of headline and hook language.\n\n"
+        "TIER 2 - TONE ONLY, NEVER EMIT. Context for the emotional register the copy must "
+        "sit inside. No sentence from this tier may appear in the output, verbatim or "
+        "reworded, as a claim or otherwise:\n"
+        f"Core angle: {angle_language.get('core_angle') or '(none)'}\n"
+        f"Main pain point: {angle_language.get('main_pain_point') or '(none)'}\n\n"
+        "TIER 3 - REFERENCE ONLY, EXPLICITLY FORBIDDEN AS COPY. Customer-reported "
+        "OUTCOMES, not a Besque claim:\n"
+        f"Result phrases: {result_line}\n"
+        f"Main benefit: {angle_language.get('main_benefit') or '(none)'}\n"
+        "These describe where the angle leads, and may inform which problem phrase you "
+        "choose from TIER 1, but no result phrase and no benefit sentence may appear in "
+        "the headline, image_subtext, primary_text, or any other brand-voice copy. They "
+        "are only ever permissible inside a REAL stored customer quote - this call does "
+        "not produce one.\n\n"
+        "No statistic and no timeframe (e.g. \"two weeks\", \"27 days\", \"3 months\") may "
+        "appear anywhere in this copy unless it is present in a real stored quote - none "
+        "is supplied to this call, regardless of how many appear in the angle language above."
+    )
 
 
 # zone_types that carry per-panel copy in a multi-panel comparison layout (structural_zones,
@@ -151,7 +204,8 @@ def _panel_copy_clause(panels):
 
 
 def build_copy_prompt(blueprint, brand_voice="", approved_claims="", product=None,
-                       approved_testimonials="", compliance_feedback=None, offer_text=""):
+                       approved_testimonials="", compliance_feedback=None, offer_text="",
+                       angle_language=None):
     """compliance_feedback is the list of issue strings from a prior failed
     check_compliance call - only passed on a retry, so it's appended as an explicit
     revision instruction rather than a template placeholder that's usually empty.
@@ -159,6 +213,15 @@ def build_copy_prompt(blueprint, brand_voice="", approved_claims="", product=Non
     offer_text is the per-run operator input (dashboard run-strip control, threaded
     exactly like realism/body_area) - never sourced from blueprint.offer, which is the
     competitor's own offer, not an authorized Besque one.
+
+    angle_language is a plain dict (dedupe.get_angle_language()'s shape) or None - the
+    caller (pipeline.py) resolves it from the selected messaging angle's slug; this
+    module has no dedupe dependency and never guesses a substitute when it's None (no
+    angle selected, or the angle has no language row). See _angle_language_clause for
+    the three-tier treatment: common_phrases is safe to write from, core_angle/
+    main_pain_point are tone-only, result_phrases/main_benefit are explicitly forbidden
+    as copy (unsubstantiated efficacy claims). image_direction/best_verbatims are never
+    read from this dict - image-path-only and select_testimonial_review's job, respectively.
 
     panel_copy (2026-08-06) is appended the same additive way as compliance_feedback below
     - present only when comparison_panels(blueprint) finds a real multi-panel layout, so
@@ -172,6 +235,7 @@ def build_copy_prompt(blueprint, brand_voice="", approved_claims="", product=Non
         blueprint=json.dumps(blueprint, indent=2),
         product_info=_product_facts(product),
         offer_clause=_offer_clause(offer_text),
+        angle_language_clause=_angle_language_clause(angle_language),
     )
     panels = comparison_panels(blueprint)
     if panels:
@@ -247,17 +311,22 @@ def _log_parse_failure(attempt, total, max_tokens, message, raw_text, exc):
 
 
 def generate_copy_live(blueprint, brand_voice="", approved_claims="", product=None,
-                        approved_testimonials="", compliance_feedback=None, offer_text=""):
+                        approved_testimonials="", compliance_feedback=None, offer_text="",
+                        angle_language=None):
     """Send a blueprint to Claude and return validated Besque-adapted copy.
 
     Normally ONE API call. If the response cannot be parsed into the required fields,
     retries ONCE with a larger max_tokens and a JSON-only system prompt. Raises if the
     retry fails too. (compliance_feedback is a separate, outer retry driven by
     pipeline.py's fail-soft loop after a compliance check - not this JSON-parsing retry.)
-    """
+
+    angle_language: see build_copy_prompt's docstring - forwarded straight through,
+    None reproduces today's exact prompt (plus the new ANGLE LANGUAGE section's
+    "none supplied" fallback text - see NO_ANGLE_LANGUAGE)."""
     prompt = build_copy_prompt(blueprint, brand_voice, approved_claims, product=product,
                                 approved_testimonials=approved_testimonials,
-                                compliance_feedback=compliance_feedback, offer_text=offer_text)
+                                compliance_feedback=compliance_feedback, offer_text=offer_text,
+                                angle_language=angle_language)
     client = anthropic.Anthropic(timeout=60.0, max_retries=1)  # reads ANTHROPIC_API_KEY from env
 
     total = len(_COPY_ATTEMPTS)
