@@ -28,7 +28,7 @@ draft instead of the current one.
 Usage:
     python export_drafts.py [--competitor-id ID] [--angle NAME_OR_ID]
                              [--since ISO_DATE_OR_TIMESTAMP] [--limit N]
-                             [--out DIR] [--include-reference]
+                             [--out DIR] [--include-reference] [--include-failed]
 """
 import argparse
 import csv
@@ -98,20 +98,51 @@ def _parse_since(since_arg):
         raise ValueError(f"--since {since_arg!r} is not a valid ISO date/timestamp (e.g. 2026-08-04)")
 
 
-def fetch_rows(competitor_id=None, angle_arg=None, since_arg=None, limit=None):
+def fetch_rows(competitor_id=None, angle_arg=None, since_arg=None, limit=None, include_failed=False):
     """Read-only query. Mirrors dashboard.py's own get_artifacts_full LATERAL
     join pattern for the latest review decision per (ad_id, angle_id) - written
     fresh here rather than importing dashboard.py, per this script's own
-    constraint of never touching it."""
+    constraint of never touching it.
+
+    include_failed=False (default) excludes review_status='failed-review' artifacts - a
+    draft the output critic still found HIGH-confidence after its one corrective retry
+    must never reach Harry silently alongside everything else; --include-failed opts
+    back in explicitly, per operator choice, never by default. Returns
+    (rows, excluded_count) - excluded_count is how many rows matching the OTHER filters
+    (competitor/angle/since) were left out purely for being failed-review, counted
+    independently of --limit, so it reflects the true number skipped, never one
+    truncated by the export cap."""
     competitor_name = _resolve_competitor_name(competitor_id)
     angle_id, angle_name = _resolve_angle(angle_arg)
     since_dt = _parse_since(since_arg)
 
     angles_by_id = {a["id"]: a["name"] for a in dedupe.get_angles()}
 
+    base_where = ""
+    params = []
+    if competitor_name:
+        base_where += " AND a.page_name ILIKE %s"
+        params.append(competitor_name)
+    if angle_id is not None:
+        base_where += " AND a.angle_id = %s"
+        params.append(angle_id)
+    if since_dt is not None:
+        base_where += " AND a.created_at >= %s"
+        params.append(since_dt)
+
+    excluded_count = 0
+    if not include_failed:
+        with dedupe.get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM artifacts a WHERE 1=1" + base_where +
+                " AND a.review_status = 'failed-review'",
+                params,
+            )
+            excluded_count = cur.fetchone()[0]
+
     query = """
         SELECT a.id, a.ad_id, a.page_name, a.image_path, a.draft_image, a.created_at,
-               a.angle_id, a.critic_findings, d.decision,
+               a.angle_id, a.critic_findings, a.review_status, d.decision,
                a.generated_copy->>'headline' AS headline,
                a.generated_copy->>'image_subtext' AS image_subtext
         FROM artifacts a
@@ -121,30 +152,23 @@ def fetch_rows(competitor_id=None, angle_arg=None, since_arg=None, limit=None):
             ORDER BY decided_at DESC LIMIT 1
         ) d ON true
         WHERE 1=1
-    """
-    params = []
-    if competitor_name:
-        query += " AND a.page_name ILIKE %s"
-        params.append(competitor_name)
-    if angle_id is not None:
-        query += " AND a.angle_id = %s"
-        params.append(angle_id)
-    if since_dt is not None:
-        query += " AND a.created_at >= %s"
-        params.append(since_dt)
+    """ + base_where
+    query_params = list(params)
+    if not include_failed:
+        query += " AND a.review_status != 'failed-review'"
     query += " ORDER BY a.created_at DESC"
     if limit is not None:
         query += " LIMIT %s"
-        params.append(limit)
+        query_params.append(limit)
 
     with dedupe.get_conn() as conn, conn.cursor() as cur:
-        cur.execute(query, params)
+        cur.execute(query, query_params)
         cols = ["id", "ad_id", "page_name", "image_path", "draft_image", "created_at",
-                "angle_id", "critic_findings", "decision", "headline", "image_subtext"]
+                "angle_id", "critic_findings", "review_status", "decision", "headline", "image_subtext"]
         rows = [dict(zip(cols, r)) for r in cur.fetchall()]
     for r in rows:
         r["angle_name"] = angles_by_id.get(r["angle_id"], "") if r["angle_id"] else ""
-    return rows
+    return rows, excluded_count
 
 
 def check_gcs_auth():
@@ -209,13 +233,20 @@ def main():
     parser.add_argument("--limit", type=int, default=None, help="default: no limit")
     parser.add_argument("--out", default=None, help="default: ./exports/<timestamp>/")
     parser.add_argument("--include-reference", action="store_true")
+    parser.add_argument("--include-failed", action="store_true",
+                         help="Include artifacts marked failed-review (excluded by default).")
     args = parser.parse_args()
 
     try:
-        rows = fetch_rows(args.competitor_id, args.angle, args.since, args.limit)
+        rows, excluded_count = fetch_rows(args.competitor_id, args.angle, args.since, args.limit,
+                                           include_failed=args.include_failed)
     except ValueError as e:
         print(f"ERROR: {e}")
         sys.exit(1)
+
+    if not args.include_failed:
+        print(f"Excluded {excluded_count} failed-review artifact(s) "
+              f"(use --include-failed to include them).")
 
     if not rows:
         print("No matching artifacts found - nothing to export.")

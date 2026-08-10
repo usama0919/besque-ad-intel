@@ -882,7 +882,7 @@ def test_process_ad_calls_critic_after_save_artifact_when_check_output_on(monkey
     monkeypatch.setattr(pipeline.output_critic, "check_draft", fake_check_draft)
     findings_calls = []
     monkeypatch.setattr(pipeline.dedupe, "update_artifact_findings",
-                        lambda ad_id, findings, angle_id=None: findings_calls.append((ad_id, findings, angle_id)))
+                        lambda ad_id, findings, angle_id=None, review_status="ok": findings_calls.append((ad_id, findings, angle_id)))
 
     assert pipeline.process_ad(ad, check_output=True) == "processed"
     # save_artifact must happen BEFORE check_draft - never before, per the safety
@@ -1104,7 +1104,7 @@ def test_process_ad_one_high_finding_triggers_exactly_one_retry_with_corrections
     monkeypatch.setattr(pipeline.dedupe, "save_artifact", lambda **k: saved.update(k))
     findings_calls = []
     monkeypatch.setattr(pipeline.dedupe, "update_artifact_findings",
-                        lambda ad_id, findings, angle_id=None: findings_calls.append(findings))
+                        lambda ad_id, findings, angle_id=None, review_status="ok": findings_calls.append(findings))
 
     draft_v1 = tmp_path / "draft_v1.png"
     draft_v1.write_bytes(b"\x89PNG\r\n\x1a\nv1")
@@ -1158,9 +1158,10 @@ def test_process_ad_retry_still_high_persists_as_failed_review_and_excluded_from
 
     fake_rows = {}
     def fake_save_artifact(**k):
-        fake_rows[k["ad_id"]] = {**k, "critic_findings": [], "decision": None}
-    def fake_update_artifact_findings(aid, findings, angle_id=None):
+        fake_rows[k["ad_id"]] = {**k, "critic_findings": [], "review_status": "ok", "decision": None}
+    def fake_update_artifact_findings(aid, findings, angle_id=None, review_status="ok"):
         fake_rows[aid]["critic_findings"] = findings
+        fake_rows[aid]["review_status"] = review_status
     monkeypatch.setattr(pipeline.dedupe, "save_artifact", fake_save_artifact)
     monkeypatch.setattr(pipeline.dedupe, "update_artifact_findings", fake_update_artifact_findings)
     monkeypatch.setattr(dedupe, "get_artifacts_full", lambda limit=500: list(fake_rows.values()))
@@ -1168,6 +1169,7 @@ def test_process_ad_retry_still_high_persists_as_failed_review_and_excluded_from
     assert pipeline.process_ad(ad, check_output=True) == "processed"
     assert fake_rows[ad_id]["draft_image"] == str(draft_path)  # saved, never discarded
     assert fake_rows[ad_id]["critic_findings"] == high_finding
+    assert fake_rows[ad_id]["review_status"] == "failed-review"  # the actual mechanism
     assert any(kind == "critic_high_after_retry" for kind, detail in warnings)
 
     pending = dedupe.get_pending_artifacts()
@@ -1183,7 +1185,7 @@ def test_process_ad_retry_comes_back_clean_persists_normally(monkeypatch, tmp_pa
     monkeypatch.setattr(pipeline.dedupe, "save_artifact", lambda **k: saved.update(k))
     findings_calls = []
     monkeypatch.setattr(pipeline.dedupe, "update_artifact_findings",
-                        lambda ad_id, findings, angle_id=None: findings_calls.append(findings))
+                        lambda ad_id, findings, angle_id=None, review_status="ok": findings_calls.append((findings, review_status)))
     warnings = []
     monkeypatch.setattr(pipeline.dedupe, "record_warning", lambda kind, detail: warnings.append((kind, detail)))
 
@@ -1202,7 +1204,7 @@ def test_process_ad_retry_comes_back_clean_persists_normally(monkeypatch, tmp_pa
 
     assert pipeline.process_ad(ad, check_output=True) == "processed"
     assert len(check_calls) == 2  # first attempt flagged, retry re-checked
-    assert findings_calls == [[]]
+    assert findings_calls == [([], "ok")]  # clean draft -> review_status stays 'ok'
     assert not any(kind == "critic_high_after_retry" for kind, detail in warnings)
     assert saved["draft_image"] == str(draft_path)
 

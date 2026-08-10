@@ -46,6 +46,7 @@
   .badge.approve { background:#e3f5e9; color:#1a7f42; }
   .badge.reject { background:#fbe6e6; color:#c0392b; }
   .badge.pending { background:#f0ece4; color:#999; }
+  .badge.failed-review { background:#fff3cd; color:#8a6100; }
   .split { display:grid; grid-template-columns:1fr 1fr; }
   .side { padding:18px; }
   .side.orig { border-right:1px solid #f0ece4; background:#fafafa; }
@@ -507,7 +508,16 @@ function renderCards(data){
     const badge = catBadge(bp) + ' ' + angleBadge + ' '
       + (dec==='approve'?'<span class="badge approve">Approved</span>'
       : dec==='reject'?'<span class="badge reject">Rejected</span>'
-      : '<span class="badge pending">Pending</span>');
+      : '<span class="badge pending">Pending</span>')
+      // Critic gate (2026-08-10): review_status is a SEPARATE axis from the human
+      // decision above - a draft can be Pending/Approved/Rejected AND failed-review at
+      // the same time. Driven directly by the stored review_status field, never
+      // re-derived from critic_findings/confidence client-side (that split is exactly
+      // what let this go unmarked before - see pipeline.py's comment at the
+      // HIGH-after-retry branch).
+      + (a.review_status==='failed-review'
+          ? ' <span class="badge failed-review" title="Output critic still found high-confidence issue(s) after one corrective retry">Failed Review</span>'
+          : '');
     const orig = a.original_image?`<img onerror="imgFallback(this)" src="${a.original_image}">`:'';
     const draft = a.draft_image
       ? `<div class="draft-wrap"><img onerror="imgFallback(this)" src="${a.draft_image}">${ovLayer(a)}</div>${ovToggles(a)}`

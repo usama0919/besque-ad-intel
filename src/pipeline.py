@@ -1014,6 +1014,7 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
         # generated, unflagged, same fallback as before this loop existed.
         MAX_IMAGE_ATTEMPTS = 2
         draft_image, img_prompt, findings = None, "", None
+        review_status = "ok"
         for image_attempt in range(1, MAX_IMAGE_ATTEMPTS + 1):
             gen_kwargs = {}
             if image_attempt > 1:
@@ -1159,10 +1160,15 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
             if not output_critic.has_high_confidence(findings):
                 break  # clean, or medium/low only - keep this draft
             if image_attempt >= MAX_IMAGE_ATTEMPTS:
-                # Retry exhausted and still HIGH: never discard the draft, but it must
-                # never sit in the pending queue looking clean either - findings (already
-                # holding the HIGH entries) is exactly what dashboard.html's card keys off
-                # to show "Failed Review" instead of a normal pending card.
+                # Retry exhausted and still HIGH: never discard the draft, but mark it
+                # review_status='failed-review' (2026-08-10) so it can never look clean.
+                # Confirmed live before this fix: ad 820540537722129 saved with no
+                # failure signal anywhere - critic_findings alone was NOT read by
+                # dashboard.html to drive any card state (that claim, made here
+                # previously, was wrong); review_status is the actual mechanism, written
+                # in the same call as the findings below, and rendered as a distinct
+                # "Failed Review" badge in dashboard.html (see templates/dashboard.html).
+                review_status = "failed-review"
                 dedupe.init_pipeline_warnings()
                 dedupe.record_warning(
                     "critic_high_after_retry",
@@ -1218,7 +1224,7 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
         # verdict (failure/timeout) - distinct from an empty list (checked, clean), which
         # still needs writing so critic_findings reflects an actual clean check.
         if findings is not None:
-            dedupe.update_artifact_findings(ad_id, findings, angle_id=angle_id)
+            dedupe.update_artifact_findings(ad_id, findings, angle_id=angle_id, review_status=review_status)
 
         dedupe.mark_seen(ad_id, ad.get("page_name", ""), angle_id)
 

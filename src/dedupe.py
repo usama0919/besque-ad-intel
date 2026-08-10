@@ -241,7 +241,8 @@ def init_artifacts():
                 operator_instruction TEXT DEFAULT '',
                 critic_findings JSONB DEFAULT '[]',
                 format_flag TEXT DEFAULT '',
-                product_override_note TEXT DEFAULT ''
+                product_override_note TEXT DEFAULT '',
+                review_status TEXT DEFAULT 'ok'
             )
         """)
         # Self-migrating: unlike angle_id/text_in_image/category before it (which each
@@ -292,6 +293,14 @@ def init_artifacts():
         # element took, not just that generation happened. DEFAULT '{}' so a
         # pre-migration row reads as "nothing recorded", never guessed.
         cur.execute("ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS element_provenance JSONB DEFAULT '{}'")
+        # review_status (critic gate, 2026-08-10): 'ok' | 'failed-review'. Written by
+        # update_artifact_findings in the SAME statement as critic_findings, from
+        # process_ad's HIGH-after-retry branch - the flag and the findings that justify
+        # it land together, never one without the other. A DEFAULT (not nullable-by-
+        # design like realism/body_area) so this ADD COLUMN backfills every existing row
+        # to 'ok' - the 4 Aug schema gap (a column present in CREATE TABLE but never
+        # added via ALTER, so unreproducible against a fresh DB) must not repeat here.
+        cur.execute("ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS review_status TEXT DEFAULT 'ok'")
         conn.commit()
 
 
@@ -452,7 +461,8 @@ def get_artifacts_full(limit=50):
                    a.generated_copy, a.draft_image, a.metadata, a.created_at,
                    d.decision, a.image_prompt, a.copy_prompt, a.model_info,
                    a.angle_id, a.text_in_image, a.operator_instruction, a.critic_findings,
-                   a.format_flag, a.product_override_note, a.element_provenance
+                   a.format_flag, a.product_override_note, a.element_provenance,
+                   a.review_status
             FROM artifacts a
             LEFT JOIN LATERAL (
                 SELECT decision FROM review_decisions r
@@ -466,7 +476,8 @@ def get_artifacts_full(limit=50):
                 "draft_image", "metadata", "created_at", "decision",
                 "image_prompt", "copy_prompt", "model_info",
                 "angle_id", "text_in_image", "operator_instruction", "critic_findings",
-                "format_flag", "product_override_note", "element_provenance"]
+                "format_flag", "product_override_note", "element_provenance",
+                "review_status"]
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
@@ -1085,14 +1096,20 @@ def update_artifact_image_prompt(ad_id, image_prompt, angle_id=None):
         conn.commit()
 
 
-def update_artifact_findings(ad_id, findings, angle_id=None):
+def update_artifact_findings(ad_id, findings, angle_id=None, review_status="ok"):
     """Replace the output critic's findings for one (ad_id, angle_id) artifact - REPLACES
     wholesale, never accumulates, so a regenerate's findings reflect only the CURRENT
-    draft, not a stale one still describing a violation that's no longer there."""
+    draft, not a stale one still describing a violation that's no longer there.
+
+    review_status ('ok' default, or 'failed-review') is written in the SAME UPDATE as
+    findings, atomically - process_ad's HIGH-after-retry branch passes 'failed-review'
+    so a reviewer can never see the still-bad findings without the flag, or the flag
+    without the findings that justify it."""
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
-            "UPDATE artifacts SET critic_findings=%s WHERE ad_id=%s AND angle_id IS NOT DISTINCT FROM %s",
-            (_json.dumps(findings or []), ad_id, angle_id),
+            "UPDATE artifacts SET critic_findings=%s, review_status=%s "
+            "WHERE ad_id=%s AND angle_id IS NOT DISTINCT FROM %s",
+            (_json.dumps(findings or []), review_status, ad_id, angle_id),
         )
         conn.commit()
 

@@ -137,6 +137,11 @@ def api_artifacts():
             # substitute, so include_product was overridden off for this draft even
             # though the operator asked for one.
             "product_override_note": r.get("product_override_note") or "",
+            # Critic gate (2026-08-10): 'ok' | 'failed-review' - written by
+            # update_artifact_findings when the corrective retry still comes back
+            # HIGH-confidence. Drives dashboard.html's Failed Review badge directly;
+            # the template never re-derives this from critic_findings/confidence itself.
+            "review_status": r.get("review_status") or "ok",
         })
     return JSONResponse(out)
 
