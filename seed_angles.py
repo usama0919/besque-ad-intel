@@ -45,6 +45,7 @@ ANGLES = [
 
 def main():
     dedupe.init_angles()
+    dedupe.init_angle_language()
     existing_slugs = {a["slug"] for a in dedupe.get_angles()}
     for angle in ANGLES:
         if angle["slug"] in existing_slugs:

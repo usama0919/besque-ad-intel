@@ -7,6 +7,7 @@ from src import dedupe
 
 def _make_angle(**kw):
     dedupe.init_angles()
+    dedupe.init_angle_language()
     name = f"__test_{uuid.uuid4().hex[:8]}__"
     slug = f"test_{uuid.uuid4().hex[:8]}"
     return dedupe.add_angle(name, slug, **kw)

@@ -487,6 +487,7 @@ def test_run_once_forwards_should_stop_to_process_ad(monkeypatch):
     dedupe.init_competitors()
     dedupe.init_products()
     dedupe.init_angles()
+    dedupe.init_angle_language()
     dedupe.init_run_progress()
     ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
     monkeypatch.setattr(pipeline.dedupe, "get_competitors",

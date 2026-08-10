@@ -340,6 +340,7 @@ def generate_from_selection(ad_ids, angle_id=None, body_area=None, offer_text=No
     dedupe.init_artifacts()
     dedupe.init_scraped_ads()
     dedupe.init_angles()
+    dedupe.init_angle_language()
     dedupe.init_products()
 
     def _report(ad_id, result):
@@ -1276,6 +1277,7 @@ def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product
     dedupe.init_competitors()
     dedupe.init_products()
     dedupe.init_angles()
+    dedupe.init_angle_language()
     product = dedupe.get_product(product_id) if product_id else None
     messaging_angle = dedupe.get_angle(angle_id) if angle_id else None
     reference_images = []

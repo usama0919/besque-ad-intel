@@ -685,11 +685,12 @@ def get_classified_review_ids():
 # vocabulary docs/angle_language.md supplies: a TABLE keyed on angle slug, not a column,
 # because it's an independent axis from the angles table's own operator-curated
 # defaults (body_area/default_realism/includes_product) - this is text content, angles
-# is generation config. SCHEMA ONLY as of this commit: docs/angle_language.md did not
-# exist in the repo when this was designed (confirmed: no docs/ directory at all) and is
-# being authored now - no row has been inserted, and none of this content is invented.
+# is generation config. Source doc is now committed at docs/angle_language.md - see
+# that file for the six angles' core_angle/causes/main_pain_point/main_benefit/
+# common_phrases/result_phrases/image_direction content, and its override note on
+# why the doc's own Step 3/Step 4 sections must never be encoded into a prompt.
 # headline/subtext generation in generate_copy.py stay documented stubs until a loader
-# populates this table from the real doc. ----
+# populates this table from the doc. ----
 
 def init_angle_language():
     """Create the angle_language table if missing. angle_slug REFERENCES angles(slug) so

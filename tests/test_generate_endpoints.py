@@ -338,6 +338,7 @@ def test_api_pool_cards_already_generated_is_angle_specific():
     dedupe.init_scraped_ads()
     dedupe.init_artifacts()
     dedupe.init_angles()
+    dedupe.init_angle_language()
     cid = _make_competitor()
     ad_id = _seed_scraped_ad(cid)
     angle_a = dedupe.add_angle("Angle A", f"angle-a-{uuid.uuid4().hex[:6]}")

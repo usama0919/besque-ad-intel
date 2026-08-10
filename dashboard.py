@@ -72,6 +72,7 @@ def pool_page(request: Request):
 def api_artifacts():
     dedupe.init_artifacts()
     dedupe.init_angles()
+    dedupe.init_angle_language()
     rows = dedupe.get_artifacts_full(limit=500)
     # id -> angle dict, so each card can show which angle it was generated for without
     # a per-row lookup. Small table, fetched once per request.
@@ -680,6 +681,7 @@ async def api_update_brand_settings(request: Request):
 @app.get("/api/angles")
 def api_angles():
     dedupe.init_angles()
+    dedupe.init_angle_language()
     return JSONResponse(dedupe.get_angles())
 
 
