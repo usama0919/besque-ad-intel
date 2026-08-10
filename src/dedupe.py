@@ -1080,11 +1080,18 @@ def init_scraped_ads():
 
 
 def upsert_scraped_ad(ad_id, competitor_id, image_url, raw_meta, media_type=""):
-    """Insert one scraped ad into the pool, or refresh raw_meta/media_type/fetched_at
-    if this exact (ad_id, competitor_id) pair is already stored. A direct upsert on
-    the pool's own unique index - NOT update_competitor's read-modify-write shape,
-    which wiped six verified page_ids once already (see CLAUDE.md); there is no
+    """Insert one scraped ad into the pool, or refresh image_url/raw_meta/media_type/
+    fetched_at if this exact (ad_id, competitor_id) pair is already stored. A direct
+    upsert on the pool's own unique index - NOT update_competitor's read-modify-write
+    shape, which wiped six verified page_ids once already (see CLAUDE.md); there is no
     partial-field update path here to get wrong.
+
+    image_url IS refreshed on conflict (2026-08-10) - Apify returns a fresh image_url
+    on every re-fetch, but the prior UPDATE discarded it and kept whatever was stored
+    from the FIRST fetch. fbcdn URLs die within hours, so once a row's stored URL
+    expired, no later re-fetch could ever heal it - the pool card would show
+    "Image unavailable" forever, even though Apify itself was handing back a live URL
+    on every subsequent run.
 
     Stores exactly ONE row per (ad_id, competitor_id) even when the source record
     carries multiple images (a DCO/CAROUSEL variant set) - image_url is always the
@@ -1096,7 +1103,8 @@ def upsert_scraped_ad(ad_id, competitor_id, image_url, raw_meta, media_type=""):
             """INSERT INTO scraped_ads (ad_id, competitor_id, image_url, raw_meta, media_type)
                VALUES (%s, %s, %s, %s, %s)
                ON CONFLICT (ad_id, competitor_id) DO UPDATE
-               SET raw_meta = EXCLUDED.raw_meta, media_type = EXCLUDED.media_type, fetched_at = now()""",
+               SET image_url = EXCLUDED.image_url, raw_meta = EXCLUDED.raw_meta,
+                   media_type = EXCLUDED.media_type, fetched_at = now()""",
             (ad_id, competitor_id, image_url, _json.dumps(raw_meta), media_type or ""),
         )
         conn.commit()

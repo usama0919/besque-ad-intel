@@ -37,6 +37,8 @@
   .pool-card.already-generated { border-color:#8a5a12; }
   .pool-card.already-generated.selected { border-color:#1a7f42; }
   .pool-card img { width:100%; height:160px; object-fit:cover; background:#f0ece4; display:block; }
+  .pool-thumb-broken { width:100%; height:160px; background:#f0ece4; display:flex; align-items:center;
+    justify-content:center; color:#999; font-size:12px; text-align:center; padding:0 12px; box-sizing:border-box; }
   .pool-card-body { padding:10px 12px; }
   .pool-card-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; gap:4px; }
   .media-type-badge { font-size:10px; font-weight:700; letter-spacing:0.5px; text-transform:uppercase; color:#666; background:#f0ece4; padding:2px 8px; border-radius:20px; }
@@ -458,7 +460,9 @@ function cardHtml(c){
     ? '<div class="pool-already-gen-note">Already generated for this angle - selecting will version &amp; replace it.</div>' : '';
   return `<div class="pool-card${sel}${alreadyGen}" data-ad-id="${esc(c.ad_id)}" onclick="toggleSelect(this,'${esc(c.ad_id)}')">
     <div class="pool-card-thumb">
-      <img loading="lazy" onerror="this.style.display='none'" src="${esc(c.image_url || '')}">
+      <img loading="lazy" referrerpolicy="no-referrer"
+           onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'pool-thumb-broken',textContent:'Image unavailable'}))"
+           src="${esc(c.image_url || '')}">
       <span class="check-mark">&check;</span>
     </div>
     <div class="pool-card-body">
