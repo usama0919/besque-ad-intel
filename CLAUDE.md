@@ -872,16 +872,24 @@ read into the copy prompt at all (image-path-only / `select_testimonial_review`'
 shows up in a real headline, the fix is deleting TIER 3 from the prompt, not adding more
 prohibition wording.
 
-### `products.description` trimmed; `hero_claim` NOT yet fixed — open
+### `products.description` trimmed; `hero_claim` blanked — both done 2026-08-10
 `products.description` (id=1) no longer asserts mechanism as fact — this is what the 4
 Aug "compliance false positive" entry (`"blend of 7 cold-pressed oils that"` flagged as a
 reused competitor phrase) actually was: not a false positive at all, but a real violation
 of the "mechanism never asserted outside a real quote" override, sitting in Besque's own
-product copy. **`hero_claim` is a separate, still-open gap**: verified live today via
-`dedupe.get_product(1)`, it still reads `"Visibly firms and tightens the skin with
-consistent use"` — an unsubstantiated efficacy claim handed to every copy/image prompt
-as an authoritative "Key claim." Discussed, not executed. Don't assume it's been dealt
-with; check the live value before relying on it for anything compliance-sensitive.
+product copy. **`hero_claim` blanked the same day** (verified via `dedupe.get_product(1)`:
+before `"Visibly firms and tightens the skin with consistent use"`, after `""`) — it had
+been an unsubstantiated efficacy claim handed to every copy/image prompt as an
+authoritative "Key claim." **It was live in the copy prompt for every draft generated
+earlier today**, before the blank; anything from today's session predating this fix may
+carry that claim baked into its `copy_prompt`/`generated_copy` — worth a spot-check if any
+of those drafts get promoted. Blank is a placeholder, not the intended end state: pending
+real `approved_claims` from Harry. Until those land, `generate_image_prompt.py`'s
+`build_image_prompt` (`"Key claim: {hero_claim}."` inside `product_desc`) renders that
+line empty rather than invented, and `generate_copy.py`'s `_product_facts` — which already
+drops any empty-string field before building the PRODUCT JSON blob — now omits
+`hero_claim` from the copy prompt entirely rather than sending an empty one. Correct
+fallback behaviour, not a fix in itself.
 
 ### Critic gate — `review_status`, badge, export exclusion, backfill, check-only regenerate
 Live trigger: ad `820540537722129` — critic attempt 1 found 2 HIGH findings, the
