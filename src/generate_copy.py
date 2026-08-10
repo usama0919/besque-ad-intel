@@ -36,7 +36,7 @@ APPROVED CLAIMS:
 APPROVED TESTIMONIALS:
 {approved_testimonials}
 
-PRODUCT (use ONLY these facts, never invent claims or ingredients):
+PRODUCT (a CONSTRAINT, not a copy source: bounds what may be CLAIMED about the product - use ONLY these facts when making any product claim, never invent claims or ingredients beyond them. This is NOT where headline or hook language comes from - that is TIER 1 in ANGLE LANGUAGE below):
 {product_info}
 
 ANGLE LANGUAGE (real customer language for the selected messaging angle, tiered strictly by how it may be used - see the tier rules inside):
@@ -122,7 +122,17 @@ def _angle_language_clause(angle_language):
     prompt does not produce (that's select_testimonial_review, image path only).
     image_direction and best_verbatims are never read here at all - image_direction is
     image-path-only context, and quote sourcing for best_verbatims-shaped content stays
-    with select_testimonial_review, not this prompt."""
+    with select_testimonial_review, not this prompt.
+
+    TIER 1 escalated from a preference to a REQUIREMENT (2026-08-10): two drafts from
+    the same angle behaved differently - one built its headline from a TIER 1 phrase,
+    the other fell back to paraphrasing products.description - because TIER 1 was
+    optional ("prefer...") while PRODUCT read like a legitimate copy source. TIER 1 is
+    now mandatory for the headline; no escape hatch for a "no fit" case was added (that
+    would mean a JSON schema change) - instead the model is told to pick the CLOSEST
+    phrase and adapt it, since these lists run 22-45 entries per angle, so a genuine
+    no-fit case isn't realistic. PRODUCT is reworded above to state outright that it's a
+    constraint, not a source - so the two sections no longer compete for the same job."""
     if not angle_language:
         return NO_ANGLE_LANGUAGE
     common_phrases = angle_language.get("common_phrases") or []
@@ -130,10 +140,14 @@ def _angle_language_clause(angle_language):
     phrase_lines = "\n".join(f"- {p}" for p in common_phrases) or "(none)"
     result_line = ", ".join(result_phrases) if result_phrases else "(none)"
     return (
-        "TIER 1 - WRITE FROM THIS. The customer's own words for her PROBLEM:\n"
+        "TIER 1 - WRITE FROM THIS (REQUIRED). The customer's own words for her PROBLEM:\n"
         f"{phrase_lines}\n"
-        "Prefer selecting and lightly adapting a phrase from this list over inventing new "
-        "phrasing - this is the primary source of headline and hook language.\n\n"
+        "The headline MUST be built from one of these phrases - selected, or adapted, "
+        "never invented from scratch and never a paraphrase of the PRODUCT facts below. "
+        "If no phrase is an exact fit for this reference's layout or format, select the "
+        "closest one and adapt it to fit - these lists run 22 to 45 entries per angle, "
+        "so there is always a usable one. The rule is absolute: the headline comes from "
+        "TIER 1, never from PRODUCT facts.\n\n"
         "TIER 2 - TONE ONLY, NEVER EMIT. Context for the emotional register the copy must "
         "sit inside. No sentence from this tier may appear in the output, verbatim or "
         "reworded, as a claim or otherwise:\n"
