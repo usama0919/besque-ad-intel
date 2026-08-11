@@ -1598,6 +1598,19 @@ def test_structural_zones_clause_badge_offer_shaped_removes_when_no_offer_text()
     assert "STRUCTURAL ZONES - SUBSTITUTE" not in clause
 
 
+def test_structural_zones_clause_badge_offer_shaped_removes_when_offer_text_empty_string():
+    """offer_text="" (as opposed to None) must still fall to removal, not be treated as a
+    supplied value - same empty/NULL/empty-list guard the field-driven substitutions share."""
+    clause, substituted = generate_image_prompt._structural_zones_clause(
+        [_szone("badge", detail="reads 'SAVE 16%'")], offer_text="",
+    )
+    assert substituted == set()
+    assert "STRUCTURAL ZONES - SUBSTITUTE" not in clause
+    assert "offer/discount badge" not in clause
+    assert "STRUCTURAL ZONES - REMOVE" in clause
+    assert "badge" in clause
+
+
 def test_structural_zones_clause_badge_cert_shaped_substitutes_with_certifications():
     clause, substituted = generate_image_prompt._structural_zones_clause(
         [_szone("badge", detail="USDA Organic certification seal")],
@@ -1605,6 +1618,19 @@ def test_structural_zones_clause_badge_cert_shaped_substitutes_with_certificatio
     )
     assert substituted == {"badge"}
     assert "Vegan, Cruelty Free, 100% Natural" in clause
+
+
+def test_structural_zones_clause_badge_cert_shaped_removes_when_certifications_empty_list():
+    """certifications=[] (as opposed to None) must still fall to removal - an empty list
+    is not a supplied counterpart."""
+    clause, substituted = generate_image_prompt._structural_zones_clause(
+        [_szone("badge", detail="USDA Organic certification seal")], certifications=[],
+    )
+    assert substituted == set()
+    assert "STRUCTURAL ZONES - SUBSTITUTE" not in clause
+    assert "certification badge" not in clause
+    assert "STRUCTURAL ZONES - REMOVE" in clause
+    assert "badge" in clause
 
 
 def test_structural_zones_clause_price_anchor_substitutes_with_offer_text():
@@ -1616,12 +1642,36 @@ def test_structural_zones_clause_price_anchor_substitutes_with_offer_text():
     assert "never the competitor's own price" in clause
 
 
+def test_structural_zones_clause_price_anchor_removes_when_offer_text_empty_string():
+    """offer_text="" must still fall to removal, not be treated as a supplied value."""
+    clause, substituted = generate_image_prompt._structural_zones_clause(
+        [_szone("price_anchor", detail="was $60, now $45")], offer_text="",
+    )
+    assert substituted == set()
+    assert "STRUCTURAL ZONES - SUBSTITUTE" not in clause
+    assert "never the competitor's own price" not in clause
+    assert "STRUCTURAL ZONES - REMOVE" in clause
+    assert "price_anchor" in clause
+
+
 def test_structural_zones_clause_product_callout_substitutes_with_product_name():
     clause, substituted = generate_image_prompt._structural_zones_clause(
         [_szone("product_callout", detail="reads 'New Scent'")], product_name="Besque Magic Body Oil",
     )
     assert substituted == {"product_callout"}
     assert "Besque Magic Body Oil" in clause
+
+
+def test_structural_zones_clause_product_callout_removes_when_product_name_empty_string():
+    """product_name="" must still fall to removal, not be treated as a supplied value."""
+    clause, substituted = generate_image_prompt._structural_zones_clause(
+        [_szone("product_callout", detail="reads 'New Scent'")], product_name="",
+    )
+    assert substituted == set()
+    assert "STRUCTURAL ZONES - SUBSTITUTE" not in clause
+    assert "our real product named honestly" not in clause
+    assert "STRUCTURAL ZONES - REMOVE" in clause
+    assert "product_callout" in clause
 
 
 def test_structural_zones_clause_social_proof_aggregate_bar_always_removed():
