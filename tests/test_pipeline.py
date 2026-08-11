@@ -38,6 +38,226 @@ def test_process_ad_full_flow_mocked(monkeypatch):
     assert dedupe.is_new(ad_id) is False
 
 
+# ---- clone mode (2026-08-11): per-ad realism/include_product/text_in_image/body_area/
+# offer_text derived from THIS ad's own blueprint, right after deconstruct returns -
+# captured via generate_image's own kwargs, the last point before the derived values
+# actually reach the paid call. save_artifact mocked away (same as _mock_all_stages) so
+# these need no artifacts cleanup, only seen_ads. ----
+
+def _mock_all_stages_capturing_image_kwargs(monkeypatch, blueprint):
+    monkeypatch.setattr(pipeline.assets, "download_image", lambda url, aid: "fake.jpg")
+    monkeypatch.setattr(pipeline.assets, "download_image_bytes", lambda url: b"fake-bytes")
+    monkeypatch.setattr(pipeline.deconstruct, "deconstruct_image", lambda **k: blueprint)
+    monkeypatch.setattr(pipeline.generate_copy, "generate_copy_live",
+                        lambda bp, product=None, **k: {"headline": "H", "primary_text": "P",
+                                                         "image_subtext": "S", "cta": "C"})
+    monkeypatch.setattr(pipeline.compliance, "check_compliance", lambda copy, name, text, **k: (True, []))
+    captured = {}
+
+    def fake_generate_image(bp, aid, product=None, reference_images=None, **k):
+        captured.update(k)
+        return "draft.png"
+    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image", fake_generate_image)
+    monkeypatch.setattr(pipeline.slack_review, "post_review", lambda *a, **k: {"ts": "123"})
+    monkeypatch.setattr(pipeline.dedupe, "save_artifact", lambda **k: None)
+    return captured
+
+
+def _clone_mode_ad():
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    return ad_id, {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+                   "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+
+
+def _clone_mode_cleanup(ad_id):
+    with dedupe.get_conn() as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM seen_ads WHERE ad_id=%s", (ad_id,))
+        conn.commit()
+
+
+def test_process_ad_clone_mode_derives_realism_from_blueprint(monkeypatch):
+    dedupe.init_db()
+    ad_id, ad = _clone_mode_ad()
+    blueprint = {"format": "hero", "production_style": {"style": "illustrated"}}
+    captured = _mock_all_stages_capturing_image_kwargs(monkeypatch, blueprint)
+    try:
+        assert pipeline.process_ad(ad, realism="ugc_native", clone_mode=True) == "processed"
+        assert captured["realism"] == "illustrated"
+    finally:
+        _clone_mode_cleanup(ad_id)
+
+
+def test_process_ad_clone_mode_retains_run_strip_realism_when_blueprint_has_none(monkeypatch):
+    dedupe.init_db()
+    ad_id, ad = _clone_mode_ad()
+    blueprint = {"format": "hero"}  # no production_style key at all
+    captured = _mock_all_stages_capturing_image_kwargs(monkeypatch, blueprint)
+    try:
+        assert pipeline.process_ad(ad, realism="ugc_native", clone_mode=True) == "processed"
+        assert captured["realism"] == "ugc_native"
+    finally:
+        _clone_mode_cleanup(ad_id)
+
+
+def test_process_ad_clone_mode_derives_include_product_true(monkeypatch):
+    dedupe.init_db()
+    ad_id, ad = _clone_mode_ad()
+    blueprint = {"format": "hero", "layout_detail": {"product_count": 1}}
+    captured = _mock_all_stages_capturing_image_kwargs(monkeypatch, blueprint)
+    try:
+        # run-strip explicitly says False - clone mode must still derive True from the blueprint
+        assert pipeline.process_ad(ad, include_product=False, clone_mode=True) == "processed"
+        assert captured["include_product"] is True
+    finally:
+        _clone_mode_cleanup(ad_id)
+
+
+def test_process_ad_clone_mode_derives_include_product_false(monkeypatch):
+    dedupe.init_db()
+    ad_id, ad = _clone_mode_ad()
+    blueprint = {"format": "hero", "layout_detail": {"product_count": 0}}
+    captured = _mock_all_stages_capturing_image_kwargs(monkeypatch, blueprint)
+    try:
+        # run-strip explicitly says True - clone mode must still derive False from the blueprint
+        assert pipeline.process_ad(ad, include_product=True, clone_mode=True) == "processed"
+        assert captured["include_product"] is False
+    finally:
+        _clone_mode_cleanup(ad_id)
+
+
+def test_process_ad_clone_mode_derives_text_in_image_true_for_headline(monkeypatch):
+    dedupe.init_db()
+    ad_id, ad = _clone_mode_ad()
+    blueprint = {"format": "hero", "headline_verbatim": "Feel confident again"}
+    captured = _mock_all_stages_capturing_image_kwargs(monkeypatch, blueprint)
+    try:
+        assert pipeline.process_ad(ad, text_in_image=False, clone_mode=True) == "processed"
+        assert captured["text_in_image"] is True
+    finally:
+        _clone_mode_cleanup(ad_id)
+
+
+def test_process_ad_clone_mode_derives_text_in_image_false_when_no_text_zone(monkeypatch):
+    dedupe.init_db()
+    ad_id, ad = _clone_mode_ad()
+    blueprint = {"format": "hero"}  # no headline_verbatim, no structural_zones
+    captured = _mock_all_stages_capturing_image_kwargs(monkeypatch, blueprint)
+    try:
+        assert pipeline.process_ad(ad, text_in_image=True, clone_mode=True) == "processed"
+        assert captured["text_in_image"] is False
+    finally:
+        _clone_mode_cleanup(ad_id)
+
+
+def test_process_ad_clone_mode_forces_body_area_none_when_no_human_subject(monkeypatch):
+    dedupe.init_db()
+    ad_id, ad = _clone_mode_ad()
+    blueprint = {"format": "hero", "body_area_shown": "none"}
+    captured = _mock_all_stages_capturing_image_kwargs(monkeypatch, blueprint)
+    try:
+        assert pipeline.process_ad(ad, body_area="knees", clone_mode=True) == "processed"
+        assert captured["body_area"] is None
+    finally:
+        _clone_mode_cleanup(ad_id)
+
+
+def test_process_ad_clone_mode_derives_body_area_from_blueprint(monkeypatch):
+    dedupe.init_db()
+    ad_id, ad = _clone_mode_ad()
+    blueprint = {"format": "hero", "body_area_shown": "legs"}
+    captured = _mock_all_stages_capturing_image_kwargs(monkeypatch, blueprint)
+    try:
+        assert pipeline.process_ad(ad, body_area=None, clone_mode=True) == "processed"
+        assert captured["body_area"] == "legs"
+    finally:
+        _clone_mode_cleanup(ad_id)
+
+
+def test_process_ad_clone_mode_retains_run_strip_body_area_when_blueprint_lacks_field(monkeypatch):
+    dedupe.init_db()
+    ad_id, ad = _clone_mode_ad()
+    blueprint = {"format": "hero"}  # no body_area_shown key at all - a pre-migration/older blueprint
+    captured = _mock_all_stages_capturing_image_kwargs(monkeypatch, blueprint)
+    try:
+        assert pipeline.process_ad(ad, body_area="knees", clone_mode=True) == "processed"
+        assert captured["body_area"] == "knees"
+    finally:
+        _clone_mode_cleanup(ad_id)
+
+
+def test_process_ad_clone_mode_suppresses_offer_when_no_offer_zone(monkeypatch):
+    dedupe.init_db()
+    ad_id, ad = _clone_mode_ad()
+    blueprint = {"format": "hero", "structural_zones": [
+        {"zone_type": "brand_wordmark", "position": "top", "container": "none", "detail": "OSEA"},
+    ]}
+    captured = _mock_all_stages_capturing_image_kwargs(monkeypatch, blueprint)
+    try:
+        assert pipeline.process_ad(ad, offer_text="20% off", clone_mode=True) == "processed"
+        assert captured["offer_text"] is None
+    finally:
+        _clone_mode_cleanup(ad_id)
+
+
+def test_process_ad_clone_mode_keeps_offer_when_offer_zone_present(monkeypatch):
+    dedupe.init_db()
+    ad_id, ad = _clone_mode_ad()
+    blueprint = {"format": "hero", "structural_zones": [
+        {"zone_type": "price_anchor", "position": "top", "container": "none", "detail": "was $60, now $45"},
+    ]}
+    captured = _mock_all_stages_capturing_image_kwargs(monkeypatch, blueprint)
+    try:
+        assert pipeline.process_ad(ad, offer_text="20% off", clone_mode=True) == "processed"
+        assert captured["offer_text"] == "20% off"
+    finally:
+        _clone_mode_cleanup(ad_id)
+
+
+def test_process_ad_clone_mode_ad_override_wins_for_realism(monkeypatch):
+    """An explicit per-ad override for THIS field must win over clone mode's own
+    blueprint-derived value - a deliberate per-card operator choice beats a heuristic."""
+    dedupe.init_db()
+    ad_id, ad = _clone_mode_ad()
+    blueprint = {"format": "hero", "production_style": {"style": "ugc_native"}}
+    captured = _mock_all_stages_capturing_image_kwargs(monkeypatch, blueprint)
+    try:
+        assert pipeline.process_ad(
+            ad, realism="high_spec_studio", clone_mode=True, ad_overrides={"realism": "high_spec_studio"},
+        ) == "processed"
+        assert captured["realism"] == "high_spec_studio"  # NOT overridden to ugc_native
+    finally:
+        _clone_mode_cleanup(ad_id)
+
+
+def test_process_ad_clone_mode_ad_override_wins_for_include_product(monkeypatch):
+    dedupe.init_db()
+    ad_id, ad = _clone_mode_ad()
+    blueprint = {"format": "hero", "layout_detail": {"product_count": 0}}  # would derive False
+    captured = _mock_all_stages_capturing_image_kwargs(monkeypatch, blueprint)
+    try:
+        assert pipeline.process_ad(
+            ad, include_product=True, clone_mode=True, ad_overrides={"include_product": True},
+        ) == "processed"
+        assert captured["include_product"] is True  # NOT overridden to False
+    finally:
+        _clone_mode_cleanup(ad_id)
+
+
+def test_process_ad_clone_mode_off_by_default_leaves_realism_unaffected(monkeypatch):
+    """clone_mode defaults False - nothing about this feature should change behaviour
+    for a caller that doesn't opt in, even with a blueprint that WOULD derive something
+    different."""
+    dedupe.init_db()
+    ad_id, ad = _clone_mode_ad()
+    blueprint = {"format": "hero", "production_style": {"style": "illustrated"}}
+    captured = _mock_all_stages_capturing_image_kwargs(monkeypatch, blueprint)
+    try:
+        assert pipeline.process_ad(ad, realism="ugc_native") == "processed"  # clone_mode omitted
+        assert captured["realism"] == "ugc_native"
+    finally:
+        _clone_mode_cleanup(ad_id)
+
+
 # ---- Regression guard (2026-08-05): every process_ad test above mocks
 # dedupe.save_artifact away via _mock_all_stages, so none of them can catch process_ad
 # passing a kwarg the REAL save_artifact doesn't accept (or vice versa) - a signature

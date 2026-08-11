@@ -273,7 +273,7 @@ def generate_from_selection(ad_ids, angle_id=None, body_area=None, offer_text=No
                              regenerate=False, on_ad_done=None,
                              text_in_image=False, include_product=None, edit_mode=None,
                              check_output=False, retheme_colours=None, realism=None,
-                             per_ad_overrides=None):
+                             per_ad_overrides=None, clone_mode=False):
     """Generate drafts for an EXPLICIT list of already-fetched ads, rather than
     driving generation off scrape order. No Apify call - fetch_pool already
     stored the pool; this only reads scraped_ads and calls process_ad per
@@ -322,6 +322,15 @@ def generate_from_selection(ad_ids, angle_id=None, body_area=None, offer_text=No
     stay run-level free text, not per-ad. An empty dict, an ad_id with no entry, or
     per_ad_overrides=None (the default) all behave identically to today - nothing here
     changes behaviour for a caller that doesn't pass this.
+
+    clone_mode (2026-08-11): OFF by default - nothing changes for a caller that doesn't
+    pass this. When True, realism/include_product/text_in_image/body_area/offer_text are
+    derived per ad from THAT ad's own blueprint instead of coming from one run strip
+    shared by every ad in the selection (see process_ad's own clone_mode docstring for
+    the derivation and precedence - run strip is the fallback for whatever the blueprint
+    can't answer, never an override of it; a per-ad override in per_ad_overrides always
+    wins over the blueprint-derived value). angle_id is NOT derived - it stays run-level,
+    same as always; a blueprint has no angle concept to read one from.
 
     used_headlines (2026-08-11, same-run copy convergence fix): one plain list, created
     HERE, the same object passed into every ad's process_ad call this run - process_ad
@@ -523,6 +532,7 @@ def generate_from_selection(ad_ids, angle_id=None, body_area=None, offer_text=No
             check_output=check_output, retheme_colours=retheme_colours, realism=realism,
             should_stop=should_stop, explicit_selection=True, regenerate=regenerate,
             config=cfg, used_headlines=used_headlines,
+            clone_mode=clone_mode, ad_overrides=ad_overrides,
         )
         dedupe.update_scraped_ad_status(ad_id, row["competitor_id"], result)
         summary[result] += 1
@@ -552,7 +562,7 @@ def resolve_regenerate_input(live_value, stored_value, default_value):
 def _regenerate_existing_draft(ad, angle_id, angle_slug, delta_instruction, should_stop,
                                 live_include_product=None, live_retheme_colours=None,
                                 live_realism=None, live_body_area=None, live_offer_text=None,
-                                check_output=False):
+                                check_output=False, clone_mode=False):
     """Apply delta_instruction as a targeted change to a prompt REBUILT from CURRENT code
     (generate_image_prompt.build_image_prompt) and the artifact's own stored inputs - never
     the artifact's frozen historical image_prompt text.
@@ -607,7 +617,25 @@ def _regenerate_existing_draft(ad, angle_id, angle_slug, delta_instruction, shou
     function was ever entered - so it preserves edit_mode correctly with no extra plumbing
     here. (Closes "regenerate requested but no existing artifact for angle_id=None" too -
     the same root cause: this function assumed history always exists once regenerate is
-    requested.)"""
+    requested.)
+
+    clone_mode (2026-08-11): improves the DEFAULT tier ONLY for include_product/realism/
+    body_area - live (this call's explicit input) and stored (existing.get(...), the
+    artifact's own prior value) both keep winning over it exactly as before, unchanged;
+    clone_mode never touches those two tiers, only what the resolver falls through to
+    when both are None. This is deliberate, not an oversight: regenerate should still
+    reflect what was explicitly asked for last time, and this path is already the more
+    fragile one - clone_mode only makes the DEFAULT smarter, never the precedence.
+    offer_text is handled separately, as a post-resolve SUPPRESSION (never a default):
+    once the normal live > stored > default chain resolves a value, clone_mode forces it
+    back to None if this blueprint has no offer-shaped zone at all (see generate_image_
+    prompt.reference_has_offer_zone) - an offer with nowhere to render is suppressed
+    regardless of which tier supplied it. text_in_image is NOT touched here at all - this
+    function has no live_text_in_image parameter to begin with (a separate, pre-existing
+    gap: it reads existing.get("text_in_image") unconditionally, below); fixing that is a
+    bigger change (converting text_in_image's False-default to the same None-means-not-
+    supplied convention include_product/edit_mode already use, across four call sites)
+    and is deliberately out of scope for this feature."""
     ad_id = ad.get("ad_id")
     _stop = should_stop or (lambda: False)
     existing = dedupe.get_artifact(ad_id, angle_id=angle_id)
@@ -630,6 +658,19 @@ def _regenerate_existing_draft(ad, angle_id, angle_slug, delta_instruction, shou
     text_in_image = bool(existing.get("text_in_image"))
     stored_operator_instruction = existing.get("operator_instruction") or ""
 
+    # Clone mode (2026-08-11): smarter DEFAULTS only, computed from THIS blueprint - never
+    # touches the live/stored tiers below. clone_mode=False (the default) reproduces the
+    # exact literal defaults (True/None/None) this always used, byte-for-byte.
+    clone_include_product_default = (
+        generate_image_prompt.reference_has_product(blueprint) if clone_mode else True
+    )
+    clone_realism_default = (
+        ((blueprint.get("production_style") or {}).get("style") or None) if clone_mode else None
+    )
+    clone_body_area_default = (
+        generate_image_prompt_writer.effective_body_area(blueprint, None) if clone_mode else None
+    )
+
     # Task F, point 1 (2026-08-07): live operator input for THIS call > stored artifact
     # value from the ORIGINAL generation > hardcoded default - resolved per field via
     # resolve_regenerate_input, live always winning when the operator actually supplied
@@ -638,7 +679,7 @@ def _regenerate_existing_draft(ad, angle_id, angle_slug, delta_instruction, shou
     # function - exactly the bug ads 1888339248562394/1194229189228603 demonstrated.
     missing = []
     include_product, ip_source = resolve_regenerate_input(
-        live_include_product, existing.get("include_product"), True)
+        live_include_product, existing.get("include_product"), clone_include_product_default)
     if ip_source != "live":
         missing.append(f"include_product -> {ip_source} ({include_product})")
     retheme_colours, rc_source = resolve_regenerate_input(
@@ -650,15 +691,22 @@ def _regenerate_existing_draft(ad, angle_id, angle_slug, delta_instruction, shou
     # and product_id above, a "default" resolution here can't be told apart from a real
     # migration gap. Logged anyway, worded to not overclaim a cause that isn't actually
     # known.
-    realism, realism_source = resolve_regenerate_input(live_realism, existing.get("realism"), None)
+    realism, realism_source = resolve_regenerate_input(live_realism, existing.get("realism"), clone_realism_default)
     if realism_source != "live":
         missing.append(f"realism -> {realism_source} ({realism!r}); auto if still None")
-    body_area, body_area_source = resolve_regenerate_input(live_body_area, existing.get("body_area"), None)
+    body_area, body_area_source = resolve_regenerate_input(
+        live_body_area, existing.get("body_area"), clone_body_area_default)
     if body_area_source != "live":
         missing.append(f"body_area -> {body_area_source} ({body_area!r})")
     offer_text, offer_text_source = resolve_regenerate_input(live_offer_text, existing.get("offer_text"), None)
     if offer_text_source != "live":
         missing.append(f"offer_text -> {offer_text_source} ({offer_text!r})")
+    # Clone mode's offer rule is a SUPPRESSION, never a default - it never invents an
+    # offer, it only withholds an already-resolved one (from whichever tier supplied it)
+    # when this blueprint has nowhere to render it at all.
+    if clone_mode and offer_text and not generate_image_prompt.reference_has_offer_zone(blueprint):
+        log.info("Ad %s: clone_mode suppressing offer_text - reference has no offer-shaped zone", ad_id)
+        offer_text = None
     product_id = existing.get("product_id")
     product = dedupe.get_product(product_id) if product_id is not None else None
     if product is None:
@@ -820,8 +868,31 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
                 body_area=None, offer_text=None, edit_mode=None, operator_instruction=None,
                 check_output=False, retheme_colours=None, ad_index=None, total_ads=None,
                 should_stop=None, explicit_selection=False, regenerate=False, product_count=None,
-                config=None, used_headlines=None):
+                config=None, used_headlines=None, clone_mode=False, ad_overrides=None):
     """Run one ad through the full pipeline. Returns processed/skipped/failed.
+
+    clone_mode (2026-08-11): when True, realism/include_product/text_in_image/body_area/
+    offer_text are RE-DERIVED from THIS ad's own freshly-deconstructed blueprint right
+    after deconstruct returns (see the derivation block below, just after the deconstruct
+    call) - overwriting whatever config/run-strip value the normalization above already
+    set, but ONLY for a field this specific ad's own per_ad_override didn't already pin
+    (see ad_overrides below) and ONLY when the blueprint actually answers that field.
+    False (the default) skips this entirely - config's own resolved values pass straight
+    through unchanged, byte-for-byte today's behaviour. This is a first-generation-only
+    derivation; the regenerate path (_regenerate_existing_draft) has its OWN, earlier
+    clone_mode hook, described in that function's own docstring, with a DIFFERENT
+    precedence (live > stored > blueprint-derived, never overriding stored) because that
+    path already has a live/stored/default resolver these overwrites would otherwise
+    fight with.
+
+    ad_overrides, if given, is the SAME per-ad override dict generate_from_selection's own
+    per_ad_overrides feature already resolved for this ad_id (BatchAdConfig's own
+    construction site) - passed here ONLY so clone_mode can tell "the operator explicitly
+    set this field for THIS card" apart from "this field is just the run-strip default,"
+    which config's own already-merged value can no longer distinguish by the time it
+    reaches this function. A field present in ad_overrides is left completely alone by
+    clone_mode - an explicit per-ad choice always wins over a blueprint heuristic. None
+    (the default) means clone_mode may freely derive every field.
 
     used_headlines (2026-08-11, same-run copy convergence fix): an optional, CALLER-OWNED
     mutable list of {"headline", "image_subtext"} dicts - the caller (generate_from_
@@ -1035,7 +1106,7 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
                 ad, angle_id, angle_slug, operator_instruction, should_stop,
                 live_include_product=live_include_product, live_retheme_colours=live_retheme_colours,
                 live_realism=live_realism, live_body_area=live_body_area, live_offer_text=live_offer_text,
-                check_output=check_output,
+                check_output=check_output, clone_mode=clone_mode,
             )
             if regen_result is not None:
                 return regen_result
@@ -1058,6 +1129,33 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
             log.warning("Ad %s: blueprint.visual.scene_lighting not extracted this run - "
                         "falling back to generic register-matching wording for the bottle's "
                         "lighting/shadow/grain/depth-of-field instead of observed facts", ad_id)
+
+        # Clone mode (2026-08-11): per-ad config derived from THIS ad's OWN fresh
+        # blueprint, right where that blueprint first exists - config's own values (run
+        # strip, or a per-ad override already merged in above) are the FALLBACK, only
+        # overwritten per field when clone_mode is on, this field wasn't explicitly
+        # pinned by ad_overrides for THIS ad, and the blueprint actually answers it. See
+        # process_ad's own clone_mode/ad_overrides docstring for the full precedence.
+        if clone_mode:
+            _overrides = ad_overrides or {}
+            if "realism" not in _overrides:
+                _derived_realism = (blueprint.get("production_style") or {}).get("style")
+                if _derived_realism:
+                    realism = _derived_realism
+            if "include_product" not in _overrides:
+                include_product = generate_image_prompt.reference_has_product(blueprint)
+            if "text_in_image" not in _overrides:
+                text_in_image = generate_image_prompt.reference_has_text_zone(blueprint)
+            if "body_area" not in _overrides:
+                body_area = generate_image_prompt_writer.effective_body_area(blueprint, body_area)
+            # offer_text is never per-ad-overridable (stays run-level, see BatchAdConfig's
+            # own docstring), so there's no ad_overrides check here - this is a pure
+            # SUPPRESSION, never invents an offer: withholds the operator's run-strip
+            # offer_text when this specific reference has nowhere to render one.
+            if offer_text and not generate_image_prompt.reference_has_offer_zone(blueprint):
+                log.info("Ad %s: clone_mode suppressing offer_text - reference has no "
+                         "offer-shaped zone", ad_id)
+                offer_text = None
 
         # Hard block (Prompt 4, Item 3): a medical/clinical/intimate-health/anatomically
         # explicit reference must never be cloned - not a judgment call for a human to

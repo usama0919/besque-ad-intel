@@ -642,6 +642,41 @@ def test_reference_has_text_zone_false_when_neither():
     assert generate_image_prompt.reference_has_text_zone({}) is False
 
 
+# ---- reference_has_offer_zone (2026-08-11, clone mode): whole-blueprint analogue of
+# _is_offer_shaped_zone (which only tests one zone's own detail string) - True when a
+# price_anchor is present (inherently offer-shaped, no keyword check needed) or a badge
+# whose detail reads as offer/discount-shaped, same OFFER_BADGE_KEYWORDS
+# _structural_zones_clause itself uses to decide substitute-vs-remove ----
+
+def test_reference_has_offer_zone_true_for_price_anchor():
+    bp = {"structural_zones": [{"zone_type": "price_anchor", "position": "top", "container": "none", "detail": "was $60, now $45"}]}
+    assert generate_image_prompt.reference_has_offer_zone(bp) is True
+
+
+def test_reference_has_offer_zone_true_for_offer_shaped_badge():
+    bp = {"structural_zones": [{"zone_type": "badge", "position": "top", "container": "oval", "detail": "reads 'SAVE 16%'"}]}
+    assert generate_image_prompt.reference_has_offer_zone(bp) is True
+
+
+def test_reference_has_offer_zone_false_for_non_offer_badge():
+    """A badge exists, but its detail doesn't read as offer-shaped (e.g. a plain "NEW"
+    flag or a star rating) - must not be treated as an offer zone."""
+    bp = {"structural_zones": [{"zone_type": "badge", "position": "top", "container": "oval", "detail": "reads NEW"}]}
+    assert generate_image_prompt.reference_has_offer_zone(bp) is False
+
+
+def test_reference_has_offer_zone_false_when_no_structural_zones():
+    assert generate_image_prompt.reference_has_offer_zone({}) is False
+    assert generate_image_prompt.reference_has_offer_zone(None) is False
+    assert generate_image_prompt.reference_has_offer_zone({"structural_zones": []}) is False
+
+
+def test_reference_has_offer_zone_false_for_unrelated_zone_types():
+    bp = {"structural_zones": [{"zone_type": "brand_wordmark", "position": "top", "container": "none", "detail": "OSEA"},
+                                {"zone_type": "sub_line", "position": "mid", "container": "none", "detail": "tagline"}]}
+    assert generate_image_prompt.reference_has_offer_zone(bp) is False
+
+
 def test_edit_mode_instruction_text_added_into_negative_space_when_no_reference_text_zone():
     """TEXT branch ADD path: an authorised headline with NO existing reference text zone
     to substitute into must be placed newly, in clean negative space derived from the

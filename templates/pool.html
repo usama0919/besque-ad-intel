@@ -165,6 +165,9 @@
   <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#555;" title="Re-map the reference's colours to Besque's palette (edit mode only) - geometry is preserved, only colour is substituted. Turn off to clone the reference's own colours faithfully.">
     <input type="checkbox" id="rethemeColoursToggle" checked style="width:auto;"> Re-theme colours
   </label>
+  <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#555;" title="Derive realism/include product/text in image/body area/offer PER AD from that ad's own reference blueprint, instead of one run-strip value shared by every ad in the selection - off by default. A per-ad override (the card's own realism selector) still wins over this; the run strip is only the fallback for whatever the blueprint can't answer.">
+    <input type="checkbox" id="cloneModeToggle" style="width:auto;"> Clone mode (per-ad, from reference)
+  </label>
   <button class="run" id="generateBtn" onclick="generateSelection()" disabled>Generate</button>
   <button class="stop" id="generateStopBtn" onclick="stopGenerate()" disabled>Stop</button>
   <span class="status" id="generateStatus"></span>
@@ -596,6 +599,7 @@ async function generateSelection(){
   const editMode = document.getElementById('editModeToggle').checked;
   const checkOutput = document.getElementById('checkOutputToggle').checked;
   const rethemeColours = document.getElementById('rethemeColoursToggle').checked;
+  const cloneMode = document.getElementById('cloneModeToggle').checked;
   const realism = document.getElementById('realismSelect').value;
   // Only cards the operator actually set contribute a per_ad_overrides entry - an
   // untouched card's Map value is null and is skipped here, exactly per dashboard.py's
@@ -620,6 +624,7 @@ async function generateSelection(){
       text_in_image: textInImage, include_product: includeProduct, edit_mode: editMode,
       check_output: checkOutput, retheme_colours: rethemeColours, realism: realism || null,
       per_ad_overrides: Object.keys(perAdOverrides).length ? perAdOverrides : null,
+      clone_mode: cloneMode,
     }),
   });
   const body = await r.json();

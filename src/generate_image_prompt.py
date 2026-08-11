@@ -108,6 +108,30 @@ def reference_has_text_zone(blueprint):
     )
 
 
+def reference_has_offer_zone(blueprint):
+    """True when the reference blueprint shows a structural zone that actually CARRIES an
+    offer - a price_anchor (a price shown as its own graphic element is inherently
+    offer-shaped, no keyword check needed) or a badge whose own detail reads as
+    offer/discount-shaped (see _is_offer_shaped_zone/OFFER_BADGE_KEYWORDS below - same
+    keyword set _structural_zones_clause already uses to decide whether a badge
+    substitutes with offer_text or gets removed, so this can never disagree with what
+    actually renders).
+
+    Added 2026-08-11 for clone mode (pipeline.py) - deciding whether THIS ad's per-ad
+    config should carry the operator's offer_text at all, before build_image_prompt ever
+    runs, rather than only gating it once inside _structural_zones_clause's own per-zone
+    branch. Same public/no-leading-underscore convention as reference_has_product/
+    reference_has_text_zone above - pipeline.py reads this directly, no reimplementation."""
+    blueprint = blueprint or {}
+    for z in (blueprint.get("structural_zones") or []):
+        zt = (z or {}).get("zone_type")
+        if zt == "price_anchor":
+            return True
+        if zt == "badge" and _is_offer_shaped_zone(z.get("detail")):
+            return True
+    return False
+
+
 def resolve_effective_include_product(blueprint, include_product, edit_mode):
     """The single source for whether a Besque product is actually being placed in the
     scene - Item 2 (2026-08-05), extracted from build_image_prompt's own inline

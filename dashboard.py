@@ -1094,7 +1094,11 @@ async def api_generate(request: Request):
     validator.production_styles() all reject the WHOLE request with 400 naming the
     offending key, never silently dropped or coerced. Only realism/body_area/
     include_product/edit_mode/text_in_image may be overridden per ad; offer_text/
-    instruction stay run-level exactly as today."""
+    instruction stay run-level exactly as today.
+
+    clone_mode (2026-08-11): plain boolean, defaults False - forwarded straight to
+    pipeline.generate_from_selection, no validation needed (see that function's own
+    docstring for what it does)."""
     body = await request.json()
     ad_ids = body.get("ad_ids")
     if not ad_ids or not isinstance(ad_ids, list):
@@ -1128,6 +1132,7 @@ async def api_generate(request: Request):
     override_error = _validate_per_ad_overrides(per_ad_overrides, ad_ids)
     if override_error:
         return JSONResponse({"ok": False, "error": override_error}, status_code=400)
+    clone_mode = bool(body.get("clone_mode", False))
 
     job_id = uuid.uuid4().hex
     dedupe.start_generate_job(job_id, ad_ids)
@@ -1149,7 +1154,7 @@ async def api_generate(request: Request):
                 text_in_image=text_in_image, include_product=include_product, edit_mode=edit_mode,
                 check_output=check_output, retheme_colours=retheme_colours, realism=realism,
                 should_stop=_job_should_stop, on_ad_done=_on_ad_done,
-                per_ad_overrides=per_ad_overrides,
+                per_ad_overrides=per_ad_overrides, clone_mode=clone_mode,
             )
             dedupe.finish_generate_job(job_id, result=result)
         except Exception as e:
