@@ -323,6 +323,14 @@ def generate_from_selection(ad_ids, angle_id=None, body_area=None, offer_text=No
     per_ad_overrides=None (the default) all behave identically to today - nothing here
     changes behaviour for a caller that doesn't pass this.
 
+    used_headlines (2026-08-11, same-run copy convergence fix): one plain list, created
+    HERE, the same object passed into every ad's process_ad call this run - process_ad
+    appends to it once each ad's own copy passes compliance, so ad N's generate_copy_live
+    call sees every headline/image_subtext already produced by ads 1..N-1 in THIS run
+    (see process_ad's and generate_copy._used_copy_clause's own docstrings for the full
+    reasoning and its limits). A single-ad selection never accumulates anything to see,
+    so its prompt is byte-identical to before this existed.
+
     should_stop, if given, is checked BETWEEN ads (same as run_once) AND is
     forwarded into process_ad, which checks it once more immediately before the
     paid Gemini call (see process_ad's own should_stop docstring) - the same
@@ -478,6 +486,12 @@ def generate_from_selection(ad_ids, angle_id=None, body_area=None, offer_text=No
 
     rows_by_ad_id = dedupe.get_scraped_ads_by_ad_ids(ad_ids)
     summary = {"processed": 0, "skipped": 0, "failed": 0, "already_generated": 0, "by_ad": {}}
+    # Run-scoped, not per-ad: ONE list, created here, the SAME object handed to every
+    # process_ad call below - process_ad appends to it in place once an ad's own copy
+    # passes compliance (see process_ad's own used_headlines docstring). Never reset
+    # mid-loop, never touched by BatchAdConfig (that's frozen; this is deliberately
+    # mutable and shared).
+    used_headlines = []
     for ad_id in ad_ids:
         if _stop():
             log.info("Stop requested, halting selection run.")
@@ -508,7 +522,7 @@ def generate_from_selection(ad_ids, angle_id=None, body_area=None, offer_text=No
             text_in_image=text_in_image, include_product=include_product, edit_mode=edit_mode,
             check_output=check_output, retheme_colours=retheme_colours, realism=realism,
             should_stop=should_stop, explicit_selection=True, regenerate=regenerate,
-            config=cfg,
+            config=cfg, used_headlines=used_headlines,
         )
         dedupe.update_scraped_ad_status(ad_id, row["competitor_id"], result)
         summary[result] += 1
@@ -806,8 +820,22 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
                 body_area=None, offer_text=None, edit_mode=None, operator_instruction=None,
                 check_output=False, retheme_colours=None, ad_index=None, total_ads=None,
                 should_stop=None, explicit_selection=False, regenerate=False, product_count=None,
-                config=None):
+                config=None, used_headlines=None):
     """Run one ad through the full pipeline. Returns processed/skipped/failed.
+
+    used_headlines (2026-08-11, same-run copy convergence fix): an optional, CALLER-OWNED
+    mutable list of {"headline", "image_subtext"} dicts - the caller (generate_from_
+    selection/run_once) creates ONE such list per run (never per ad) and passes the SAME
+    list object into every ad's process_ad call. Read here to build the copy prompt's
+    "already used this run" clause (see generate_copy._used_copy_clause), then APPENDED
+    to in place once this ad's own copy passes compliance - never returned, since
+    process_ad's own return contract (processed/skipped/failed) is relied on everywhere
+    and mutating a list the caller already holds a reference to needs no new plumbing.
+    Safe only because processing is strictly sequential within one run (same reasoning
+    CLAUDE.md already documents for .last_prompt) - no two process_ad calls ever run
+    concurrently against the same list. None (the default, e.g. a test or the writer
+    calling process_ad directly) disables this entirely: no clause is added and nothing
+    is appended anywhere.
 
     include_product/retheme_colours/edit_mode default to None, not a concrete bool
     (Task F, point 1, 2026-08-07) - None means "the caller genuinely did not supply this
@@ -1115,6 +1143,8 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
             copy_kwargs = {"product": product, "offer_text": offer_text}
             if angle_language:
                 copy_kwargs["angle_language"] = angle_language
+            if used_headlines:
+                copy_kwargs["used_headlines"] = used_headlines
             if copy_attempt > 1:
                 # Fail-soft: feed the SPECIFIC prior failure back rather than discarding
                 # the ad outright. On-category pool is small (36 ads) - throwing one away
@@ -1135,6 +1165,13 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
             dedupe.init_pipeline_warnings()
             dedupe.record_warning("compliance_failed", reason)
             return "failed"
+        # Recorded ONCE the copy actually passed compliance - never a rejected/retried
+        # attempt's copy - so the next ad in this run sees only real, final wording, not
+        # something already discarded. Mutates the caller's own list in place (see this
+        # function's used_headlines docstring) - None means the caller didn't opt in.
+        if used_headlines is not None:
+            used_headlines.append({"headline": copy.get("headline", ""),
+                                    "image_subtext": copy.get("image_subtext", "")})
         if text_in_image and not copy.get("headline"):
             # Compliance passed but the copy has no usable headline (e.g. an empty string
             # slipped past validate_copy's key-presence check) - rule 6 will silently fall
@@ -1482,6 +1519,11 @@ def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product
     per-run free-text value, deliberately never read from the resolved angle's own
     body_area column (see process_ad's docstring).
 
+    used_headlines (2026-08-11, same-run copy convergence fix): one plain list, created
+    HERE, scoped to this WHOLE run_once call - shared across every competitor and every
+    ad in the sweep, not reset per competitor. Same mechanism as generate_from_selection's
+    own (see process_ad's/generate_copy._used_copy_clause's docstrings).
+
     The returned summary gains "by_competitor": {name: {ads_seen, processed, skipped,
     failed, error}} - a category sweep's total is otherwise illegible, since image yield
     varies hugely per brand (roughly 1/10 to 8/10 across pages per CLAUDE.md), so a low
@@ -1541,6 +1583,11 @@ def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product
                         "reference_photo_warning": reference_warning,
                         "by_competitor": {}, "error": reason}
     should_stop = should_stop or (lambda: False)
+    # Run-scoped, not per-competitor/per-ad: ONE list for the whole run_once call, the
+    # SAME object handed to every process_ad call below across every competitor -
+    # process_ad appends to it in place once an ad's own copy passes compliance (see
+    # process_ad's own used_headlines docstring). Mirrors generate_from_selection's own.
+    used_headlines = []
 
     competitors = dedupe.get_competitors()
     if competitor_id is not None:
@@ -1624,7 +1671,7 @@ def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product
                                 body_area=body_area, offer_text=offer_text, edit_mode=edit_mode,
                                 operator_instruction=operator_instruction, check_output=check_output,
                                 retheme_colours=retheme_colours, ad_index=ad_index, total_ads=len(ads),
-                                should_stop=should_stop)
+                                should_stop=should_stop, used_headlines=used_headlines)
             summary[result] += 1
             comp_summary[result] += 1
         summary["by_competitor"][name] = comp_summary

@@ -83,7 +83,7 @@ NO_ANGLE_LANGUAGE = (
     "vocabulary from a different angle."
 )
 
-PRODUCT_FACT_KEYS = ("name", "description", "ingredients", "hero_claim")
+PRODUCT_FACT_KEYS = ("name", "ingredients", "hero_claim")
 
 
 def _offer_clause(offer_text=""):
@@ -101,8 +101,19 @@ def _offer_clause(offer_text=""):
 
 
 def _product_facts(product):
-    """Only the four fields the copywriter needs - keeps id, image_key and category
-    out of the prompt. Empty fields are omitted rather than sent as blanks."""
+    """Only the fields the copywriter needs as CLAIM CONSTRAINTS - keeps id, image_key
+    and category out of the prompt. Empty fields are omitted rather than sent as blanks.
+
+    description is deliberately NOT in PRODUCT_FACT_KEYS (removed 2026-08-11): it was a
+    marketing sentence ("A luxury fragrant blend of 7 cold-pressed oils."), not a claim
+    fact, and its presence here - regardless of the "CONSTRAINT, not a copy source"
+    framing in COPY_PROMPT's own PRODUCT header - was still exactly the kind of material
+    a copywriter reads and paraphrases. Three separate drafts in one run converged on
+    its literal wording ("7 [cold-pressed] oils...") despite that header. The 2026-08-10
+    fix (TIER 1 escalated to REQUIRED, PRODUCT reworded as a constraint) was a stronger
+    instruction, not a removal - description was still sitting in the prompt for the
+    model to draw from. This removal is the structural fix: name/ingredients/hero_claim
+    remain (real claim facts a copywriter must not exceed), description does not."""
     if not product:
         return NO_PRODUCT
     facts = {k: product.get(k) for k in PRODUCT_FACT_KEYS
@@ -116,13 +127,9 @@ def _angle_language_clause(angle_language):
     the lookup and hands over a dict or None. Deliberately NOT flattened into one bag of
     "angle vocabulary": common_phrases is safe to write from directly (the customer's own
     problem language); core_angle/main_pain_point set tone but must never be echoed
-    verbatim; result_phrases/main_benefit are customer-REPORTED outcomes that Besque
-    cannot assert in its own voice without becoming an unsubstantiated efficacy claim
-    (compliance rule C2 above) - permissible only inside a real stored quote, which this
-    prompt does not produce (that's select_testimonial_review, image path only).
-    image_direction and best_verbatims are never read here at all - image_direction is
-    image-path-only context, and quote sourcing for best_verbatims-shaped content stays
-    with select_testimonial_review, not this prompt.
+    verbatim. image_direction and best_verbatims are never read here at all -
+    image_direction is image-path-only context, and quote sourcing for best_verbatims-
+    shaped content stays with select_testimonial_review, not this prompt.
 
     TIER 1 escalated from a preference to a REQUIREMENT (2026-08-10): two drafts from
     the same angle behaved differently - one built its headline from a TIER 1 phrase,
@@ -132,13 +139,26 @@ def _angle_language_clause(angle_language):
     would mean a JSON schema change) - instead the model is told to pick the CLOSEST
     phrase and adapt it, since these lists run 22-45 entries per angle, so a genuine
     no-fit case isn't realistic. PRODUCT is reworded above to state outright that it's a
-    constraint, not a source - so the two sections no longer compete for the same job."""
+    constraint, not a source - so the two sections no longer compete for the same job.
+
+    TIER 3 (result_phrases/main_benefit) REMOVED ENTIRELY (2026-08-11), not just
+    reworded: it was labeled "REFERENCE ONLY, EXPLICITLY FORBIDDEN AS COPY", but
+    "forbidden to emit" was still a text instruction sitting next to the actual
+    customer-reported-outcome phrases ("neck firmed up", "visibly firms" for glp1) -
+    the model lifted bare words like "firmness" out of it into real headlines despite
+    the ban, the same "prompt-only guardrail doesn't bind" failure pattern already
+    proven on the image path. TIER 3's own stated secondary purpose - "may inform which
+    problem phrase you choose from TIER 1" - doesn't survive scrutiny either: TIER 1's
+    common_phrases are already scoped to this one angle (22-45 entries, all the same
+    problem), so knowing the eventual benefit adds little disambiguation. TIER 2 (core_
+    angle/main_pain_point) is deliberately left untouched - it's problem/emotional
+    narrative, not efficacy/outcome claims, so it doesn't carry the same compliance-risk
+    category TIER 3 did (checked: glp1's core_angle/main_pain_point contain no
+    "firm"-rooted word at all; only the now-deleted result_phrases/main_benefit did)."""
     if not angle_language:
         return NO_ANGLE_LANGUAGE
     common_phrases = angle_language.get("common_phrases") or []
-    result_phrases = angle_language.get("result_phrases") or []
     phrase_lines = "\n".join(f"- {p}" for p in common_phrases) or "(none)"
-    result_line = ", ".join(result_phrases) if result_phrases else "(none)"
     return (
         "TIER 1 - WRITE FROM THIS (REQUIRED). The customer's own words for her PROBLEM:\n"
         f"{phrase_lines}\n"
@@ -153,15 +173,6 @@ def _angle_language_clause(angle_language):
         "reworded, as a claim or otherwise:\n"
         f"Core angle: {angle_language.get('core_angle') or '(none)'}\n"
         f"Main pain point: {angle_language.get('main_pain_point') or '(none)'}\n\n"
-        "TIER 3 - REFERENCE ONLY, EXPLICITLY FORBIDDEN AS COPY. Customer-reported "
-        "OUTCOMES, not a Besque claim:\n"
-        f"Result phrases: {result_line}\n"
-        f"Main benefit: {angle_language.get('main_benefit') or '(none)'}\n"
-        "These describe where the angle leads, and may inform which problem phrase you "
-        "choose from TIER 1, but no result phrase and no benefit sentence may appear in "
-        "the headline, image_subtext, primary_text, or any other brand-voice copy. They "
-        "are only ever permissible inside a REAL stored customer quote - this call does "
-        "not produce one.\n\n"
         "No statistic and no timeframe (e.g. \"two weeks\", \"27 days\", \"3 months\") may "
         "appear anywhere in this copy unless it is present in a real stored quote - none "
         "is supplied to this call, regardless of how many appear in the angle language above."
@@ -217,9 +228,42 @@ def _panel_copy_clause(panels):
     )
 
 
+def _used_copy_clause(used_headlines):
+    """Additive clause (same pattern as _panel_copy_clause/compliance_feedback below) -
+    non-empty only when the caller (pipeline.py) is threading same-run awareness across
+    ads via one shared, run-scoped list of {"headline", "image_subtext"} dicts. None or
+    an empty list returns "" - the prompt is then byte-identical to before this existed,
+    which is what makes a single-ad run unaffected.
+
+    Closes a real gap, not just a temptation: nothing before this gave generate_copy_live
+    any signal that a DIFFERENT ad in the SAME run had already produced copy - three
+    separate calls in one run converged on near-identical wording (a live incident, see
+    CLAUDE.md 2026-08-11) with no code-level leak involved, purely because every call
+    shared the same PRODUCT/ANGLE LANGUAGE inputs and had zero information about what a
+    sibling call already wrote. This is still a text instruction, not a mechanical check
+    - same class of guardrail this codebase has repeatedly found unreliable alone - but
+    unlike a ban on tempting material already in front of the model, there was previously
+    no information here for the model to reason about at all; no instruction can
+    substitute for that missing information, so giving it the actual list is the real
+    fix, and the instruction on top of it is only enforcement, not the whole mechanism."""
+    if not used_headlines:
+        return ""
+    lines = "\n".join(
+        f'- headline: "{u.get("headline", "")}" / image_subtext: "{u.get("image_subtext", "")}"'
+        for u in used_headlines
+    )
+    return (
+        "\n\nALREADY USED EARLIER IN THIS RUN (STRICT): the following headline/"
+        "image_subtext pairs were already generated for a DIFFERENT ad in this same run "
+        "- your headline and image_subtext must be genuinely distinct from every one of "
+        "them, not a close paraphrase or the same sentence structure with one word "
+        "swapped, even if both draw from the same TIER 1 phrase:\n" + lines + "\n"
+    )
+
+
 def build_copy_prompt(blueprint, brand_voice="", approved_claims="", product=None,
                        approved_testimonials="", compliance_feedback=None, offer_text="",
-                       angle_language=None):
+                       angle_language=None, used_headlines=None):
     """compliance_feedback is the list of issue strings from a prior failed
     check_compliance call - only passed on a retry, so it's appended as an explicit
     revision instruction rather than a template placeholder that's usually empty.
@@ -232,10 +276,16 @@ def build_copy_prompt(blueprint, brand_voice="", approved_claims="", product=Non
     caller (pipeline.py) resolves it from the selected messaging angle's slug; this
     module has no dedupe dependency and never guesses a substitute when it's None (no
     angle selected, or the angle has no language row). See _angle_language_clause for
-    the three-tier treatment: common_phrases is safe to write from, core_angle/
-    main_pain_point are tone-only, result_phrases/main_benefit are explicitly forbidden
-    as copy (unsubstantiated efficacy claims). image_direction/best_verbatims are never
-    read from this dict - image-path-only and select_testimonial_review's job, respectively.
+    the two-tier treatment: common_phrases is safe to write from, core_angle/
+    main_pain_point are tone-only. result_phrases/main_benefit are never read from this
+    dict at all (removed 2026-08-11 - see _angle_language_clause's own docstring for
+    why "forbidden to emit" wasn't enough). image_direction/best_verbatims are never
+    read from this dict either - image-path-only and select_testimonial_review's job, respectively.
+
+    used_headlines (2026-08-11) - see _used_copy_clause's own docstring. Appended the
+    same additive way as panel_copy/compliance_feedback - None or [] (a single-ad run,
+    or any caller that doesn't pass it) leaves the prompt byte-identical to before this
+    existed.
 
     panel_copy (2026-08-06) is appended the same additive way as compliance_feedback below
     - present only when comparison_panels(blueprint) finds a real multi-panel layout, so
@@ -254,6 +304,8 @@ def build_copy_prompt(blueprint, brand_voice="", approved_claims="", product=Non
     panels = comparison_panels(blueprint)
     if panels:
         prompt += _panel_copy_clause(panels)
+    if used_headlines:
+        prompt += _used_copy_clause(used_headlines)
     if compliance_feedback:
         issues_text = "\n".join(f"- {issue}" for issue in compliance_feedback)
         prompt += (
@@ -326,7 +378,7 @@ def _log_parse_failure(attempt, total, max_tokens, message, raw_text, exc):
 
 def generate_copy_live(blueprint, brand_voice="", approved_claims="", product=None,
                         approved_testimonials="", compliance_feedback=None, offer_text="",
-                        angle_language=None):
+                        angle_language=None, used_headlines=None):
     """Send a blueprint to Claude and return validated Besque-adapted copy.
 
     Normally ONE API call. If the response cannot be parsed into the required fields,
@@ -336,11 +388,14 @@ def generate_copy_live(blueprint, brand_voice="", approved_claims="", product=No
 
     angle_language: see build_copy_prompt's docstring - forwarded straight through,
     None reproduces today's exact prompt (plus the new ANGLE LANGUAGE section's
-    "none supplied" fallback text - see NO_ANGLE_LANGUAGE)."""
+    "none supplied" fallback text - see NO_ANGLE_LANGUAGE).
+
+    used_headlines: see build_copy_prompt's/_used_copy_clause's docstrings - forwarded
+    straight through, None or [] reproduces today's exact prompt."""
     prompt = build_copy_prompt(blueprint, brand_voice, approved_claims, product=product,
                                 approved_testimonials=approved_testimonials,
                                 compliance_feedback=compliance_feedback, offer_text=offer_text,
-                                angle_language=angle_language)
+                                angle_language=angle_language, used_headlines=used_headlines)
     client = anthropic.Anthropic(timeout=60.0, max_retries=1)  # reads ANTHROPIC_API_KEY from env
 
     total = len(_COPY_ATTEMPTS)

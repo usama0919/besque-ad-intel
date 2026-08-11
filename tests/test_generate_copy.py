@@ -65,6 +65,41 @@ def test_build_copy_prompt_omits_revision_section_when_no_feedback():
     assert "REVISION REQUIRED" not in prompt
 
 
+# ---- TIER 3 (result_phrases/main_benefit) removed entirely 2026-08-11: "forbidden to
+# emit" was still a text instruction sitting next to the actual phrases, and the model
+# lifted bare words (e.g. "firmness") out of them into real headlines despite the ban.
+# TIER 2 (core_angle/main_pain_point) is untouched - different risk category, no
+# efficacy/outcome claims to leak. ----
+
+def _angle_language_with_tier3():
+    return {
+        "core_angle": "Loose skin is the concern that shows up every morning.",
+        "main_pain_point": "She stopped wearing sleeveless tops.",
+        "common_phrases": ["used to be firm", "skin that hangs"],
+        "result_phrases": ["firmer to the touch", "neck firmed up"],
+        "main_benefit": "Skin that visibly firms and tightens within weeks.",
+    }
+
+
+def test_build_copy_prompt_omits_tier_3_result_phrases_and_main_benefit():
+    prompt = generate_copy.build_copy_prompt({"angle": "x"}, angle_language=_angle_language_with_tier3())
+    assert "TIER 3" not in prompt
+    assert "firmer to the touch" not in prompt
+    assert "neck firmed up" not in prompt
+    assert "Skin that visibly firms and tightens within weeks" not in prompt
+    assert "REFERENCE ONLY" not in prompt
+    assert "may inform which problem phrase" not in prompt
+
+
+def test_build_copy_prompt_keeps_tier_1_and_tier_2():
+    prompt = generate_copy.build_copy_prompt({"angle": "x"}, angle_language=_angle_language_with_tier3())
+    assert "TIER 1" in prompt
+    assert "used to be firm" in prompt  # common_phrases, still written from directly
+    assert "TIER 2" in prompt
+    assert "Loose skin is the concern that shows up every morning." in prompt
+    assert "She stopped wearing sleeveless tops." in prompt
+
+
 # ---- image_subtext: a short on-image line, distinct from the long-form primary_text ----
 
 def test_build_copy_prompt_requires_short_image_subtext_field():
@@ -117,6 +152,68 @@ def test_generate_copy_live_forwards_offer_text_to_prompt(monkeypatch):
     monkeypatch.setattr(generate_copy.anthropic, "Anthropic", FakeClient)
     generate_copy.generate_copy_live({"angle": "x"}, offer_text="free shipping this week")
     assert "free shipping this week" in captured["prompt"]
+
+
+# ---- used_headlines (2026-08-11, same-run copy convergence fix): additive clause, same
+# pattern as panel_copy/compliance_feedback - None/[] must leave the prompt byte-identical
+# to before this existed. ----
+
+def test_used_copy_clause_empty_for_none_or_empty_list():
+    assert generate_copy._used_copy_clause(None) == ""
+    assert generate_copy._used_copy_clause([]) == ""
+
+
+def test_build_copy_prompt_used_headlines_none_and_omitted_are_byte_identical():
+    omitted = generate_copy.build_copy_prompt({"angle": "x"})
+    explicit_none = generate_copy.build_copy_prompt({"angle": "x"}, used_headlines=None)
+    explicit_empty = generate_copy.build_copy_prompt({"angle": "x"}, used_headlines=[])
+    assert omitted == explicit_none == explicit_empty
+    assert "ALREADY USED" not in omitted
+
+
+def test_build_copy_prompt_includes_used_headlines_clause():
+    prompt = generate_copy.build_copy_prompt(
+        {"angle": "x"},
+        used_headlines=[{"headline": "Go Jumbo & Save", "image_subtext": "7 oils. One blend."}],
+    )
+    assert "ALREADY USED EARLIER IN THIS RUN" in prompt
+    assert "Go Jumbo & Save" in prompt
+    assert "7 oils. One blend." in prompt
+
+
+def test_build_copy_prompt_used_headlines_lists_every_entry():
+    prompt = generate_copy.build_copy_prompt(
+        {"angle": "x"},
+        used_headlines=[
+            {"headline": "H1", "image_subtext": "S1"},
+            {"headline": "H2", "image_subtext": "S2"},
+        ],
+    )
+    assert "H1" in prompt and "S1" in prompt
+    assert "H2" in prompt and "S2" in prompt
+
+
+def test_generate_copy_live_forwards_used_headlines_to_prompt(monkeypatch):
+    captured = {}
+
+    class FakeMessage:
+        content = [type("obj", (), {"text": _fake_copy_json()})()]
+
+    class FakeMessages:
+        def create(self, **kwargs):
+            captured["prompt"] = kwargs["messages"][0]["content"]
+            return FakeMessage()
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            self.messages = FakeMessages()
+
+    monkeypatch.setattr(generate_copy.anthropic, "Anthropic", FakeClient)
+    generate_copy.generate_copy_live(
+        {"angle": "x"}, used_headlines=[{"headline": "Prior Headline", "image_subtext": "Prior sub"}],
+    )
+    assert "Prior Headline" in captured["prompt"]
+    assert "Prior sub" in captured["prompt"]
 
 
 # ---- comparison_panels / panel_copy (2026-08-06, Grüns GLP-1 leak: a two-panel before/

@@ -320,6 +320,111 @@ def test_generate_from_selection_one_ad_generates_exactly_one(monkeypatch):
         _cleanup(cid, [ad_id])
 
 
+# ---- used_headlines (2026-08-11, same-run copy convergence fix): a shared, run-scoped
+# list threaded through process_ad into generate_copy_live - real process_ad code, not a
+# re-mocked simulation. generate_copy_live itself is spied on (not fully replaced) so the
+# ACTUAL append-after-compliance-pass logic in process_ad runs for real. ----
+
+def _mock_success_with_copy_spy(monkeypatch, headline="H", image_subtext="S"):
+    monkeypatch.setattr(pipeline.assets, "download_image", lambda url, aid: "fake.jpg")
+    monkeypatch.setattr(pipeline.assets, "download_image_bytes", lambda url: b"fake-bytes")
+    monkeypatch.setattr(pipeline.deconstruct, "deconstruct_image", lambda **k: {"format": "hero", "angle": "a"})
+    calls = []
+
+    def spy(bp, product=None, **k):
+        calls.append(k.get("used_headlines"))
+        return {"headline": headline, "primary_text": "P", "image_subtext": image_subtext, "cta": "C"}
+    monkeypatch.setattr(pipeline.generate_copy, "generate_copy_live", spy)
+    monkeypatch.setattr(pipeline.compliance, "check_compliance", lambda copy, name, text, **k: (True, []))
+    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image",
+                        lambda bp, aid, product=None, reference_images=None, **k: "draft.png")
+    monkeypatch.setattr(pipeline.slack_review, "post_review", lambda *a, **k: {"ts": "123"})
+    return calls
+
+
+def test_generate_from_selection_single_ad_sees_no_used_headlines(monkeypatch):
+    """A single-ad run must stay byte-identical to before this feature existed - the
+    empty run-scoped list means generate_copy_live never even receives the kwarg (see
+    process_ad's own `if used_headlines:` guard before adding it to copy_kwargs)."""
+    cid = _make_competitor()
+    ad_id = _seed_scraped_ad(cid)
+    calls = _mock_success_with_copy_spy(monkeypatch)
+    try:
+        result = pipeline.generate_from_selection([ad_id])
+        assert result["processed"] == 1
+        assert len(calls) == 1
+        assert calls[0] is None  # used_headlines kwarg never even passed - empty list is falsy
+    finally:
+        _cleanup(cid, [ad_id])
+
+
+def test_generate_from_selection_second_ad_sees_first_ads_accepted_copy(monkeypatch):
+    """The second ad's generate_copy_live call must receive the first ad's own
+    headline/image_subtext once it passed compliance - real process_ad appending logic,
+    not a mocked simulation."""
+    cid = _make_competitor()
+    ad1 = _seed_scraped_ad(cid)
+    ad2 = _seed_scraped_ad(cid)
+    calls = _mock_success_with_copy_spy(monkeypatch, headline="Go Jumbo & Save", image_subtext="7 oils. One blend.")
+    try:
+        result = pipeline.generate_from_selection([ad1, ad2])
+        assert result["processed"] == 2
+        assert len(calls) == 2
+        assert calls[0] is None  # first ad: nothing used yet
+        assert calls[1] == [{"headline": "Go Jumbo & Save", "image_subtext": "7 oils. One blend."}]
+    finally:
+        _cleanup(cid, [ad1, ad2])
+
+
+def test_generate_from_selection_used_headlines_is_one_shared_list_object(monkeypatch):
+    """generate_from_selection must create ONE list for the whole call and hand the SAME
+    object to every process_ad invocation - not a fresh list per ad, which would silently
+    reset awareness back to empty every time."""
+    cid = _make_competitor()
+    ad1 = _seed_scraped_ad(cid)
+    ad2 = _seed_scraped_ad(cid)
+    captured = []
+    monkeypatch.setattr(pipeline, "process_ad",
+                        lambda ad, **k: captured.append(k.get("used_headlines")) or "processed")
+    try:
+        pipeline.generate_from_selection([ad1, ad2])
+        assert len(captured) == 2
+        assert captured[0] is captured[1]  # same list object, not two independent empty lists
+    finally:
+        _cleanup(cid, [ad1, ad2])
+
+
+def test_generate_from_selection_failed_compliance_does_not_add_to_used_headlines(monkeypatch):
+    """A rejected attempt's copy must never be recorded as "already used" - ad2 must see
+    an EMPTY used_headlines, proving ad1's rejected copy (which failed on every retry)
+    was never appended, only copy that actually passed compliance would be."""
+    cid = _make_competitor()
+    ad1 = _seed_scraped_ad(cid)
+    ad2 = _seed_scraped_ad(cid)
+    monkeypatch.setattr(pipeline.assets, "download_image", lambda url, aid: "fake.jpg")
+    monkeypatch.setattr(pipeline.assets, "download_image_bytes", lambda url: b"fake-bytes")
+    monkeypatch.setattr(pipeline.deconstruct, "deconstruct_image", lambda **k: {"format": "hero", "angle": "a"})
+    calls = []
+
+    def spy(bp, product=None, **k):
+        calls.append(k.get("used_headlines"))
+        return {"headline": "Rejected Headline", "primary_text": "P",
+                "image_subtext": "Rejected sub", "cta": "C"}
+    monkeypatch.setattr(pipeline.generate_copy, "generate_copy_live", spy)
+    monkeypatch.setattr(pipeline.compliance, "check_compliance", lambda copy, name, text, **k: (False, ["bad"]))
+    try:
+        result = pipeline.generate_from_selection([ad1, ad2])
+        assert result["failed"] == 2
+        assert len(calls) == 4  # MAX_COPY_ATTEMPTS=2 retries, per ad, both always failing
+        assert all(c is None for c in calls)  # never once saw a used_headlines entry
+    finally:
+        with dedupe.get_conn() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM pipeline_warnings WHERE detail LIKE %s OR detail LIKE %s",
+                        (f"%{ad1}%", f"%{ad2}%"))
+            conn.commit()
+        _cleanup(cid, [ad1, ad2])
+
+
 def test_generate_from_selection_no_apify_call(monkeypatch):
     """No fetch happens here - the pool is already stored. scrape.scrape_ads_with_raw
     must never be called from this path."""
