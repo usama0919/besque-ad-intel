@@ -5,6 +5,7 @@ ad or failed stage is skipped cleanly without stopping the run.
 """
 import os
 import logging
+from dataclasses import dataclass
 from src import dedupe, scrape, assets, deconstruct, generate_copy, generate_image_prompt, generate_image_prompt_writer, slack_review, compliance, output_critic, content_safety, reference_format
 from src.retry import with_retry
 
@@ -238,11 +239,41 @@ def _reference_has_nothing_to_clone(blueprint):
     return True
 
 
+@dataclass(frozen=True)
+class BatchAdConfig:
+    """The run-strip controls that are singular per generate_from_selection/run_once call
+    today (see the 2026-08-10 CLAUDE.md note: every creative control on this function's own
+    signature is batch-wide, not per-ad) - snapshotted into one immutable value per ad so a
+    future per-ad override can be introduced by constructing a different instance per ad,
+    without hunting down every place a run-strip value is read out of the enclosing
+    function's own arguments.
+
+    frozen=True raises on reassigning a field (config.realism = "x") but does NOT deep-freeze
+    - a field holding a mutable value (list/dict) could still be mutated in place. None of
+    these eight fields are ever a list/dict today (angle_id/realism/body_area/offer_text/
+    operator_instruction are str-or-None, text_in_image/include_product/edit_mode are
+    bool-or-None), so this is a non-issue for THIS dataclass as defined - noted for whoever
+    adds a field later.
+
+    Deliberately excludes product/reference_images/messaging_angle - those are mutable,
+    resolved once per whole batch (not per ad), and continue to be passed as separate
+    arguments exactly as before this dataclass existed."""
+    angle_id: int = None
+    realism: str = None
+    body_area: str = None
+    text_in_image: bool = False
+    include_product: bool = None
+    edit_mode: bool = None
+    offer_text: str = None
+    operator_instruction: str = None
+
+
 def generate_from_selection(ad_ids, angle_id=None, body_area=None, offer_text=None,
                              instruction=None, product_id=None, should_stop=None,
                              regenerate=False, on_ad_done=None,
                              text_in_image=False, include_product=None, edit_mode=None,
-                             check_output=False, retheme_colours=None, realism=None):
+                             check_output=False, retheme_colours=None, realism=None,
+                             per_ad_overrides=None):
     """Generate drafts for an EXPLICIT list of already-fetched ads, rather than
     driving generation off scrape order. No Apify call - fetch_pool already
     stored the pool; this only reads scraped_ads and calls process_ad per
@@ -276,6 +307,21 @@ def generate_from_selection(ad_ids, angle_id=None, body_area=None, offer_text=No
     production_style (the writer's effective_realism logic), never to silence - but an
     operator could never override it. Forwarded straight through to process_ad, same
     name, same default.
+
+    per_ad_overrides (batch-quality fix): optional {ad_id: {field: value}} map, ad_id
+    keyed exactly like ad_ids/on_ad_done. Each value dict may hold any SUBSET of realism/
+    body_area/include_product/edit_mode/text_in_image - the five fields that were
+    previously identical for every ad in a selection because they only ever came from one
+    shared run strip (see BatchAdConfig's own docstring and the 2026-08-10 CLAUDE.md note
+    on batch degradation). A key present in an ad's override dict wins over the run-strip
+    value for that ad only; a key genuinely ABSENT falls back to the run-strip value
+    exactly as before this parameter existed - same None-means-not-supplied convention
+    used everywhere else in this module, so an override explicitly set to None (rather
+    than omitted) DOES win and overrides to None, same as any other field. offer_text and
+    operator_instruction are deliberately NOT overridable here - the team confirmed those
+    stay run-level free text, not per-ad. An empty dict, an ad_id with no entry, or
+    per_ad_overrides=None (the default) all behave identically to today - nothing here
+    changes behaviour for a caller that doesn't pass this.
 
     should_stop, if given, is checked BETWEEN ads (same as run_once) AND is
     forwarded into process_ad, which checks it once more immediately before the
@@ -402,6 +448,17 @@ def generate_from_selection(ad_ids, angle_id=None, body_area=None, offer_text=No
             summary["by_ad"][ad_id] = "failed"
             _report(ad_id, "failed")
             continue
+        ad_overrides = (per_ad_overrides or {}).get(ad_id) or {}
+        cfg = BatchAdConfig(
+            angle_id=angle_id,
+            realism=ad_overrides.get("realism", realism),
+            body_area=ad_overrides.get("body_area", body_area),
+            text_in_image=ad_overrides.get("text_in_image", text_in_image),
+            include_product=ad_overrides.get("include_product", include_product),
+            edit_mode=ad_overrides.get("edit_mode", edit_mode),
+            offer_text=offer_text,
+            operator_instruction=instruction,
+        )
         ad = scrape._map_ad(row.get("raw_meta") or {})
         dedupe.update_scraped_ad_status(ad_id, row["competitor_id"], "generating")
         result = process_ad(
@@ -410,6 +467,7 @@ def generate_from_selection(ad_ids, angle_id=None, body_area=None, offer_text=No
             text_in_image=text_in_image, include_product=include_product, edit_mode=edit_mode,
             check_output=check_output, retheme_colours=retheme_colours, realism=realism,
             should_stop=should_stop, explicit_selection=True, regenerate=regenerate,
+            config=cfg,
         )
         dedupe.update_scraped_ad_status(ad_id, row["competitor_id"], result)
         summary[result] += 1
@@ -706,7 +764,8 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
                 realism=None, text_in_image=False, include_product=None,
                 body_area=None, offer_text=None, edit_mode=None, operator_instruction=None,
                 check_output=False, retheme_colours=None, ad_index=None, total_ads=None,
-                should_stop=None, explicit_selection=False, regenerate=False, product_count=None):
+                should_stop=None, explicit_selection=False, regenerate=False, product_count=None,
+                config=None):
     """Run one ad through the full pipeline. Returns processed/skipped/failed.
 
     include_product/retheme_colours/edit_mode default to None, not a concrete bool
@@ -834,7 +893,24 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
     operator_instruction as a targeted delta on top. Never a fresh deconstruct/copy run -
     those stay reused from the existing artifact. Falls back to a normal first generation
     (this same function, from the top) when no artifact exists yet, rather than failing an
-    ad for having no history."""
+    ad for having no history.
+
+    config, if given, is a BatchAdConfig (frozen, generate_from_selection) snapshot of the
+    eight run-strip fields it holds - belt and braces with the caller's own explicit
+    keyword args, which generate_from_selection still passes unchanged. Both carry the same
+    values today, so this is output-identical whether or not config is supplied; the point
+    is only to have one immutable per-ad value future per-ad-override work can build on,
+    not to change what any single call resolves to yet. angle_id is deliberately NOT read
+    from config here - messaging_angle keeps flowing exactly as before."""
+    if config is not None:
+        realism = config.realism
+        body_area = config.body_area
+        text_in_image = config.text_in_image
+        include_product = config.include_product
+        edit_mode = config.edit_mode
+        offer_text = config.offer_text
+        operator_instruction = config.operator_instruction
+
     # Captured RAW (possibly None) before normalization, so _regenerate_existing_draft's
     # resolver can tell "this call explicitly supplied a value" apart from "nothing came
     # in, fall back to the stored artifact value" (Task F, point 1). This is the exact gap

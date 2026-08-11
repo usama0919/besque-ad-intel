@@ -223,6 +223,107 @@ def test_api_generate_rejects_invalid_realism():
     assert "realism" in r.json()["error"]
 
 
+# ---- per_ad_overrides validation (batch-quality fix): rejected with 400 naming the
+# offending key BEFORE dedupe.start_generate_job ever runs, so these need no DB seeding
+# or cleanup - same shape as test_api_generate_rejects_invalid_realism above. ----
+
+def test_api_generate_rejects_unknown_per_ad_override_field():
+    """A typo'd field name (e.g. 'realsim') must be rejected loudly, not silently ignored -
+    silently doing nothing is the worst outcome per the review that asked for this."""
+    client = TestClient(dashboard.app)
+    r = client.post("/api/generate", json={
+        "ad_ids": ["X"], "per_ad_overrides": {"X": {"realsim": "illustrated"}},
+    })
+    assert r.status_code == 400
+    assert "realsim" in r.json()["error"]
+    assert "X" in r.json()["error"]
+
+
+def test_api_generate_rejects_per_ad_override_key_not_in_ad_ids():
+    client = TestClient(dashboard.app)
+    r = client.post("/api/generate", json={
+        "ad_ids": ["X"], "per_ad_overrides": {"Y": {"realism": "illustrated"}},
+    })
+    assert r.status_code == 400
+    assert "Y" in r.json()["error"]
+    assert "ad_ids" in r.json()["error"]
+
+
+def test_api_generate_rejects_invalid_realism_in_per_ad_override():
+    """Same allowed set the run-strip realism field already validates against - a per-ad
+    override must not be a free string that reaches the prompt unconstrained."""
+    client = TestClient(dashboard.app)
+    r = client.post("/api/generate", json={
+        "ad_ids": ["X"], "per_ad_overrides": {"X": {"realism": "cartoonish"}},
+    })
+    assert r.status_code == 400
+    assert "realism" in r.json()["error"]
+
+
+def test_api_generate_rejects_non_dict_per_ad_overrides():
+    client = TestClient(dashboard.app)
+    r = client.post("/api/generate", json={"ad_ids": ["X"], "per_ad_overrides": ["not", "a", "dict"]})
+    assert r.status_code == 400
+    assert "per_ad_overrides" in r.json()["error"]
+
+
+def test_api_generate_rejects_non_dict_override_entry():
+    client = TestClient(dashboard.app)
+    r = client.post("/api/generate", json={"ad_ids": ["X"], "per_ad_overrides": {"X": "not-a-dict"}})
+    assert r.status_code == 400
+    assert "X" in r.json()["error"]
+
+
+def test_api_generate_rejects_offer_text_as_per_ad_override_field():
+    """offer_text/instruction stay run-level only - never overridable per ad, so they're
+    not in the allowed field set even though they're valid top-level body keys."""
+    client = TestClient(dashboard.app)
+    r = client.post("/api/generate", json={
+        "ad_ids": ["X"], "per_ad_overrides": {"X": {"offer_text": "20% off"}},
+    })
+    assert r.status_code == 400
+    assert "offer_text" in r.json()["error"]
+
+
+def test_api_generate_per_ad_overrides_omitted_defaults_to_none(monkeypatch):
+    cid = _make_competitor()
+    ad_id = _seed_scraped_ad(cid)
+    captured = {}
+
+    def fake_generate_from_selection(ad_ids, **kwargs):
+        captured.update(kwargs)
+        return {"processed": 0, "skipped": 0, "failed": 0, "already_generated": 0, "by_ad": {}}
+    monkeypatch.setattr(pipeline, "generate_from_selection", fake_generate_from_selection)
+    try:
+        client = TestClient(dashboard.app)
+        r = client.post("/api/generate", json={"ad_ids": [ad_id]})
+        assert r.status_code == 200
+        _join_generate_thread()
+        assert captured["per_ad_overrides"] is None
+    finally:
+        _cleanup(cid, [ad_id])
+
+
+def test_api_generate_valid_per_ad_overrides_reach_generate_from_selection_intact(monkeypatch):
+    cid = _make_competitor()
+    ad_id = _seed_scraped_ad(cid)
+    captured = {}
+    overrides = {ad_id: {"realism": "illustrated", "body_area": "legs", "include_product": False}}
+
+    def fake_generate_from_selection(ad_ids, **kwargs):
+        captured.update(kwargs)
+        return {"processed": 0, "skipped": 0, "failed": 0, "already_generated": 0, "by_ad": {}}
+    monkeypatch.setattr(pipeline, "generate_from_selection", fake_generate_from_selection)
+    try:
+        client = TestClient(dashboard.app)
+        r = client.post("/api/generate", json={"ad_ids": [ad_id], "per_ad_overrides": overrides})
+        assert r.status_code == 200
+        _join_generate_thread()
+        assert captured["per_ad_overrides"] == overrides
+    finally:
+        _cleanup(cid, [ad_id])
+
+
 def test_api_production_styles_matches_validator():
     client = TestClient(dashboard.app)
     r = client.get("/api/production_styles")

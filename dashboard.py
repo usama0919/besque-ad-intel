@@ -1018,6 +1018,39 @@ def api_fetch_status(competitor_id: int):
     return JSONResponse({"status": job["status"], "result": job["result"], "error": job["error"]})
 
 
+PER_AD_OVERRIDE_FIELDS = {"realism", "body_area", "include_product", "edit_mode", "text_in_image"}
+
+
+def _validate_per_ad_overrides(per_ad_overrides, ad_ids):
+    """Returns an error string naming the offending key, or None if the whole structure is
+    valid. Never coerces - a bad shape, an unknown field, or an ad_id not in this call's own
+    ad_ids is rejected outright with a 400, not dropped or guessed at silently. A typo'd
+    field name that silently did nothing would be the worst outcome: the operator sets a
+    per-ad override, sees no error, and gets the run-strip value anyway with no signal why.
+    offer_text/instruction are deliberately not in PER_AD_OVERRIDE_FIELDS - those stay
+    run-level only (see generate_from_selection's own per_ad_overrides docstring)."""
+    if per_ad_overrides is None:
+        return None
+    if not isinstance(per_ad_overrides, dict):
+        return "per_ad_overrides must be an object keyed by ad_id"
+    ad_id_set = set(ad_ids)
+    for ad_id, override in per_ad_overrides.items():
+        if ad_id not in ad_id_set:
+            return f"per_ad_overrides key '{ad_id}' is not in ad_ids"
+        if not isinstance(override, dict):
+            return f"per_ad_overrides['{ad_id}'] must be an object"
+        for field in override:
+            if field not in PER_AD_OVERRIDE_FIELDS:
+                return (f"per_ad_overrides['{ad_id}'] has unknown field '{field}' - "
+                        f"allowed fields: {sorted(PER_AD_OVERRIDE_FIELDS)}")
+        if "realism" in override:
+            realism_value = override["realism"]
+            if realism_value is not None and realism_value not in validator.production_styles():
+                return (f"per_ad_overrides['{ad_id}']['realism'] must be one of "
+                        f"{validator.production_styles()}, or omitted")
+    return None
+
+
 def _bool_or_none(body, key):
     """None when `key` is genuinely absent from the request body - never silently
     defaulted here. Coerced to a real bool only when the key is present, whatever its
@@ -1053,7 +1086,15 @@ async def api_generate(request: Request):
     - forwarded into generate_from_selection, which checks it BETWEEN ads and
     passes it into process_ad, which checks it once more immediately before the
     paid Gemini call. on_ad_done writes live progress into generate_jobs.progress
-    after each ad finishes, not just once the whole selection is done."""
+    after each ad finishes, not just once the whole selection is done.
+
+    per_ad_overrides (batch-quality fix): optional {ad_id: {field: value}}, validated by
+    _validate_per_ad_overrides before this ever reaches pipeline.py - an unknown field
+    name, an ad_id not in this call's own ad_ids, or a realism value outside
+    validator.production_styles() all reject the WHOLE request with 400 naming the
+    offending key, never silently dropped or coerced. Only realism/body_area/
+    include_product/edit_mode/text_in_image may be overridden per ad; offer_text/
+    instruction stay run-level exactly as today."""
     body = await request.json()
     ad_ids = body.get("ad_ids")
     if not ad_ids or not isinstance(ad_ids, list):
@@ -1083,6 +1124,10 @@ async def api_generate(request: Request):
             {"ok": False, "error": f"realism must be one of {validator.production_styles()}, or omitted"},
             status_code=400,
         )
+    per_ad_overrides = body.get("per_ad_overrides")
+    override_error = _validate_per_ad_overrides(per_ad_overrides, ad_ids)
+    if override_error:
+        return JSONResponse({"ok": False, "error": override_error}, status_code=400)
 
     job_id = uuid.uuid4().hex
     dedupe.start_generate_job(job_id, ad_ids)
@@ -1104,6 +1149,7 @@ async def api_generate(request: Request):
                 text_in_image=text_in_image, include_product=include_product, edit_mode=edit_mode,
                 check_output=check_output, retheme_colours=retheme_colours, realism=realism,
                 should_stop=_job_should_stop, on_ad_done=_on_ad_done,
+                per_ad_overrides=per_ad_overrides,
             )
             dedupe.finish_generate_job(job_id, result=result)
         except Exception as e:
