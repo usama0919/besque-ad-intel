@@ -117,6 +117,28 @@ def test_illustrated_production_style_has_its_own_guidance_not_the_default():
     assert generate_image_prompt.DEFAULT_STYLE_GUIDANCE not in prompt
 
 
+def test_plain_template_branch_explicit_realism_wins_over_blueprint_style():
+    """Line 369's STYLE_GUIDANCE lookup used to read prod_style unconditionally, ignoring
+    any explicit realism argument entirely - the one branch (no edit_mode, no
+    creative_description) that didn't match line 329's own precedence. An explicit realism
+    must win over the blueprint's own detected production_style here too, same as edit
+    mode - never a different resolution order for this branch."""
+    bp = _blueprint()
+    bp["production_style"] = {"style": "high_spec_studio"}
+    prompt = generate_image_prompt.build_image_prompt(bp, realism="illustrated")
+    assert generate_image_prompt_writer.STYLE_GUIDANCE["illustrated"] in prompt
+    assert generate_image_prompt_writer.STYLE_GUIDANCE["high_spec_studio"] not in prompt
+
+
+def test_plain_template_branch_falls_back_to_blueprint_style_when_realism_omitted():
+    """Companion to the override test above - confirms the fallback leg of the same
+    precedence still works when realism is None (today's existing, unchanged behaviour)."""
+    bp = _blueprint()
+    bp["production_style"] = {"style": "ugc_native"}
+    prompt = generate_image_prompt.build_image_prompt(bp, realism=None)
+    assert generate_image_prompt_writer.STYLE_GUIDANCE["ugc_native"] in prompt
+
+
 def test_style_guidance_has_every_canonical_style():
     """Mirrors the module-level assertion in generate_image_prompt_writer.py - a schema
     addition to validator.production_styles() can't silently ship without matching

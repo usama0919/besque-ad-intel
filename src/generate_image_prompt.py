@@ -366,7 +366,8 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
             + product_clause +
             f"Palette and mood: {palette}. Text placement: {text_placement}. "
             f"Square 1:1 aspect ratio composition. "
-            + generate_image_prompt_writer.STYLE_GUIDANCE.get(prod_style, DEFAULT_STYLE_GUIDANCE)
+            + generate_image_prompt_writer.STYLE_GUIDANCE.get(
+                (realism or "").strip() or prod_style, DEFAULT_STYLE_GUIDANCE)
             + _bottle_fixed_clause() + _bottle_register_clause(scene_lighting) +
             closing
         )
