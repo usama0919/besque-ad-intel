@@ -908,6 +908,12 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
     calling process_ad directly) disables this entirely: no clause is added and nothing
     is appended anywhere.
 
+    Only the most recent USED_HEADLINES_CAP (3) entries are ever READ into the prompt
+    (2026-08-11) - the accumulator itself stays unbounded and append-only, this function
+    just slices the tail of it. An unbounded list was making copy noticeably worse by the
+    5th/6th ad in a run: later ads were avoiding every earlier headline AND subline at
+    once, writing around a growing constraint list instead of a stable-sized one.
+
     include_product/retheme_colours/edit_mode default to None, not a concrete bool
     (Task F, point 1, 2026-08-07) - None means "the caller genuinely did not supply this
     for this call," never conflated with an explicit False. dashboard.py now passes None
@@ -1237,12 +1243,21 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
         # NO_ANGLE_LANGUAGE fallback treats as "no angle-specific language supplied" -
         # never a substituted/guessed vocabulary from a different angle.
         angle_language = dedupe.get_angle_language(messaging_angle["slug"]) if messaging_angle else None
+        # Capped to the most recent USED_HEADLINES_CAP entries (2026-08-11) - the full,
+        # unbounded run history was making copy quality degrade noticeably by the 5th/6th
+        # ad: later ads were told to avoid every earlier headline AND subline, writing
+        # around a growing constraint list rather than a stable one. The accumulator
+        # itself (generate_from_selection/run_once) stays a plain, unbounded, append-only
+        # list - this caps only what's READ from it here, so nothing is ever lost, and
+        # lowering/raising the cap later is a one-line change with no effect on the
+        # accumulation logic itself.
+        USED_HEADLINES_CAP = 3
         for copy_attempt in range(1, MAX_COPY_ATTEMPTS + 1):
             copy_kwargs = {"product": product, "offer_text": offer_text}
             if angle_language:
                 copy_kwargs["angle_language"] = angle_language
             if used_headlines:
-                copy_kwargs["used_headlines"] = used_headlines
+                copy_kwargs["used_headlines"] = used_headlines[-USED_HEADLINES_CAP:]
             if copy_attempt > 1:
                 # Fail-soft: feed the SPECIFIC prior failure back rather than discarding
                 # the ad outright. On-category pool is small (36 ads) - throwing one away
@@ -1370,10 +1385,11 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
                     # zones), same "caller decides, this just forwards" pattern as
                     # offer_text/realism.
                     cta_text=copy.get("cta") or None,
-                    # panel_copy (2026-08-06): generate_copy_live's per-panel output for a
-                    # multi-panel comparison reference (see generate_copy.comparison_panels)
-                    # - only consumed by structural_zones' sub_line/body_copy routing in edit
-                    # mode, a no-op everywhere else, same forwarding pattern as cta_text.
+                    # panel_copy (2026-08-06, generalised 2026-08-11): generate_copy_live's
+                    # per-zone output for any sub_line/body_copy zone(s) (see
+                    # generate_copy.text_zone_targets) - only consumed by structural_zones'
+                    # sub_line/body_copy routing in edit mode, a no-op everywhere else, same
+                    # forwarding pattern as cta_text.
                     panel_copy=copy.get("panel_copy") or None,
                     testimonial=testimonial,
                     product_count=product_count,

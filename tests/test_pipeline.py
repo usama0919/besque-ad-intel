@@ -258,6 +258,55 @@ def test_process_ad_clone_mode_off_by_default_leaves_realism_unaffected(monkeypa
         _clone_mode_cleanup(ad_id)
 
 
+# ---- used_headlines capped to the most recent 3 entries (2026-08-11) - an unbounded run
+# history was making copy noticeably worse by the 5th/6th ad: later ads were avoiding
+# every earlier headline AND subline at once, writing around a growing constraint list
+# instead of a stable-sized one. Spies on generate_copy_live (not generate_image) since
+# the cap is applied at the point used_headlines is read into copy_kwargs. ----
+
+def _mock_all_stages_capturing_copy_kwargs(monkeypatch):
+    monkeypatch.setattr(pipeline.assets, "download_image", lambda url, aid: "fake.jpg")
+    monkeypatch.setattr(pipeline.assets, "download_image_bytes", lambda url: b"fake-bytes")
+    monkeypatch.setattr(pipeline.deconstruct, "deconstruct_image", lambda **k: {"format": "hero"})
+    captured = {}
+
+    def fake_generate_copy_live(bp, product=None, **k):
+        captured.update(k)
+        return {"headline": "H", "primary_text": "P", "image_subtext": "S", "cta": "C"}
+    monkeypatch.setattr(pipeline.generate_copy, "generate_copy_live", fake_generate_copy_live)
+    monkeypatch.setattr(pipeline.compliance, "check_compliance", lambda copy, name, text, **k: (True, []))
+    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image",
+                        lambda bp, aid, product=None, reference_images=None, **k: "draft.png")
+    monkeypatch.setattr(pipeline.slack_review, "post_review", lambda *a, **k: {"ts": "123"})
+    monkeypatch.setattr(pipeline.dedupe, "save_artifact", lambda **k: None)
+    return captured
+
+
+def test_process_ad_used_headlines_capped_to_most_recent_three(monkeypatch):
+    dedupe.init_db()
+    ad_id, ad = _clone_mode_ad()
+    six_prior_entries = [{"headline": f"H{i}", "image_subtext": f"S{i}"} for i in range(6)]
+    captured = _mock_all_stages_capturing_copy_kwargs(monkeypatch)
+    try:
+        assert pipeline.process_ad(ad, used_headlines=six_prior_entries) == "processed"
+        assert captured["used_headlines"] == six_prior_entries[-3:]
+        assert len(captured["used_headlines"]) == 3
+    finally:
+        _clone_mode_cleanup(ad_id)
+
+
+def test_process_ad_used_headlines_under_cap_passed_through_unchanged(monkeypatch):
+    dedupe.init_db()
+    ad_id, ad = _clone_mode_ad()
+    two_prior_entries = [{"headline": "H0", "image_subtext": "S0"}, {"headline": "H1", "image_subtext": "S1"}]
+    captured = _mock_all_stages_capturing_copy_kwargs(monkeypatch)
+    try:
+        assert pipeline.process_ad(ad, used_headlines=two_prior_entries) == "processed"
+        assert captured["used_headlines"] == two_prior_entries
+    finally:
+        _clone_mode_cleanup(ad_id)
+
+
 # ---- Regression guard (2026-08-05): every process_ad test above mocks
 # dedupe.save_artifact away via _mock_all_stages, so none of them can catch process_ad
 # passing a kwarg the REAL save_artifact doesn't accept (or vice versa) - a signature

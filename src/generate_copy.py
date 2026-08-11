@@ -17,7 +17,7 @@ Return ONLY valid JSON, no preamble or markdown, with exactly these fields:
 - headline (string)
 - primary_text (string)
 - cta (string)
-- image_subtext (string): ONE short line suitable for rendering directly ONTO the image itself - under about 12 words, NOT the full primary_text body copy. Empty string "" if no short line is appropriate for this ad.
+{image_subtext_field}
 
 Rules:
 - Do NOT mention or reference any competitor brand name.
@@ -83,7 +83,30 @@ NO_ANGLE_LANGUAGE = (
     "vocabulary from a different angle."
 )
 
-PRODUCT_FACT_KEYS = ("name", "ingredients", "hero_claim")
+# image_subtext's field description is CONDITIONAL, computed once per call by
+# _image_subtext_field (2026-08-11) - never both variants in the same prompt. Stating the
+# empty-string permission unconditionally at the top AND revoking it later (once a zone is
+# known to exist) would be exactly the "prompt demands and forbids the same thing" shape
+# that produced artifact 1136 (see CLAUDE.md) - so the field's own description is what
+# changes per call, not a later clause contradicting an earlier one.
+IMAGE_SUBTEXT_FIELD_DEFAULT = (
+    '- image_subtext (string): ONE short line suitable for rendering directly ONTO the '
+    'image itself - under about 12 words, NOT the full primary_text body copy. Empty '
+    'string "" if no short line is appropriate for this ad.'
+)
+IMAGE_SUBTEXT_FIELD_ZONE_PRESENT = (
+    '- image_subtext (string): ONE short line suitable for rendering directly ONTO the '
+    'image itself - under about 12 words, NOT the full primary_text body copy. This '
+    'reference has a sub_line/body_copy zone that will be REMOVED from the generated '
+    'image if this is left empty - a real container exists there and needs real Besque '
+    'wording, not the reference\'s own text. Must NOT be empty string this time.'
+)
+
+
+def _image_subtext_field(has_text_zone):
+    return IMAGE_SUBTEXT_FIELD_ZONE_PRESENT if has_text_zone else IMAGE_SUBTEXT_FIELD_DEFAULT
+
+PRODUCT_FACT_KEYS = ("name",)
 
 
 def _offer_clause(offer_text=""):
@@ -104,16 +127,19 @@ def _product_facts(product):
     """Only the fields the copywriter needs as CLAIM CONSTRAINTS - keeps id, image_key
     and category out of the prompt. Empty fields are omitted rather than sent as blanks.
 
-    description is deliberately NOT in PRODUCT_FACT_KEYS (removed 2026-08-11): it was a
-    marketing sentence ("A luxury fragrant blend of 7 cold-pressed oils."), not a claim
-    fact, and its presence here - regardless of the "CONSTRAINT, not a copy source"
-    framing in COPY_PROMPT's own PRODUCT header - was still exactly the kind of material
-    a copywriter reads and paraphrases. Three separate drafts in one run converged on
-    its literal wording ("7 [cold-pressed] oils...") despite that header. The 2026-08-10
-    fix (TIER 1 escalated to REQUIRED, PRODUCT reworded as a constraint) was a stronger
-    instruction, not a removal - description was still sitting in the prompt for the
-    model to draw from. This removal is the structural fix: name/ingredients/hero_claim
-    remain (real claim facts a copywriter must not exceed), description does not."""
+    PRODUCT_FACT_KEYS is name-only (2026-08-11) - description AND ingredients were both
+    removed, not just reworded. description was removed first (a marketing sentence, "A
+    luxury fragrant blend of 7 cold-pressed oils.") - the 2026-08-10 fix (TIER 1 escalated
+    to REQUIRED, PRODUCT reworded as a "CONSTRAINT, not a copy source") was a stronger
+    instruction, not a removal, and three drafts in one run still converged on that exact
+    phrasing. Removing description did NOT close the gap: ingredients ("Almond
+    (hydrates...); Primrose (increases elasticity...)...") still listed "7 cold-pressed
+    oils" worth of material for the model to draw the same headline from, same failure
+    shape, different field. hero_claim is ALSO removed even though it's currently blanked
+    in the DB (pending Harry's approved_claims) - leaving the key in PRODUCT_FACT_KEYS
+    would silently start reaching this prompt again the moment that field is repopulated,
+    with nothing here to catch it. name is the only field left because it's not a claim
+    at all - nothing to substantiate, nothing to paraphrase into a headline."""
     if not product:
         return NO_PRODUCT
     facts = {k: product.get(k) for k in PRODUCT_FACT_KEYS
@@ -179,57 +205,100 @@ def _angle_language_clause(angle_language):
     )
 
 
-# zone_types that carry per-panel copy in a multi-panel comparison layout (structural_zones,
-# 2026-08-06 schema addition) - cta is deliberately excluded, a comparison ad has one CTA,
-# not one per panel.
+# zone_types that carry per-zone copy via the panel_copy output field (structural_zones,
+# 2026-08-06 schema addition) - cta is deliberately excluded here: it's a single output
+# field, not a list, so it gets its own detector/clause below (_cta_zone/_cta_zone_clause).
 _PANEL_COPY_ZONE_TYPES = ("sub_line", "body_copy")
 
 
-def comparison_panels(blueprint):
-    """The structural_zones entries (2026-08-06 schema) that make this reference a
-    multi-panel comparison, e.g. a two-panel before/after joke - TWO OR MORE sub_line/
-    body_copy zones, each with its own position and its own detail describing what that
-    specific panel shows. Returns [] for every ordinary single-panel reference (the
-    overwhelming majority) - callers must treat an empty list as "not a comparison",
-    never as a comparison with zero panels.
+def text_zone_targets(blueprint):
+    """Every sub_line/body_copy structural_zones entry in this reference (2026-08-06
+    schema), each with its own position and its own detail describing what that specific
+    zone shows. Returns [] when there are none at all - callers must treat an empty list
+    as "nothing to target", never a target with nothing in it.
+
+    Renamed from comparison_panels (2026-08-11): that name and its old >=2 gate were
+    describing only the multi-panel comparison case (a two-panel before/after joke) -
+    but a reference with exactly ONE sub_line/body_copy zone has the identical problem
+    a comparison does (nothing tells Claude the zone exists or that content is needed for
+    it specifically), and generate_image_prompt._structural_zones_clause's own
+    panel_copy_by_position lookup already builds a position-keyed map generically from
+    however many entries panel_copy contains - it needed zero changes to support this.
+    Only the >=2 gate and the "MULTI-PANEL COMPARISON" wording were wrong for N=1; the
+    image-side plumbing was always general.
 
     Detected here, not left to Claude to notice buried in the raw blueprint JSON - a real
     live failure (2026-08-06, Grüns GLP-1 two-panel joke: problem panel left, outcome panel
     right) had the model return byte-identical text in both panels, because nothing ever
-    told it a SECOND, DISTINCT piece of copy was expected at all."""
+    told it a SECOND, DISTINCT piece of copy was expected at all. The N=1 case is the same
+    failure shape with N=1: a reference with a real sub_line/body_copy zone got a
+    generically-empty image_subtext because nothing ever told Claude that specific zone
+    existed and needed content, and the zone was removed as a result."""
     zones = blueprint.get("structural_zones") or []
-    panels = [z for z in zones if z.get("zone_type") in _PANEL_COPY_ZONE_TYPES]
-    return panels if len(panels) >= 2 else []
+    return [z for z in zones if z.get("zone_type") in _PANEL_COPY_ZONE_TYPES]
 
 
-def _panel_copy_clause(panels):
-    """Instruction text appended when comparison_panels() finds a real multi-panel layout -
-    lists each panel's own position/detail so Claude writes DISTINCT copy matching what
-    THAT specific panel shows, rather than reusing one phrase for every panel. Position
-    strings are echoed back VERBATIM from the blueprint (not rephrased) so
-    generate_image_prompt._structural_zones_clause can match panel_copy entries back to
-    the exact structural_zones entry they belong to by position string."""
-    panel_lines = "\n".join(
-        f'  - position "{p.get("position", "")}": the reference shows - {p.get("detail", "")}'
-        for p in panels
+def _text_zone_copy_clause(zones):
+    """Instruction text appended when text_zone_targets() finds at least one sub_line/
+    body_copy zone - lists each zone's own position/detail so Claude writes copy matching
+    what THAT specific zone shows, rather than relying on a generic image_subtext line to
+    also happen to satisfy it. Position strings are echoed back VERBATIM from the
+    blueprint (not rephrased) so generate_image_prompt._structural_zones_clause can match
+    panel_copy entries back to the exact structural_zones entry they belong to by position
+    string. Works identically for exactly one zone or several - the "never repeat" rule
+    only has anything to bite on when there's more than one to repeat against."""
+    zone_lines = "\n".join(
+        f'  - position "{z.get("position", "")}": the reference shows - {z.get("detail", "")}'
+        for z in zones
     )
+    repeat_rule = (
+        " Every zone must get genuinely different wording matching its own described "
+        "content - never repeat the same phrase across zones, and never let one zone's "
+        "text describe what a DIFFERENT zone shows."
+    ) if len(zones) > 1 else ""
     return (
-        "\n\nMULTI-PANEL COMPARISON (STRICT): this reference has "
-        f"{len(panels)} distinct text panels, not one - each panel shows something "
-        f"DIFFERENT (e.g. a problem statement in one panel, the outcome in another), per "
-        f"the panel-specific detail below:\n{panel_lines}\n"
+        "\n\nTEXT ZONE COPY (STRICT): this reference has "
+        f"{len(zones)} distinct sub_line/body_copy zone(s) that need matching Besque "
+        f"copy, not the reference's own words, per the zone-specific detail below:\n{zone_lines}\n"
         "Also return an ADDITIONAL field, panel_copy: a list of EXACTLY "
-        f"{len(panels)} objects, one per panel above, each "
+        f"{len(zones)} objects, one per zone above, each "
         '{"position": "<the exact position string from the list above, verbatim>", '
-        '"text": "<a short line of Besque copy matching what THAT panel specifically '
-        'shows>"}. Every panel must get genuinely different wording matching its own '
-        "described content - never repeat the same phrase across panels, and never let "
-        "one panel's text describe what a DIFFERENT panel shows."
+        '"text": "<a short line of Besque copy matching what THAT zone specifically '
+        f'shows>"}}.{repeat_rule}'
+    )
+
+
+def _cta_zone(blueprint):
+    """The first cta-type structural_zones entry in this reference, or None. Unlike
+    sub_line/body_copy (which can be several, e.g. a two-panel comparison), COPY_PROMPT's
+    schema has a single `cta` output field to match - not a list - so this returns one
+    zone, never a collection, and there is no per-position matching needed the way
+    text_zone_targets/panel_copy has."""
+    zones = (blueprint or {}).get("structural_zones") or []
+    for z in zones:
+        if (z or {}).get("zone_type") == "cta":
+            return z
+    return None
+
+
+def _cta_zone_clause(cta_zone):
+    """Instruction text appended when _cta_zone() finds a real cta zone - names its
+    position/detail so Claude's own `cta` field supplies matching, non-empty wording
+    rather than a generic call-to-action that happens to also need to satisfy it. No new
+    output field - cta already exists in COPY_PROMPT's schema."""
+    if not cta_zone:
+        return ""
+    return (
+        "\n\nCTA ZONE (STRICT): this reference has a cta zone at position "
+        f"\"{cta_zone.get('position', '')}\" (the reference shows: "
+        f"{cta_zone.get('detail', '')}). Your own cta field must supply real, "
+        "action-oriented Besque wording for this zone - never left empty, and never the "
+        "reference's own label verbatim."
     )
 
 
 def _used_copy_clause(used_headlines):
-    """Additive clause (same pattern as _panel_copy_clause/compliance_feedback below) -
+    """Additive clause (same pattern as _text_zone_copy_clause/compliance_feedback below) -
     non-empty only when the caller (pipeline.py) is threading same-run awareness across
     ads via one shared, run-scoped list of {"headline", "image_subtext"} dicts. None or
     an empty list returns "" - the prompt is then byte-identical to before this existed,
@@ -287,11 +356,20 @@ def build_copy_prompt(blueprint, brand_voice="", approved_claims="", product=Non
     or any caller that doesn't pass it) leaves the prompt byte-identical to before this
     existed.
 
-    panel_copy (2026-08-06) is appended the same additive way as compliance_feedback below
-    - present only when comparison_panels(blueprint) finds a real multi-panel layout, so
-    every ordinary single-panel blueprint sees byte-for-byte the same prompt as before this
-    existed."""
+    panel_copy (2026-08-06, generalised 2026-08-11) is appended the same additive way as
+    compliance_feedback below - present whenever text_zone_targets(blueprint) finds at
+    least one sub_line/body_copy zone (ANY count, not just 2+ - see that function's own
+    docstring for why the old >=2 "comparison" gate was too narrow). image_subtext's own
+    field description (see _image_subtext_field) drops its "empty string is fine"
+    permission for exactly this same condition, so the two can never disagree about
+    whether this reference has a zone that needs filling. A cta zone (see _cta_zone) gets
+    its own separate clause the same way - it's a single output field, not a list, so it
+    doesn't fit the panel_copy shape. Every ordinary reference with neither kind of zone
+    sees byte-for-byte the same prompt as before any of this existed."""
+    zones = text_zone_targets(blueprint)
+    cta_zone = _cta_zone(blueprint)
     prompt = COPY_PROMPT.format(
+        image_subtext_field=_image_subtext_field(bool(zones)),
         brand_voice=brand_voice or NO_BRAND_VOICE,
         approved_claims=approved_claims or NO_APPROVED_CLAIMS,
         approved_testimonials=approved_testimonials or NO_APPROVED_TESTIMONIALS,
@@ -301,9 +379,10 @@ def build_copy_prompt(blueprint, brand_voice="", approved_claims="", product=Non
         offer_clause=_offer_clause(offer_text),
         angle_language_clause=_angle_language_clause(angle_language),
     )
-    panels = comparison_panels(blueprint)
-    if panels:
-        prompt += _panel_copy_clause(panels)
+    if zones:
+        prompt += _text_zone_copy_clause(zones)
+    if cta_zone:
+        prompt += _cta_zone_clause(cta_zone)
     if used_headlines:
         prompt += _used_copy_clause(used_headlines)
     if compliance_feedback:
@@ -325,15 +404,34 @@ def parse_copy(raw_text):
 REQUIRED_COPY_FIELDS = {"headline", "primary_text", "cta"}
 
 
-def validate_copy(copy):
+def validate_copy(copy, require_cta=False, require_image_subtext=False):
+    """require_cta/require_image_subtext (2026-08-11): mechanical backstop for the same
+    condition _cta_zone_clause/_image_subtext_field's prompt text already asks for - a
+    prompt instruction alone is the exact pattern that has repeatedly failed on this
+    codebase (see CLAUDE.md's top note). Before this, an empty cta already passed this
+    function silently: REQUIRED_COPY_FIELDS only checks the KEY exists, never that its
+    value is non-empty, so a model that decided no CTA was needed could return cta=""
+    with nothing here ever noticing. Callers pass True only when the reference actually
+    has a matching zone (see generate_copy_live) - the empty string is perfectly valid
+    whenever no such zone exists, exactly like today."""
     missing = REQUIRED_COPY_FIELDS - copy.keys()
     if missing:
         raise ValueError("Copy missing required fields: " + str(missing))
+    if require_cta and not (copy.get("cta") or "").strip():
+        raise ValueError(
+            "cta is empty but this reference has a cta zone that needs matching wording - "
+            "the zone will be removed from the image otherwise."
+        )
+    if require_image_subtext and not (copy.get("image_subtext") or "").strip():
+        raise ValueError(
+            "image_subtext is empty but this reference has a sub_line/body_copy zone that "
+            "needs matching wording - the zone will be removed from the image otherwise."
+        )
 
 
-def copy_from_response(raw_text):
+def copy_from_response(raw_text, require_cta=False, require_image_subtext=False):
     copy = parse_copy(raw_text)
-    validate_copy(copy)
+    validate_copy(copy, require_cta=require_cta, require_image_subtext=require_image_subtext)
     return copy
 
 
@@ -391,11 +489,22 @@ def generate_copy_live(blueprint, brand_voice="", approved_claims="", product=No
     "none supplied" fallback text - see NO_ANGLE_LANGUAGE).
 
     used_headlines: see build_copy_prompt's/_used_copy_clause's docstrings - forwarded
-    straight through, None or [] reproduces today's exact prompt."""
+    straight through, None or [] reproduces today's exact prompt.
+
+    require_cta/require_image_subtext (2026-08-11) are derived from THIS SAME blueprint,
+    once, here - never passed in by the caller - so the mechanical check in validate_copy
+    can never drift from what the prompt itself just asked for (_cta_zone_clause/
+    _image_subtext_field above read the identical _cta_zone(blueprint)/
+    text_zone_targets(blueprint)). A raised ValueError is caught by this function's OWN
+    retry loop below exactly like any other validation failure - an empty cta/
+    image_subtext against a real zone gets the same second attempt a malformed-JSON
+    response would, no separate retry path invented for this."""
     prompt = build_copy_prompt(blueprint, brand_voice, approved_claims, product=product,
                                 approved_testimonials=approved_testimonials,
                                 compliance_feedback=compliance_feedback, offer_text=offer_text,
                                 angle_language=angle_language, used_headlines=used_headlines)
+    require_cta = bool(_cta_zone(blueprint))
+    require_image_subtext = bool(text_zone_targets(blueprint))
     client = anthropic.Anthropic(timeout=60.0, max_retries=1)  # reads ANTHROPIC_API_KEY from env
 
     total = len(_COPY_ATTEMPTS)
@@ -413,7 +522,7 @@ def generate_copy_live(blueprint, brand_voice="", approved_claims="", product=No
         raw_text = ""
         try:
             raw_text = message.content[0].text if message.content else ""
-            return copy_from_response(raw_text)
+            return copy_from_response(raw_text, require_cta=require_cta, require_image_subtext=require_image_subtext)
         except Exception as e:
             _log_parse_failure(attempt, total, max_tokens, message, raw_text, e)
             if attempt == total:

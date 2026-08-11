@@ -1709,6 +1709,48 @@ def test_structural_zones_clause_product_callout_removes_when_product_name_empty
     assert "product_callout" in clause
 
 
+# ---- _is_stat_shaped_zone (2026-08-11): shape-based, not a list of known numbers - reuses
+# compliance.py's own NUMERIC_CLAIM_PATTERN/RATIO_CLAIM_PATTERN/TIMESCALE_CLAIM_PATTERN so a
+# stat-shaped detail is detected by its FORM (any percentage, any "N out of M", any "Nx
+# more/faster", any "in N days/weeks/hours"), never a specific value from any real ad. ----
+
+def test_is_stat_shaped_zone_true_for_percentage():
+    assert generate_image_prompt._is_stat_shaped_zone("94% saw visible results") is True
+
+
+def test_is_stat_shaped_zone_true_for_ratio_claim():
+    assert generate_image_prompt._is_stat_shaped_zone("9 out of 10 customers agree") is True
+    assert generate_image_prompt._is_stat_shaped_zone("3x faster absorption") is True
+
+
+def test_is_stat_shaped_zone_true_for_timescale_claim():
+    assert generate_image_prompt._is_stat_shaped_zone("results in just 7 days") is True
+
+
+def test_is_stat_shaped_zone_false_for_non_stat_control():
+    """A bottle size is a number too, but it's not a stat/efficacy claim shape - a
+    control case proving this isn't just "does the string contain a digit"."""
+    assert generate_image_prompt._is_stat_shaped_zone("reads 8 fl oz / 240ml") is False
+    assert generate_image_prompt._is_stat_shaped_zone("New Scent card - Coconut Vanilla") is False
+    assert generate_image_prompt._is_stat_shaped_zone("") is False
+    assert generate_image_prompt._is_stat_shaped_zone(None) is False
+
+
+def test_structural_zones_clause_product_callout_removes_when_stat_shaped_even_with_product_name():
+    """A callout whose reference content is a statistic has no Besque counterpart - the
+    product name must NOT be substituted in, even though product_name is supplied and
+    would normally win."""
+    clause, substituted = generate_image_prompt._structural_zones_clause(
+        [_szone("product_callout", detail="91% saw visibly firmer skin in 4 weeks")],
+        product_name="Besque Magic Body Oil",
+    )
+    assert substituted == set()
+    assert "STRUCTURAL ZONES - SUBSTITUTE" not in clause
+    assert "Besque Magic Body Oil" not in clause
+    assert "STRUCTURAL ZONES - REMOVE" in clause
+    assert "product_callout" in clause
+
+
 def test_structural_zones_clause_social_proof_aggregate_bar_always_removed():
     """2026-08-06, fabricated-testimonials fix: an aggregate_bar (review count/star
     average) has no approved figure to substitute (held pending Harry - see CLAUDE.md),

@@ -4,7 +4,7 @@ import logging
 import math
 import os
 from PIL import Image
-from src import assets, generate_image_prompt_writer
+from src import assets, generate_image_prompt_writer, compliance
 from src.compliance_rules import COMPLIANCE_RULES
 
 IMAGE_MODEL = os.getenv("IMAGE_MODEL", "placeholder-image-model")
@@ -781,6 +781,27 @@ def _is_cert_shaped_badge(detail):
     return any(kw in detail_lower for kw in CERT_BADGE_KEYWORDS)
 
 
+# Stat-shaped zone detection (2026-08-11, product_callout): a callout whose OWN reference
+# content is a numeric/percentage/ratio/timescale claim ("94% saw visible results", "9 out
+# of 10 customers agree", "3x faster", "results in just 7 days") has no Besque counterpart
+# to substitute - Besque did not run the study that produced THAT number, so putting our
+# product name in a container shaped for someone else's statistic isn't a substitution,
+# it's noise wearing the shape of one. Deliberately reuses compliance.py's own numeric-
+# claim patterns rather than a new regex written for this - NUMERIC_CLAIM_PATTERN/
+# RATIO_CLAIM_PATTERN/TIMESCALE_CLAIM_PATTERN already detect the SHAPE of a stat claim
+# generally (any percentage, any "N out of M", any "Nx more/faster/better", any "in N
+# days/weeks/hours"), never a specific number - same "match the shape, not a list of known
+# values" principle _is_award_shaped_badge already uses for award names.
+STAT_CLAIM_PATTERNS = (
+    compliance.NUMERIC_CLAIM_PATTERN, compliance.RATIO_CLAIM_PATTERN, compliance.TIMESCALE_CLAIM_PATTERN,
+)
+
+
+def _is_stat_shaped_zone(detail):
+    detail_text = detail or ""
+    return any(p.search(detail_text) for p in STAT_CLAIM_PATTERNS)
+
+
 def _structural_zones_clause(structural_zones, zone_copy_text=None, cta_text=None, panel_copy=None,
                               testimonial=None, certifications=None, offer_text=None, product_name=None):
     """Wires blueprint.structural_zones (2026-08-06 schema addition) into edit mode - every
@@ -790,7 +811,7 @@ def _structural_zones_clause(structural_zones, zone_copy_text=None, cta_text=Non
       removed - its absence is the single biggest reason a clone reads as unbranded next
       to the reference, so this doesn't wait on text_in_image the way the others do.
     - sub_line / body_copy: substituted with text matching THIS zone specifically -
-      panel_copy (generate_copy.comparison_panels' per-panel output) wins by exact
+      panel_copy (generate_copy.text_zone_targets' per-zone output) wins by exact
       position-string match when given; zone_copy_text is the fallback, used for every
       such zone when panel_copy is absent or doesn't cover this position. Callers must
       pass None for both (not the raw subtext) when text_in_image is off - otherwise these
@@ -811,7 +832,11 @@ def _structural_zones_clause(structural_zones, zone_copy_text=None, cta_text=Non
     - product_callout (2026-08-07, generalised): substituted with product_name (the one
       real Besque product genuinely being featured) when available - the callout still
       says something honest, never left as a "New Scent" card with no scent named. Removed
-      when no product_name is available (e.g. productless mode).
+      when no product_name is available (e.g. productless mode). Checked FIRST, same
+      precedence as award-shaped badges (2026-08-11): a stat-shaped callout (see
+      _is_stat_shaped_zone) ALWAYS removes regardless of product_name - a callout whose
+      reference content is a numeric/percentage/ratio/timescale claim has no Besque
+      counterpart; repeating the product name in that container isn't a substitution.
     - disclaimer: always REMOVED, same as above, but a legal/regulatory/medical disclaimer
       belonging to the reference brand is never Besque's for ANY product - the removal
       instruction also explicitly takes any pointing asterisk/footnote marker with it, so
@@ -832,12 +857,13 @@ def _structural_zones_clause(structural_zones, zone_copy_text=None, cta_text=Non
     this codebase has already hit more than once.
 
     panel_copy (2026-08-06, Grüns GLP-1 leak: a two-panel before/after joke rendered the
-    SAME headline text in both panels) is a list of {"position", "text"} dicts, one per
-    comparison panel, keyed by the EXACT position string generate_copy.comparison_panels
-    echoed back from this same structural_zones list - see _panel_copy_clause. Before this
-    existed, every sub_line/body_copy zone got the SAME zone_copy_text regardless of how
-    many there were or what each one's own detail described; this routes each zone to its
-    OWN text instead, by position, and falls back to zone_copy_text only for a
+    SAME headline text in both panels; generalised 2026-08-11 to ANY count of sub_line/
+    body_copy zones, not just 2+) is a list of {"position", "text"} dicts, one per zone,
+    keyed by the EXACT position string generate_copy.text_zone_targets echoed back from
+    this same structural_zones list - see generate_copy._text_zone_copy_clause. Before
+    this existed, every sub_line/body_copy zone got the SAME zone_copy_text regardless of
+    how many there were or what each one's own detail described; this routes each zone to
+    its OWN text instead, by position, and falls back to zone_copy_text only for a
     position panel_copy doesn't cover (or when panel_copy is absent entirely - every
     existing single-panel blueprint sees byte-for-byte the same behaviour as before).
 
@@ -925,7 +951,14 @@ def _structural_zones_clause(structural_zones, zone_copy_text=None, cta_text=Non
             else:
                 remove_lines.append(f"- price_anchor at {pos} (container: {container})")
         elif zt == "product_callout":
-            if product_name:
+            detail = z.get("detail") or ""
+            # Checked first, same reasoning as award-shaped badges above: a stat-shaped
+            # callout has no Besque counterpart at all - Besque's product name is not a
+            # substitute for someone else's numeric claim, so this wins regardless of
+            # whether product_name is available.
+            if _is_stat_shaped_zone(detail):
+                remove_lines.append(f"- product_callout at {pos} (container: {container})")
+            elif product_name:
                 substitute_lines.append(
                     f"- product_callout at {pos} (container: {container}): replace its "
                     f"content with {product_name} - same position and shape, our real "

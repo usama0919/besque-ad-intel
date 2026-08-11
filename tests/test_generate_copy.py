@@ -33,6 +33,31 @@ def test_copy_missing_field_raises():
         generate_copy.copy_from_response(bad)
 
 
+# ---- PRODUCT_FACT_KEYS is name-only (2026-08-11): description and ingredients both
+# removed, not just reworded - either one let a copywriter paraphrase a marketing
+# sentence into a headline regardless of PRODUCT's own "constraint, not a copy source"
+# framing. hero_claim removed too even though it's currently blanked in the DB, so it
+# can't silently start reaching this prompt again once that field is repopulated. ----
+
+def test_product_fact_keys_is_name_only():
+    assert generate_copy.PRODUCT_FACT_KEYS == ("name",)
+
+
+def test_product_facts_omits_description_ingredients_and_hero_claim():
+    product = {
+        "name": "Besque Magic Body Oil",
+        "description": "A luxury fragrant blend of 7 cold-pressed oils.",
+        "ingredients": "Almond (hydrates the skin); Primrose (increases elasticity, bounce-back)",
+        "hero_claim": "Visibly firms and tightens the skin with consistent use",
+    }
+    facts = generate_copy._product_facts(product)
+    assert "Besque Magic Body Oil" in facts
+    assert "cold-pressed oils" not in facts
+    assert "Almond" not in facts
+    assert "Primrose" not in facts
+    assert "firms and tightens" not in facts
+
+
 def test_build_copy_prompt_includes_blueprint():
     prompt = generate_copy.build_copy_prompt({"angle": "firmer skin at any age"})
     assert "firmer skin at any age" in prompt
@@ -216,8 +241,9 @@ def test_generate_copy_live_forwards_used_headlines_to_prompt(monkeypatch):
     assert "Prior sub" in captured["prompt"]
 
 
-# ---- comparison_panels / panel_copy (2026-08-06, Grüns GLP-1 leak: a two-panel before/
-# after joke rendered the SAME headline text in both panels) ----
+# ---- text_zone_targets / panel_copy (2026-08-06, Grüns GLP-1 leak: a two-panel before/
+# after joke rendered the SAME headline text in both panels; renamed and regated from
+# comparison_panels' old >=2-only gate on 2026-08-11) ----
 
 def _comparison_blueprint():
     return {
@@ -231,65 +257,209 @@ def _comparison_blueprint():
     }
 
 
-def test_comparison_panels_absent_for_ordinary_blueprint():
-    assert generate_copy.comparison_panels({"angle": "x"}) == []
+def test_text_zone_targets_absent_for_ordinary_blueprint():
+    assert generate_copy.text_zone_targets({"angle": "x"}) == []
 
 
-def test_comparison_panels_absent_for_single_sub_line():
-    """One sub_line is an ordinary accent line, not a comparison - the whole point is
-    TWO OR MORE distinct panels."""
+def test_text_zone_targets_returns_single_sub_line():
+    """Renamed/regated 2026-08-11: a single sub_line is no longer treated as "nothing to
+    target" - it has the identical problem a comparison does (nothing tells Claude the
+    zone exists or that content is needed for it), and the image-side panel_copy lookup
+    already handles one entry exactly like several."""
     bp = {"structural_zones": [
         {"zone_type": "sub_line", "position": "top-center", "detail": "a tagline"},
     ]}
-    assert generate_copy.comparison_panels(bp) == []
+    zones = generate_copy.text_zone_targets(bp)
+    assert len(zones) == 1
+    assert zones[0]["position"] == "top-center"
 
 
-def test_comparison_panels_detected_for_two_sub_lines():
-    panels = generate_copy.comparison_panels(_comparison_blueprint())
-    assert len(panels) == 2
-    assert {p["position"] for p in panels} == {"upper-left-mid", "upper-right-mid"}
+def test_text_zone_targets_detected_for_two_sub_lines():
+    zones = generate_copy.text_zone_targets(_comparison_blueprint())
+    assert len(zones) == 2
+    assert {z["position"] for z in zones} == {"upper-left-mid", "upper-right-mid"}
 
 
-def test_comparison_panels_counts_body_copy_too():
+def test_text_zone_targets_counts_body_copy_too():
     bp = {"structural_zones": [
         {"zone_type": "sub_line", "position": "left", "detail": "before"},
         {"zone_type": "body_copy", "position": "right", "detail": "after"},
     ]}
-    assert len(generate_copy.comparison_panels(bp)) == 2
+    assert len(generate_copy.text_zone_targets(bp)) == 2
 
 
-def test_comparison_panels_ignores_cta_and_other_zone_types():
-    """A comparison ad has one CTA, not one per panel - cta must never count toward the
-    panel total."""
+def test_text_zone_targets_ignores_cta_and_other_zone_types():
+    """cta gets its own separate detector/clause (_cta_zone/_cta_zone_clause) - it must
+    never count toward the sub_line/body_copy total, which only the one real sub_line
+    zone here should contribute to."""
     bp = {"structural_zones": [
         {"zone_type": "sub_line", "position": "left", "detail": "before"},
         {"zone_type": "cta", "position": "bottom", "detail": "shop now"},
     ]}
-    assert generate_copy.comparison_panels(bp) == []
+    zones = generate_copy.text_zone_targets(bp)
+    assert len(zones) == 1
+    assert zones[0]["zone_type"] == "sub_line"
 
 
-def test_build_copy_prompt_unaffected_when_no_comparison_panels():
+def test_build_copy_prompt_unaffected_when_no_text_zones():
     """Byte-for-byte the same prompt as before this feature existed, for every ordinary
-    single-panel blueprint - the overwhelming majority."""
-    with_zones_but_no_comparison = generate_copy.build_copy_prompt(
+    blueprint with no sub_line/body_copy zone at all - the overwhelming majority."""
+    with_unrelated_zone = generate_copy.build_copy_prompt(
         {"angle": "x", "structural_zones": [{"zone_type": "badge", "position": "top"}]}
     )
     without_zones = generate_copy.build_copy_prompt({"angle": "x"})
-    assert "MULTI-PANEL COMPARISON" not in with_zones_but_no_comparison
-    assert "MULTI-PANEL COMPARISON" not in without_zones
+    assert "TEXT ZONE COPY" not in with_unrelated_zone
+    assert "TEXT ZONE COPY" not in without_zones
+    assert with_unrelated_zone.count(generate_copy.IMAGE_SUBTEXT_FIELD_DEFAULT) == 1
+    assert without_zones.count(generate_copy.IMAGE_SUBTEXT_FIELD_DEFAULT) == 1
 
 
-def test_build_copy_prompt_states_multi_panel_instruction_when_detected():
+def test_build_copy_prompt_states_text_zone_instruction_for_single_zone():
+    bp = {"structural_zones": [
+        {"zone_type": "sub_line", "position": "top-center", "detail": "SWEET ALMOND | WARM VANILLA"},
+    ]}
+    prompt = generate_copy.build_copy_prompt(bp)
+    assert "TEXT ZONE COPY" in prompt
+    assert "1 distinct sub_line/body_copy zone" in prompt
+    assert "panel_copy" in prompt
+    assert "top-center" in prompt
+    assert "SWEET ALMOND | WARM VANILLA" in prompt
+    # single-zone case has nothing to repeat against - the "never repeat" rule must not
+    # appear when there's only one zone
+    assert "never repeat the same phrase" not in prompt
+
+
+def test_build_copy_prompt_states_multi_zone_instruction_when_detected():
     prompt = generate_copy.build_copy_prompt(_comparison_blueprint())
-    assert "MULTI-PANEL COMPARISON" in prompt
+    assert "TEXT ZONE COPY" in prompt
     assert "panel_copy" in prompt
     assert "upper-left-mid" in prompt
     assert "upper-right-mid" in prompt
     assert "negative outcome - hair loss" in prompt
     assert "positive outcome - keeping hair" in prompt
+    assert "never repeat the same phrase" in prompt
 
 
 def test_build_copy_prompt_panel_instruction_states_exact_count():
     prompt = generate_copy.build_copy_prompt(_comparison_blueprint())
-    assert "2 distinct text panels" in prompt
+    assert "2 distinct sub_line/body_copy zone(s)" in prompt
     assert "EXACTLY 2 objects" in prompt
+
+
+# ---- image_subtext's field description is conditional, never contradicted later
+# (2026-08-11) - the empty-string permission is present ONLY when there's no sub_line/
+# body_copy zone to fill, in the field description itself, not revoked by a later clause
+# (that would be the exact "prompt demands and forbids the same thing" shape behind
+# artifact 1136 - see CLAUDE.md). ----
+
+def test_build_copy_prompt_image_subtext_keeps_empty_permission_with_no_zone():
+    prompt = generate_copy.build_copy_prompt({"angle": "x"})
+    assert 'Empty string "" if no short line is appropriate' in prompt
+    assert "Must NOT be empty string this time" not in prompt
+
+
+def test_build_copy_prompt_image_subtext_drops_empty_permission_with_zone_present():
+    bp = {"structural_zones": [{"zone_type": "sub_line", "position": "top", "detail": "x"}]}
+    prompt = generate_copy.build_copy_prompt(bp)
+    assert 'Empty string "" if no short line is appropriate' not in prompt
+    assert "Must NOT be empty string this time" in prompt
+    assert "REMOVED from the generated image" in prompt
+
+
+# ---- cta zone awareness (2026-08-11) - a single output field, not a list, so it gets its
+# own detector/clause rather than being folded into text_zone_targets/panel_copy. ----
+
+def test_cta_zone_none_when_absent():
+    assert generate_copy._cta_zone({"angle": "x"}) is None
+    assert generate_copy._cta_zone({"structural_zones": []}) is None
+
+
+def test_cta_zone_found():
+    bp = {"structural_zones": [{"zone_type": "cta", "position": "bottom-center", "detail": "DISCOVER NOW"}]}
+    zone = generate_copy._cta_zone(bp)
+    assert zone is not None
+    assert zone["position"] == "bottom-center"
+
+
+def test_build_copy_prompt_omits_cta_clause_when_no_cta_zone():
+    prompt = generate_copy.build_copy_prompt({"angle": "x"})
+    assert "CTA ZONE" not in prompt
+
+
+def test_build_copy_prompt_states_cta_clause_when_cta_zone_present():
+    bp = {"structural_zones": [{"zone_type": "cta", "position": "bottom-center", "detail": "DISCOVER NOW"}]}
+    prompt = generate_copy.build_copy_prompt(bp)
+    assert "CTA ZONE (STRICT)" in prompt
+    assert "bottom-center" in prompt
+    assert "DISCOVER NOW" in prompt
+    assert "never left empty" in prompt
+
+
+# ---- validate_copy mechanical backstop (2026-08-11) - a prompt instruction alone is the
+# pattern that has repeatedly failed on this codebase; an empty cta/image_subtext against
+# a real zone must fail validation, not pass silently. ----
+
+def test_validate_copy_allows_empty_cta_when_no_cta_zone():
+    generate_copy.validate_copy({"headline": "H", "primary_text": "P", "cta": ""}, require_cta=False)
+
+
+def test_validate_copy_rejects_empty_cta_when_cta_zone_present():
+    with pytest.raises(ValueError):
+        generate_copy.validate_copy({"headline": "H", "primary_text": "P", "cta": ""}, require_cta=True)
+
+
+def test_validate_copy_rejects_whitespace_only_cta_when_required():
+    with pytest.raises(ValueError):
+        generate_copy.validate_copy({"headline": "H", "primary_text": "P", "cta": "   "}, require_cta=True)
+
+
+def test_validate_copy_allows_empty_image_subtext_when_no_text_zone():
+    generate_copy.validate_copy(
+        {"headline": "H", "primary_text": "P", "cta": "C", "image_subtext": ""},
+        require_image_subtext=False,
+    )
+
+
+def test_validate_copy_rejects_empty_image_subtext_when_text_zone_present():
+    with pytest.raises(ValueError):
+        generate_copy.validate_copy(
+            {"headline": "H", "primary_text": "P", "cta": "C", "image_subtext": ""},
+            require_image_subtext=True,
+        )
+
+
+def test_copy_from_response_rejects_empty_cta_when_required():
+    raw = json.dumps({"headline": "H", "primary_text": "P", "cta": ""})
+    with pytest.raises(ValueError):
+        generate_copy.copy_from_response(raw, require_cta=True)
+
+
+def test_copy_from_response_accepts_empty_cta_when_not_required():
+    raw = json.dumps({"headline": "H", "primary_text": "P", "cta": ""})
+    copy = generate_copy.copy_from_response(raw, require_cta=False)
+    assert copy["cta"] == ""
+
+
+def test_generate_copy_live_requires_cta_and_image_subtext_when_zones_present(monkeypatch):
+    """End-to-end: a blueprint with a cta zone AND a sub_line zone must reject an empty
+    cta/image_subtext on every attempt and raise, rather than silently accepting it."""
+    bp = {"structural_zones": [
+        {"zone_type": "cta", "position": "bottom", "detail": "DISCOVER NOW"},
+        {"zone_type": "sub_line", "position": "top", "detail": "SWEET ALMOND | WARM VANILLA"},
+    ]}
+    empty_copy_json = json.dumps({"headline": "H", "primary_text": "P", "cta": "", "image_subtext": ""})
+
+    class FakeMessage:
+        content = [type("obj", (), {"text": empty_copy_json})()]
+
+    class FakeMessages:
+        def create(self, **kwargs):
+            return FakeMessage()
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            self.messages = FakeMessages()
+
+    monkeypatch.setattr(generate_copy.anthropic, "Anthropic", FakeClient)
+    with pytest.raises(ValueError):
+        generate_copy.generate_copy_live(bp)
