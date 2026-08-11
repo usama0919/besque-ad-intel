@@ -56,6 +56,11 @@
   .check-mark { position:absolute; top:8px; right:8px; width:22px; height:22px; border-radius:50%; background:#1a7f42; color:#fff; display:none; align-items:center; justify-content:center; font-size:13px; font-weight:700; }
   .pool-card-thumb { position:relative; }
   .pool-card.selected .check-mark { display:flex; }
+  /* Per-card realism override - same visibility pattern as .check-mark above: always
+     in the DOM, only shown once the card is actually selected (an override on an
+     unselected card would have no ad_ids entry to attach to server-side). */
+  .card-realism-select { display:none; width:100%; margin-top:6px; }
+  .pool-card.selected .card-realism-select { display:block; }
   .comp-panel { background:#fff; border:1px solid #e5e0d8; border-radius:12px; padding:14px 18px; margin-bottom:20px; }
   .comp-row { padding:8px 0; border-bottom:1px solid #f4f1ec; cursor:pointer; }
   .comp-row:last-child { border:none; }
@@ -191,9 +196,16 @@
 function esc(s){return (s||"").toString().replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
 
 let selectedCompetitorId = null;
-let selectedAdIds = new Set();
+// ad_id -> per-card realism override (string) or null ("use run strip" - the
+// untouched-card default). Presence as a key IS selection, same as the Set this
+// replaced - one store for both, not a second map alongside it, so a per-card
+// override can never outlive or drift out of sync with the card's own selection:
+// deselecting a card (see toggleSelect) drops its override with it, and the whole
+// structure is lost on navigation exactly the way selection already was.
+let selectedAdIds = new Map();
 let selectedProductId = null;
 let _anglesCache = [];
+let _productionStyles = [];
 let _lastCards = [];
 // Task H (2026-08-07; badge reworded same day - see CLAUDE.md, the skip this fed was
 // reversed): ad_ids whose EXISTING blueprint (an already-generated artifact's stored
@@ -269,6 +281,7 @@ async function loadAngles(){
 async function loadProductionStyles(){
   const r = await fetch('/api/production_styles');
   const styles = await r.json();
+  _productionStyles = styles;  // cached for cardHtml's per-card realism override select too
   const sel = document.getElementById('realismSelect');
   sel.innerHTML = '<option value="">(auto)</option>'
     + styles.map(s => `<option value="${s}">${s}</option>`).join('');
@@ -298,7 +311,7 @@ function selectCompetitor(id, name){
   document.getElementById('selectedCompName').textContent = selectedCompetitorId === null ? 'None selected' : name;
   document.getElementById('fetchBtn').disabled = selectedCompetitorId === null;
   document.getElementById('fetchStatus').textContent = selectedCompetitorId === null ? 'Select a competitor to begin.' : 'Ready.';
-  selectedAdIds = new Set();
+  selectedAdIds = new Map();
   updateSelectionCount();
   loadCompetitors();
   loadGrid();
@@ -388,8 +401,9 @@ async function loadGrid(){
   // cross-references the already-existing /api/artifacts endpoint for exactly those - no
   // new endpoint, no new model call, same scope as pipeline.py's own check.
   _nothingToCloneAdIds = await computeNothingToCloneAdIds(cards, angleId);
-  // Stale selections (from a competitor/angle switch) never carry over.
-  selectedAdIds = new Set([...selectedAdIds].filter(id => cards.some(c => c.ad_id === id)));
+  // Stale selections (from a competitor/angle switch) never carry over - their
+  // per-card realism override goes with them, same one-store rule as everywhere else.
+  selectedAdIds = new Map([...selectedAdIds].filter(([id]) => cards.some(c => c.ad_id === id)));
   el.innerHTML = '<div class="pool-grid">' + cards.map(cardHtml).join('') + '</div>';
   updateSelectionCount();
 }
@@ -458,6 +472,15 @@ function cardHtml(c){
   // anyway means, rather than a bare badge with no explanation.
   const note = c.already_generated
     ? '<div class="pool-already-gen-note">Already generated for this angle - selecting will version &amp; replace it.</div>' : '';
+  // Per-card realism override (batch-quality fix, realism only this pass): defaults to
+  // "" (use run strip) - an untouched card's Map value stays null and contributes
+  // nothing to per_ad_overrides. Hidden until the card is selected (see
+  // .card-realism-select CSS) - an override with no ad_ids entry to attach to would be
+  // meaningless server-side. Pre-filled from the stored value so a grid re-render
+  // (angle change, etc.) never loses what was already chosen for a still-selected card.
+  const cardRealism = selectedAdIds.get(c.ad_id) || '';
+  const realismOptions = '<option value="">(use run strip)</option>'
+    + _productionStyles.map(s => `<option value="${esc(s)}"${s === cardRealism ? ' selected' : ''}>${esc(s)}</option>`).join('');
   return `<div class="pool-card${sel}${alreadyGen}" data-ad-id="${esc(c.ad_id)}" onclick="toggleSelect(this,'${esc(c.ad_id)}')">
     <div class="pool-card-thumb">
       <img loading="lazy" referrerpolicy="no-referrer"
@@ -472,14 +495,25 @@ function cardHtml(c){
       ${body ? `<div class="pool-snippet">${esc(body)}</div>` : ''}
       ${c.cta_text ? `<div class="pool-cta">${esc(c.cta_text)}</div>` : ''}
       <div class="pool-meta">${esc(c.page_name)} &middot; fetched ${esc(c.fetched_at)}</div>
+      <select class="card-realism-select" title="Per-card realism override - leave as &quot;use run strip&quot; to inherit the Realism control above" onclick="event.stopPropagation()" onchange="setCardRealism('${esc(c.ad_id)}', this.value)">${realismOptions}</select>
       ${note}
     </div>
   </div>`;
 }
 
+// Only meaningful while the card is selected - the select itself is CSS-hidden
+// otherwise (see .card-realism-select), so this should never fire for an unselected
+// card, but the .has() guard keeps a null override from ever being attributed to an
+// ad_id that isn't part of this run's own ad_ids (per_ad_overrides is rejected
+// server-side otherwise - see dashboard.py's _validate_per_ad_overrides).
+function setCardRealism(adId, value){
+  if(!selectedAdIds.has(adId)){ return; }
+  selectedAdIds.set(adId, value || null);
+}
+
 function toggleSelect(el, adId){
   if(selectedAdIds.has(adId)){ selectedAdIds.delete(adId); el.classList.remove('selected'); }
-  else { selectedAdIds.add(adId); el.classList.add('selected'); }
+  else { selectedAdIds.set(adId, null); el.classList.add('selected'); }
   updateSelectionCount();
 }
 
@@ -490,7 +524,7 @@ function toggleSelect(el, adId){
 // counts as "already generated" without any extra bookkeeping here.
 function selectionIncludesAlreadyGenerated(){
   const genIds = new Set(_lastCards.filter(c => c.already_generated).map(c => c.ad_id));
-  return [...selectedAdIds].some(id => genIds.has(id));
+  return [...selectedAdIds.keys()].some(id => genIds.has(id));
 }
 
 function updateSelectionCount(){
@@ -563,6 +597,13 @@ async function generateSelection(){
   const checkOutput = document.getElementById('checkOutputToggle').checked;
   const rethemeColours = document.getElementById('rethemeColoursToggle').checked;
   const realism = document.getElementById('realismSelect').value;
+  // Only cards the operator actually set contribute a per_ad_overrides entry - an
+  // untouched card's Map value is null and is skipped here, exactly per dashboard.py's
+  // own validation (an ad_id with no entry falls back to the run-strip realism above).
+  const perAdOverrides = {};
+  for(const [adId, realismOverride] of selectedAdIds){
+    if(realismOverride){ perAdOverrides[adId] = {realism: realismOverride}; }
+  }
 
   _generateRunning = true;
   document.getElementById('generateBtn').disabled = true;
@@ -573,11 +614,12 @@ async function generateSelection(){
   const r = await fetch('/api/generate', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({
-      ad_ids: [...selectedAdIds], angle_id: angleId, body_area: bodyArea || null,
+      ad_ids: [...selectedAdIds.keys()], angle_id: angleId, body_area: bodyArea || null,
       offer_text: offerText || null, instruction: instruction || null,
       product_id: selectedProductId, regenerate,
       text_in_image: textInImage, include_product: includeProduct, edit_mode: editMode,
       check_output: checkOutput, retheme_colours: rethemeColours, realism: realism || null,
+      per_ad_overrides: Object.keys(perAdOverrides).length ? perAdOverrides : null,
     }),
   });
   const body = await r.json();
