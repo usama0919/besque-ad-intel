@@ -3,6 +3,7 @@ import io
 import logging
 import math
 import os
+import re
 from PIL import Image
 from src import assets, generate_image_prompt_writer, compliance
 from src.compliance_rules import COMPLIANCE_RULES
@@ -108,6 +109,20 @@ def reference_has_text_zone(blueprint):
     )
 
 
+def _structural_zones_have_offer(structural_zones):
+    """Core of reference_has_offer_zone below, operating on an already-extracted
+    structural_zones list rather than a full blueprint - lets _edit_mode_instruction
+    (2026-08-11) reuse the identical check on the structural_zones it already receives as
+    its own parameter, without needing the whole blueprint threaded to it separately."""
+    for z in (structural_zones or []):
+        zt = (z or {}).get("zone_type")
+        if zt == "price_anchor":
+            return True
+        if zt == "badge" and _is_offer_shaped_zone(z.get("detail")):
+            return True
+    return False
+
+
 def reference_has_offer_zone(blueprint):
     """True when the reference blueprint shows a structural zone that actually CARRIES an
     offer - a price_anchor (a price shown as its own graphic element is inherently
@@ -121,15 +136,11 @@ def reference_has_offer_zone(blueprint):
     config should carry the operator's offer_text at all, before build_image_prompt ever
     runs, rather than only gating it once inside _structural_zones_clause's own per-zone
     branch. Same public/no-leading-underscore convention as reference_has_product/
-    reference_has_text_zone above - pipeline.py reads this directly, no reimplementation."""
-    blueprint = blueprint or {}
-    for z in (blueprint.get("structural_zones") or []):
-        zt = (z or {}).get("zone_type")
-        if zt == "price_anchor":
-            return True
-        if zt == "badge" and _is_offer_shaped_zone(z.get("detail")):
-            return True
-    return False
+    reference_has_text_zone above - pipeline.py reads this directly, no reimplementation.
+
+    Thin wrapper over _structural_zones_have_offer (added same day) - kept as the public
+    blueprint-taking entry point so pipeline.py's existing call sites are unaffected."""
+    return _structural_zones_have_offer((blueprint or {}).get("structural_zones") or [])
 
 
 def resolve_effective_include_product(blueprint, include_product, edit_mode):
@@ -168,12 +179,17 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
                         retheme_colours: bool = True, brand_palette: str = None,
                         realism: str = None, critic_feedback: list = None,
                         cta_text: str = None, panel_copy: list = None,
-                        testimonial: dict = None, product_count: int = None) -> str:
+                        testimonial: dict = None, product_count: int = None,
+                        clone_mode: bool = False) -> str:
     """Construct a Besque-adapted image generation prompt from the blueprint's visual notes.
     include_product=True, text_in_image=False, creative_description=None, edit_mode=False,
     offer_text=None, operator_instruction=None (today's defaults) reproduce the prior
     output exactly for a given blueprint/product - none of these are a rewrite of the
     default path.
+
+    clone_mode (2026-08-11): forwarded only to _edit_mode_instruction's own OFFER clause
+    (edit_mode branch) - see that function's docstring. False (the default) reproduces
+    today's exact prompt; offer_text's own truthiness is the only gate either way.
 
     creative_description, if given, is the Claude prompt-writer's output
     (generate_image_prompt_writer.write_creative_description) - it REPLACES the
@@ -357,7 +373,8 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
                                    cta_text=cta_text, product_name=(product or {}).get("name"),
                                    panel_copy=panel_copy, testimonial=testimonial,
                                    certifications=(product or {}).get("certifications"),
-                                   competitor_props_clause=_competitor_props_clause(blueprint)) +
+                                   competitor_props_clause=_competitor_props_clause(blueprint),
+                                   clone_mode=clone_mode) +
             product_clause +
             closing
         )
@@ -762,6 +779,15 @@ AWARD_BADGE_KEYWORDS = ("award", "winner", "best of", "editor", "reader's choice
 
 OFFER_BADGE_KEYWORDS = ("%", "off", "save", "discount", "sale", "deal", "promo", "price")
 
+# Word-boundary matching (2026-08-11) - plain substring matching on OFFER_BADGE_KEYWORDS
+# let "off" match inside "official"/"offering", "sale" inside "salesperson", etc. \b only
+# makes sense around actual word characters, so "%" (never part of a word) keeps plain
+# substring matching - it can't have this false-positive problem in the first place.
+_OFFER_BADGE_PATTERN = re.compile(
+    "|".join(kw if kw == "%" else rf"\b{re.escape(kw)}\b" for kw in OFFER_BADGE_KEYWORDS),
+    re.IGNORECASE,
+)
+
 CERT_BADGE_KEYWORDS = ("certif", "seal", "organic", "cruelty", "vegan", "natural",
                        "eco", "dermat", "accredit", "approved", "clinically tested")
 
@@ -772,8 +798,7 @@ def _is_award_shaped_badge(detail):
 
 
 def _is_offer_shaped_zone(detail):
-    detail_lower = (detail or "").lower()
-    return any(kw in detail_lower for kw in OFFER_BADGE_KEYWORDS)
+    return bool(_OFFER_BADGE_PATTERN.search(detail or ""))
 
 
 def _is_cert_shaped_badge(detail):
@@ -1197,7 +1222,7 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
                             typography_zones=None,
                             structural_zones=None, cta_text=None, product_name=None,
                             panel_copy=None, testimonial=None, certifications=None,
-                            competitor_props_clause=""):
+                            competitor_props_clause="", clone_mode=False):
     """EDIT MODE (2026-08-01): Gemini receives the competitor's own ad as an input image
     Part, not just a text description of it - the reference image IS the creative brief,
     so no template scene/layout/palette description is assembled here (see
@@ -1317,7 +1342,31 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
     catch-all edit the new clause would just be demanded and forbidden in the same
     prompt - the exact shape that produced artifact 1136's fabricated testimonials."""
     suppressing_text = not (text_in_image and headline)
-    suppressing_offer = not offer_text
+    # Clone mode (2026-08-11): the OFFER clause below used to trust offer_text's own
+    # truthiness alone and ask Gemini to judge VISUALLY whether the reference shows an
+    # offer, discount, price, or CTA badge - exactly the "prompt asks the model to decide"
+    # pattern this codebase has repeatedly found unreliable (see the top of CLAUDE.md).
+    # On a reference with no real offer-shaped zone, Gemini invented one - a live "20%
+    # OFF" badge with nothing in the reference to substitute into. When clone_mode is on,
+    # offer_text is only EFFECTIVELY present here if this reference actually has a real
+    # offer-shaped zone (_structural_zones_have_offer - the SAME structural check
+    # reference_has_offer_zone/pipeline.py's own upstream suppression already use, not a
+    # second independent judgment that could disagree with it) - never Gemini's own
+    # visual call. Computed ONCE, here, so suppressing_offer (governs the container-
+    # removal exception wording below) and the OFFER clause itself can never disagree
+    # about whether an offer is actually being rendered this call - the exact demand-and-
+    # forbid shape that produced artifact 1136's fabricated testimonials, on a different
+    # input. clone_mode=False (the default) is unaffected: offer_text's own truthiness is
+    # the only gate, byte-for-byte today's behaviour. _structural_zones_clause's own
+    # badge/price_anchor substitution (elsewhere in this function) is NOT changed to use
+    # this - it already only ever acts on a zone that genuinely exists in structural_zones,
+    # so it never had this vulnerability; only the prose OFFER clause asked Gemini to look
+    # for something that might not be there at all.
+    effective_offer_text = (
+        offer_text if (not clone_mode or _structural_zones_have_offer(structural_zones))
+        else None
+    )
+    suppressing_offer = not effective_offer_text
     # Always True: the EFFICACY CLAIMS clause below bans efficacy-claim wording
     # unconditionally (no approved_claims threading to images exists), so an
     # efficacy-claim badge is always suppressed in edit mode - never toggled, unlike
@@ -1579,13 +1628,13 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
         )
     base += _typography_zones_clause(typography_zones)
     base += structural_clause
-    if offer_text:
+    if effective_offer_text:
         base += (
             f"OFFER: if the reference shows an offer, discount, price, or CTA badge, "
             f"preserve its position, shape, size, colour, and typography EXACTLY as "
-            f"shown in the reference - and replace ONLY its wording with: {offer_text}. "
-            f"Do not invent a different number, percentage, or term; do not restyle, "
-            f"resize, or recolour the badge itself. "
+            f"shown in the reference - and replace ONLY its wording with: "
+            f"{effective_offer_text}. Do not invent a different number, percentage, or "
+            f"term; do not restyle, resize, or recolour the badge itself. "
         )
     else:
         # Item 6d (2026-08-04): enumerated explicitly after "SUMMER SALE" survived as a
@@ -1739,7 +1788,7 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
                     messaging_angle=None, realism=None, body_area=None, offer_text=None,
                     edit_mode=False, competitor_image_bytes=None, operator_instruction=None,
                     retheme_colours=True, critic_feedback=None, cta_text=None, panel_copy=None,
-                    testimonial=None, product_count=None):
+                    testimonial=None, product_count=None, clone_mode=False):
     """Single-pass image generation from the blueprint. One image, no iteration.
     Saves to assets/<stem>_draft.png (stem = ad_id, or ad_id+angle if angle_slug is given)
     and returns the path. Returns None on failure. include_product/text_in_image/headline/
@@ -1836,7 +1885,7 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
                                  retheme_colours=retheme_colours, brand_palette=brand_palette,
                                  realism=realism, critic_feedback=critic_feedback, cta_text=cta_text,
                                  panel_copy=panel_copy, testimonial=testimonial,
-                                 product_count=product_count)
+                                 product_count=product_count, clone_mode=clone_mode)
     stem = _draft_stem(ad_id, angle_slug)
     try:
         client = genai.Client(vertexai=True, project="besque-martech", location="global")

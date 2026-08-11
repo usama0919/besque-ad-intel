@@ -642,6 +642,41 @@ def test_reference_has_text_zone_false_when_neither():
     assert generate_image_prompt.reference_has_text_zone({}) is False
 
 
+# ---- OFFER_BADGE_KEYWORDS word-boundary matching (2026-08-11): plain substring matching
+# let "off" match inside "official"/"offering", "sale" inside "salesperson", "price" inside
+# "pricing" - none of these are actually offer-shaped. ----
+
+def test_is_offer_shaped_zone_true_for_real_offer_keywords():
+    assert generate_image_prompt._is_offer_shaped_zone("reads 'SAVE 16%'") is True
+    assert generate_image_prompt._is_offer_shaped_zone("20% off first order") is True
+    assert generate_image_prompt._is_offer_shaped_zone("summer sale") is True
+    assert generate_image_prompt._is_offer_shaped_zone("best price guarantee") is True
+    assert generate_image_prompt._is_offer_shaped_zone("promo code inside") is True
+    assert generate_image_prompt._is_offer_shaped_zone("discount badge") is True
+    assert generate_image_prompt._is_offer_shaped_zone("deal of the day") is True
+
+
+def test_is_offer_shaped_zone_false_for_word_boundary_false_positives():
+    """The exact false-positive class plain substring matching produced - "off"/"sale"/
+    "price" appearing INSIDE an unrelated word, never as a word of its own."""
+    assert generate_image_prompt._is_offer_shaped_zone("official product seal") is False
+    assert generate_image_prompt._is_offer_shaped_zone("special offering this month") is False
+    assert generate_image_prompt._is_offer_shaped_zone("salesperson recommended") is False
+    assert generate_image_prompt._is_offer_shaped_zone("pricing details inside") is False
+    assert generate_image_prompt._is_offer_shaped_zone("coffee break gift set") is False
+
+
+def test_is_offer_shaped_zone_false_for_empty_or_none():
+    assert generate_image_prompt._is_offer_shaped_zone("") is False
+    assert generate_image_prompt._is_offer_shaped_zone(None) is False
+
+
+def test_is_offer_shaped_zone_percent_sign_still_matches_without_word_boundary():
+    """% is never part of a word, so it deliberately keeps plain substring matching -
+    confirms the % branch of the pattern wasn't broken by adding \\b to the others."""
+    assert generate_image_prompt._is_offer_shaped_zone("94%") is True
+
+
 # ---- reference_has_offer_zone (2026-08-11, clone mode): whole-blueprint analogue of
 # _is_offer_shaped_zone (which only tests one zone's own detail string) - True when a
 # price_anchor is present (inherently offer-shaped, no keyword check needed) or a badge
@@ -675,6 +710,66 @@ def test_reference_has_offer_zone_false_for_unrelated_zone_types():
     bp = {"structural_zones": [{"zone_type": "brand_wordmark", "position": "top", "container": "none", "detail": "OSEA"},
                                 {"zone_type": "sub_line", "position": "mid", "container": "none", "detail": "tagline"}]}
     assert generate_image_prompt.reference_has_offer_zone(bp) is False
+
+
+# ---- OFFER prose clause structural gate (2026-08-11): a "20% OFF" badge rendered on a
+# draft whose reference had no offer-shaped zone at all - the clause was gated on
+# offer_text's own truthiness alone, asking Gemini to judge VISUALLY whether an offer was
+# shown. When clone_mode is on, offer_text is only effectively present if
+# reference_has_offer_zone actually says so - never Gemini's own call. clone_mode=False
+# (the default) is unaffected. ----
+
+_NO_OFFER_ZONE_BLUEPRINT = {"structural_zones": [
+    {"zone_type": "brand_wordmark", "position": "top", "container": "none", "detail": "OSEA"},
+]}
+_HAS_OFFER_ZONE_BLUEPRINT = {"structural_zones": [
+    {"zone_type": "price_anchor", "position": "top", "container": "none", "detail": "was $60, now $45"},
+]}
+
+
+def test_edit_mode_offer_clause_unaffected_when_clone_mode_off():
+    """clone_mode=False (the default, omitted here) - offer_text's own truthiness is the
+    only gate, byte-for-byte today's behaviour, even with no offer-shaped zone at all."""
+    prompt = generate_image_prompt.build_image_prompt(
+        _NO_OFFER_ZONE_BLUEPRINT, edit_mode=True, offer_text="20% off",
+    )
+    assert 'replace ONLY its wording with: 20% off' in prompt
+    assert "no offer was supplied for this run" not in prompt
+
+
+def test_edit_mode_offer_clause_suppressed_when_clone_mode_on_and_no_offer_zone():
+    """The actual live incident this closes: clone_mode on, offer_text set on the run
+    strip, reference has no offer-shaped zone - the OFFER clause must ban, not ask
+    Gemini to invent one."""
+    prompt = generate_image_prompt.build_image_prompt(
+        _NO_OFFER_ZONE_BLUEPRINT, edit_mode=True, offer_text="20% off", clone_mode=True,
+    )
+    assert 'replace ONLY its wording with: 20% off' not in prompt
+    assert "no offer was supplied for this run" in prompt
+
+
+def test_edit_mode_offer_clause_still_fires_when_clone_mode_on_and_offer_zone_present():
+    """clone_mode must not suppress a real, structurally-detected offer zone - only the
+    invented-from-nothing case."""
+    prompt = generate_image_prompt.build_image_prompt(
+        _HAS_OFFER_ZONE_BLUEPRINT, edit_mode=True, offer_text="20% off", clone_mode=True,
+    )
+    assert 'replace ONLY its wording with: 20% off' in prompt
+    assert "no offer was supplied for this run" not in prompt
+
+
+def test_edit_mode_offer_clause_and_suppression_exception_never_disagree():
+    """suppressing_offer (governs the container-removal exception wording elsewhere in
+    the prompt) and the OFFER clause itself must key off the SAME effective value - the
+    exact demand-and-forbid shape that produced artifact 1136's fabricated testimonials,
+    on a different input, if they were ever allowed to disagree."""
+    prompt = generate_image_prompt.build_image_prompt(
+        _NO_OFFER_ZONE_BLUEPRINT, edit_mode=True, offer_text="20% off", clone_mode=True,
+        text_in_image=True, headline="Feel Confident Again",
+    )
+    assert "no offer was supplied for this run" in prompt
+    assert "an offer" in prompt  # from the container-removal exception's own active list
+    assert 'replace ONLY its wording with: 20% off' not in prompt
 
 
 def test_edit_mode_instruction_text_added_into_negative_space_when_no_reference_text_zone():

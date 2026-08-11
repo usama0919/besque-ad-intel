@@ -759,7 +759,7 @@ def _regenerate_existing_draft(ad, angle_id, angle_slug, delta_instruction, shou
         offer_text=offer_text, operator_instruction=stored_operator_instruction,
         retheme_colours=retheme_colours, brand_palette=brand_palette,
         realism=realism, cta_text=cta_text, panel_copy=panel_copy,
-        testimonial=testimonial,
+        testimonial=testimonial, clone_mode=clone_mode,
     )
 
     draft_bytes = generate_image_prompt._current_draft_bytes(ad_id, angle_slug)
@@ -1393,6 +1393,7 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
                     panel_copy=copy.get("panel_copy") or None,
                     testimonial=testimonial,
                     product_count=product_count,
+                    clone_mode=clone_mode,
                     **gen_kwargs,
                 )
             except Exception as e:

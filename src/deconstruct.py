@@ -136,6 +136,17 @@ JSON_ESCAPE_SYSTEM = (
 # only the system prompt changes between attempts, not max_tokens.
 _DECONSTRUCT_ATTEMPTS = (None, JSON_ESCAPE_SYSTEM)
 
+# Claude's API default temperature is 1.0 - fine for creative copy, wrong for this call.
+# deconstruct_image is an OBSERVATION task (what does this specific image actually show),
+# not a creative one - four single-ad runs of the identical reference produced four
+# different headlines, layouts, and bottle treatments with nothing but sampling variance
+# to blame (no code-level state leak - see CLAUDE.md's 2026-08-10 batch-degradation note
+# for the parallel investigation that already ruled that out for pipeline.py itself).
+# Low, not zero: some legitimate phrasing latitude in free-text fields (signals, detail
+# strings) is fine and not worth fighting; the STRUCTURE and FACTS extracted from the same
+# pixels should not be a coin flip.
+DECONSTRUCT_TEMPERATURE = 0.2
+
 
 def _log_parse_failure(attempt, total, message, raw_text, exc):
     """Record exactly what came back, so an intermittent failure stays diagnosable from
@@ -185,6 +196,7 @@ def deconstruct_image(image_bytes, ad_id, source_page, captured_at, destination_
             # ~15-field blueprint - estimated +200-350 tokens for the fuller JSON response.
             # 3072 -> 4096 is a reasoned safety margin, NOT an empirically measured fix.
             "max_tokens": 4096,
+            "temperature": DECONSTRUCT_TEMPERATURE,
             "messages": [{"role": "user", "content": content}],
         }
         if system:
