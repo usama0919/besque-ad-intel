@@ -354,6 +354,24 @@ def generate_from_selection(ad_ids, angle_id=None, body_area=None, offer_text=No
     product, its own cutout/visual_description, not yet configured) for what's meant to
     be a Magic Body Oil ad.
 
+    Reference photo total-fetch-failure guard: same refuse-before-any-paid-call shape as
+    the product scope guard above, immediately after it. fetch_reference_images returning
+    a "reference_photo_fetch_failed" warning with ZERO images actually fetched - every
+    configured reference photo failed, not just some - means include_product (when on,
+    the default) has nothing to substitute the Besque bottle with; Gemini falls back to
+    building it from visual_description text alone, which reliably gets pump direction
+    and proportions wrong, and that's a full paid deconstruct+copy+image call spent on a
+    draft that was never usable. Refused the same way as the product scope guard: every
+    ad in the selection marked "failed", a pipeline_warning recorded, nothing generated.
+    Named as the likely cause because the observed failure mode (every configured key
+    fails at once, across otherwise-healthy keys) matches expired ADC far more often than
+    a genuinely missing/renamed file - see CLAUDE.md's own operational note on this.
+    include_product=False (explicitly off for the whole batch) skips this guard entirely
+    - no bottle is being composited in, so a missing reference is irrelevant. A PARTIAL
+    failure (some configured images fetched, some didn't) is unchanged - still proceeds
+    with the existing reference_photo_fetch_failed warning, never refused, since there's
+    still at least one real photo for Gemini to work from.
+
     Explicit selection deliberately overrides the seen_ads skip
     (process_ad(explicit_selection=True)) - the operator picked this ad on
     purpose, so "already seen" must never silently no-op it. mark_seen still
@@ -433,6 +451,29 @@ def generate_from_selection(ad_ids, angle_id=None, body_area=None, offer_text=No
             log.warning("%s: %s", kind, detail)
             dedupe.init_pipeline_warnings()
             dedupe.record_warning(kind, detail)
+            # Total fetch failure guard: refused BEFORE any paid call, same shape as the
+            # product scope guard above - include_product is on (None also normalizes to
+            # True, same convention process_ad itself uses) and EVERY configured reference
+            # image failed to fetch, not just some, so there is nothing for Gemini to
+            # composite the Besque bottle from. Partial failure (some images fetched) is
+            # deliberately excluded - reference_images is non-empty there, so this branch
+            # never fires and the existing warning-only behaviour continues unchanged.
+            effective_include_product = True if include_product is None else include_product
+            if (effective_include_product and kind == "reference_photo_fetch_failed"
+                    and not reference_images):
+                reason = (
+                    f"{detail} Likely cause: expired Google Cloud credentials (ADC), not a "
+                    f"missing file - re-auth and restart, then retry. Refused before any "
+                    f"paid call; nothing was generated."
+                )
+                log.warning("generate_from_selection refused: %s", reason)
+                dedupe.record_warning("reference_photo_fetch_refused", reason)
+                summary = {"processed": 0, "skipped": 0, "failed": len(ad_ids), "already_generated": 0,
+                           "by_ad": {}, "error": reason}
+                for ad_id in ad_ids:
+                    summary["by_ad"][ad_id] = "failed"
+                    _report(ad_id, "failed")
+                return summary
     _stop = should_stop or (lambda: False)
 
     rows_by_ad_id = dedupe.get_scraped_ads_by_ad_ids(ad_ids)
@@ -1446,7 +1487,24 @@ def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product
     varies hugely per brand (roughly 1/10 to 8/10 across pages per CLAUDE.md), so a low
     total can be the pool, not a bug. dedupe.set_run_progress records which competitor is
     currently running, DB-backed (not an in-memory variable) so it's readable the same way
-    whether this runs in-process (LOCAL_RUN) or as a separate Cloud Run Job."""
+    whether this runs in-process (LOCAL_RUN) or as a separate Cloud Run Job.
+
+    Reference photo total-fetch-failure guard: mirrors generate_from_selection's own
+    (see that function's docstring for the full reasoning - Gemini building the bottle
+    from visual_description text alone gets pump direction/proportions wrong, and every
+    ad in the run would still cost a full paid deconstruct+copy+image call for a draft
+    that was never usable). Refused BEFORE the competitor loop starts - no competitor has
+    been scraped yet at this point, so unlike generate_from_selection there is no known
+    ad_id list to mark "failed" one by one; the return is {"processed": 0, "skipped": 0,
+    "failed": 0, ...} with the reason in "error", zero competitors ever touched. Matters
+    MORE here than on the dashboard path: this is also job_runner.py's entrypoint, an
+    unattended scheduled Cloud Run Job - nobody is watching a run-strip warning banner
+    for it, so an unguarded run would silently burn the whole watchlist's worth of paid
+    calls on bottle-less drafts with no human ever seeing why. include_product=False
+    skips this guard entirely (default is True here, never None - unlike generate_from_
+    selection's own None-means-not-supplied convention, run_once's include_product is
+    always a concrete bool). A partial fetch failure (some images fetched) is unchanged -
+    proceeds with the existing warning, never refused."""
     from src.config_check import validate_config
     validate_config()
     dedupe.init_db()
@@ -1467,6 +1525,21 @@ def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product
             log.warning("%s: %s", kind, detail)
             dedupe.init_pipeline_warnings()
             dedupe.record_warning(kind, detail)
+            # Total fetch failure guard (mirrors generate_from_selection's own) - refused
+            # BEFORE any competitor is scraped, let alone any paid call. Partial failure
+            # (reference_images non-empty) never reaches here - this branch only fires
+            # when EVERY configured key failed.
+            if include_product and kind == "reference_photo_fetch_failed" and not reference_images:
+                reason = (
+                    f"{detail} Likely cause: expired Google Cloud credentials (ADC), not a "
+                    f"missing file - re-auth and restart, then retry. Refused before any "
+                    f"paid call; nothing was generated."
+                )
+                log.warning("run_once refused: %s", reason)
+                dedupe.record_warning("reference_photo_fetch_refused", reason)
+                return {"processed": 0, "skipped": 0, "failed": 0,
+                        "reference_photo_warning": reference_warning,
+                        "by_competitor": {}, "error": reason}
     should_stop = should_stop or (lambda: False)
 
     competitors = dedupe.get_competitors()

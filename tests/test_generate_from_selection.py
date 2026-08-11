@@ -144,6 +144,12 @@ def _mock_dedupe_for_scope_guard(monkeypatch, product=None):
     monkeypatch.setattr(pipeline.dedupe, "init_artifacts", lambda: None)
     monkeypatch.setattr(pipeline.dedupe, "init_scraped_ads", lambda: None)
     monkeypatch.setattr(pipeline.dedupe, "init_angles", lambda: None)
+    # init_angle_language was added to generate_from_selection after this helper was
+    # written - missing stub here made every test using this helper (including the
+    # pre-existing product-scope-guard ones) silently depend on a reachable :5433 test
+    # Postgres, defeating the "fully DB-independent" purpose stated in this file's own
+    # module docstring.
+    monkeypatch.setattr(pipeline.dedupe, "init_angle_language", lambda: None)
     monkeypatch.setattr(pipeline.dedupe, "init_products", lambda: None)
     monkeypatch.setattr(pipeline.dedupe, "init_pipeline_warnings", lambda: None)
     monkeypatch.setattr(pipeline.dedupe, "get_product", lambda pid: product)
@@ -208,6 +214,93 @@ def test_generate_from_selection_no_product_id_is_unaffected(monkeypatch):
 
     pipeline.generate_from_selection(["AD1"])
     assert calls == [["AD1"]]
+
+
+# ---- Reference photo total-fetch-failure guard - refused BEFORE any paid call, for the
+# WHOLE selection, same shape as the product scope guard above. A total failure (every
+# configured key failed to fetch) means include_product has nothing to substitute the
+# Besque bottle with; a partial failure (at least one key fetched) must NOT refuse - that
+# case still has a real photo to work from. Fully DB-independent, same reasoning as the
+# product scope guard tests above. ----
+
+def test_generate_from_selection_refuses_when_all_reference_images_fail(monkeypatch):
+    warnings = []
+    monkeypatch.setattr(pipeline.dedupe, "record_warning", lambda kind, detail: warnings.append((kind, detail)))
+    _mock_dedupe_for_scope_guard(monkeypatch, product={"id": 1, "name": "Besque Magic Body Oil"})
+    monkeypatch.setattr(
+        pipeline, "fetch_reference_images",
+        lambda product: ([], ("reference_photo_fetch_failed",
+                               "Product 'Besque Magic Body Oil' (id=1): 2 of 2 configured "
+                               "reference image(s) failed to fetch - k1.png: 403; k2.png: 403")),
+    )
+    process_ad_calls = []
+    monkeypatch.setattr(pipeline, "process_ad", lambda *a, **k: process_ad_calls.append(1) or "processed")
+
+    result = pipeline.generate_from_selection(["AD1", "AD2"], product_id=1)
+
+    assert result["failed"] == 2
+    assert result["processed"] == 0
+    assert result["by_ad"] == {"AD1": "failed", "AD2": "failed"}
+    assert "error" in result and "Besque Magic Body Oil" in result["error"]
+    assert "re-auth" in result["error"].lower() or "credentials" in result["error"].lower()
+    assert process_ad_calls == []  # refused before any paid call, not one ad even attempted
+    kinds = [k for k, _ in warnings]
+    assert "reference_photo_fetch_failed" in kinds  # the original warning is still recorded
+    assert "reference_photo_fetch_refused" in kinds  # AND the refusal itself
+
+
+def test_generate_from_selection_proceeds_on_partial_reference_fetch_failure(monkeypatch):
+    """At least one configured image fetched - must NOT refuse, only warn (unchanged
+    behaviour) - there is still a real photo for Gemini to work from."""
+    monkeypatch.setattr(pipeline.dedupe, "record_warning", lambda *a, **k: None)
+    _mock_dedupe_for_scope_guard(monkeypatch, product={"id": 1, "name": "Besque Magic Body Oil"})
+    monkeypatch.setattr(
+        pipeline, "fetch_reference_images",
+        lambda product: ([b"one-real-photo"],
+                          ("reference_photo_fetch_failed",
+                           "Product 'Besque Magic Body Oil' (id=1): 1 of 2 configured "
+                           "reference image(s) failed to fetch - k2.png: 403")),
+    )
+    calls = []
+    monkeypatch.setattr(pipeline.dedupe, "get_scraped_ads_by_ad_ids", lambda ad_ids: calls.append(ad_ids) or {})
+
+    result = pipeline.generate_from_selection(["AD1"], product_id=1)
+    assert calls == [["AD1"]]  # reached the real selection loop - never refused
+    assert "error" not in result
+
+
+def test_generate_from_selection_reference_guard_skipped_when_include_product_false(monkeypatch):
+    """include_product=False for the whole batch - no bottle is being composited in, so
+    a total reference-fetch failure is irrelevant and must not refuse."""
+    monkeypatch.setattr(pipeline.dedupe, "record_warning", lambda *a, **k: None)
+    _mock_dedupe_for_scope_guard(monkeypatch, product={"id": 1, "name": "Besque Magic Body Oil"})
+    monkeypatch.setattr(
+        pipeline, "fetch_reference_images",
+        lambda product: ([], ("reference_photo_fetch_failed", "all failed")),
+    )
+    calls = []
+    monkeypatch.setattr(pipeline.dedupe, "get_scraped_ads_by_ad_ids", lambda ad_ids: calls.append(ad_ids) or {})
+
+    result = pipeline.generate_from_selection(["AD1"], product_id=1, include_product=False)
+    assert calls == [["AD1"]]
+    assert "error" not in result
+
+
+def test_generate_from_selection_reference_guard_ignores_no_reference_photo_kind(monkeypatch):
+    """"no_reference_photo" (nothing configured at all) is a config gap, not a fetch
+    failure - must never trip this guard, only the existing warning-only path."""
+    monkeypatch.setattr(pipeline.dedupe, "record_warning", lambda *a, **k: None)
+    _mock_dedupe_for_scope_guard(monkeypatch, product={"id": 1, "name": "Besque Magic Body Oil"})
+    monkeypatch.setattr(
+        pipeline, "fetch_reference_images",
+        lambda product: ([], ("no_reference_photo", "Product 'Besque Magic Body Oil' (id=1) has no reference images configured")),
+    )
+    calls = []
+    monkeypatch.setattr(pipeline.dedupe, "get_scraped_ads_by_ad_ids", lambda ad_ids: calls.append(ad_ids) or {})
+
+    result = pipeline.generate_from_selection(["AD1"], product_id=1)
+    assert calls == [["AD1"]]
+    assert "error" not in result
 
 
 # ---- Item 8: selection of one ad generates exactly one ----

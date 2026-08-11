@@ -1357,6 +1357,111 @@ def test_fetch_reference_images_warns_on_partial_failure(monkeypatch):
     assert "missing.png" in detail
 
 
+# ---- run_once's own reference photo total-fetch-failure guard - mirrors generate_from_
+# selection's guard exactly, refused BEFORE the competitor loop starts. Fully DB-
+# independent (every dedupe/config touchpoint stubbed), same reasoning as
+# test_generate_from_selection.py's own scope-guard tests: this must give real signal
+# with no Postgres reachable, and get_competitors is the tripwire proving refusal
+# happened before a single competitor was ever touched. ----
+
+def _mock_dedupe_for_run_once_reference_guard(monkeypatch, product=None):
+    monkeypatch.setattr(pipeline.dedupe, "init_db", lambda: None)
+    monkeypatch.setattr(pipeline.dedupe, "init_decisions", lambda: None)
+    monkeypatch.setattr(pipeline.dedupe, "init_artifacts", lambda: None)
+    monkeypatch.setattr(pipeline.dedupe, "init_competitors", lambda: None)
+    monkeypatch.setattr(pipeline.dedupe, "init_products", lambda: None)
+    monkeypatch.setattr(pipeline.dedupe, "init_angles", lambda: None)
+    monkeypatch.setattr(pipeline.dedupe, "init_angle_language", lambda: None)
+    monkeypatch.setattr(pipeline.dedupe, "init_pipeline_warnings", lambda: None)
+    monkeypatch.setattr(pipeline.dedupe, "get_product", lambda pid: product)
+    monkeypatch.setattr(pipeline.dedupe, "get_angle", lambda aid: None)
+    from src import config_check
+    monkeypatch.setattr(config_check, "validate_config", lambda: None)
+
+
+def test_run_once_refuses_when_all_reference_images_fail(monkeypatch):
+    warnings = []
+    monkeypatch.setattr(pipeline.dedupe, "record_warning", lambda kind, detail: warnings.append((kind, detail)))
+    _mock_dedupe_for_run_once_reference_guard(monkeypatch, product={"id": 1, "name": "Besque Magic Body Oil"})
+    monkeypatch.setattr(
+        pipeline, "fetch_reference_images",
+        lambda product: ([], ("reference_photo_fetch_failed",
+                               "Product 'Besque Magic Body Oil' (id=1): 2 of 2 configured "
+                               "reference image(s) failed to fetch - k1.png: 403; k2.png: 403")),
+    )
+    competitor_calls = []
+    monkeypatch.setattr(pipeline.dedupe, "get_competitors", lambda: competitor_calls.append(1) or [])
+
+    result = pipeline.run_once(product_id=1)
+
+    assert result["processed"] == 0
+    assert result["skipped"] == 0
+    assert result["failed"] == 0  # no ad_ids known yet at refusal time - nothing to mark
+    assert result["by_competitor"] == {}
+    assert "error" in result and "Besque Magic Body Oil" in result["error"]
+    assert "re-auth" in result["error"].lower() or "credentials" in result["error"].lower()
+    assert competitor_calls == []  # refused before a single competitor was even listed
+    kinds = [k for k, _ in warnings]
+    assert "reference_photo_fetch_failed" in kinds
+    assert "reference_photo_fetch_refused" in kinds
+
+
+def test_run_once_proceeds_on_partial_reference_fetch_failure(monkeypatch):
+    monkeypatch.setattr(pipeline.dedupe, "record_warning", lambda *a, **k: None)
+    _mock_dedupe_for_run_once_reference_guard(monkeypatch, product={"id": 1, "name": "Besque Magic Body Oil"})
+    monkeypatch.setattr(
+        pipeline, "fetch_reference_images",
+        lambda product: ([b"one-real-photo"],
+                          ("reference_photo_fetch_failed",
+                           "Product 'Besque Magic Body Oil' (id=1): 1 of 2 configured "
+                           "reference image(s) failed to fetch - k2.png: 403")),
+    )
+    competitor_calls = []
+    monkeypatch.setattr(pipeline.dedupe, "get_competitors", lambda: competitor_calls.append(1) or [])
+    monkeypatch.setattr(pipeline.dedupe, "init_run_progress", lambda: None)
+    monkeypatch.setattr(pipeline.dedupe, "set_run_progress", lambda *a, **k: None)
+
+    result = pipeline.run_once(product_id=1)
+    assert competitor_calls == [1]  # reached the competitor loop - never refused
+    assert "error" not in result
+
+
+def test_run_once_reference_guard_skipped_when_include_product_false(monkeypatch):
+    monkeypatch.setattr(pipeline.dedupe, "record_warning", lambda *a, **k: None)
+    _mock_dedupe_for_run_once_reference_guard(monkeypatch, product={"id": 1, "name": "Besque Magic Body Oil"})
+    monkeypatch.setattr(
+        pipeline, "fetch_reference_images",
+        lambda product: ([], ("reference_photo_fetch_failed", "all failed")),
+    )
+    competitor_calls = []
+    monkeypatch.setattr(pipeline.dedupe, "get_competitors", lambda: competitor_calls.append(1) or [])
+    monkeypatch.setattr(pipeline.dedupe, "init_run_progress", lambda: None)
+    monkeypatch.setattr(pipeline.dedupe, "set_run_progress", lambda *a, **k: None)
+
+    result = pipeline.run_once(product_id=1, include_product=False)
+    assert competitor_calls == [1]
+    assert "error" not in result
+
+
+def test_run_once_reference_guard_ignores_no_reference_photo_kind(monkeypatch):
+    """"no_reference_photo" (nothing configured at all) is a config gap, not a fetch
+    failure - must never trip this guard."""
+    monkeypatch.setattr(pipeline.dedupe, "record_warning", lambda *a, **k: None)
+    _mock_dedupe_for_run_once_reference_guard(monkeypatch, product={"id": 1, "name": "Besque Magic Body Oil"})
+    monkeypatch.setattr(
+        pipeline, "fetch_reference_images",
+        lambda product: ([], ("no_reference_photo", "Product 'Besque Magic Body Oil' (id=1) has no reference images configured")),
+    )
+    competitor_calls = []
+    monkeypatch.setattr(pipeline.dedupe, "get_competitors", lambda: competitor_calls.append(1) or [])
+    monkeypatch.setattr(pipeline.dedupe, "init_run_progress", lambda: None)
+    monkeypatch.setattr(pipeline.dedupe, "set_run_progress", lambda *a, **k: None)
+
+    result = pipeline.run_once(product_id=1)
+    assert competitor_calls == [1]
+    assert "error" not in result
+
+
 def test_process_ad_compliance_fail_is_failed(monkeypatch):
     """Also verifies the fail-soft retry: a compliance failure must trigger exactly one
     retry (2 attempts total) before giving up, and the final failure must be recorded
