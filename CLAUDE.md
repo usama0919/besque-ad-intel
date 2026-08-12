@@ -1064,3 +1064,95 @@ question, the same way it already localises `face_present`/`structural_zones`), 
 `_occlude_person_region` a real region to work from instead of inferring one from
 face-location keywords. `OCCLUDE_PERSON` stays default OFF until that exists - flipping
 it on today would reliably occlude the wrong part of the frame.
+
+## 2026-08-12
+
+**Committed as `085eb16`, 17 files. NOT VERIFIED LIVE.**
+
+### Central finding — revises earlier conclusions about prompt-only rules
+Several failures previously written up in this file as "the model does not reliably
+obey a text instruction" were in fact **contradictions** — a second instruction, closer
+to the point of use, telling the model to do the opposite of an earlier rule. Found
+today: `_edit_mode_instruction` said to match the reference's apparent age, directly
+overriding rule 10 (`_RULE_10_SUBJECT_AGE`); the PERSON clause said to REPRODUCE pose,
+body position, and wardrobe, which is what was actually causing whole-person cloning,
+not a rule the model was simply ignoring; `product_count` could request multiple
+bottles against rule 7's one-bottle constraint; and the headline/subtext were stated
+twice in edit mode (rule 6 plus `_edit_mode_instruction`'s own TEXT branch), three times
+with an overlapping structural zone, which is what was producing rendered word doubling
+("WOULD WOULD", "MADE FOR FOR") — not a rendering-fidelity issue. **All four fixed by
+REMOVAL of the competing instruction, never by adding a counter-clause telling the model
+which side to believe.** The standing lesson this revises: before concluding a rule
+"does not bind" on the image path, audit for a second, more specific instruction telling
+the model to do the opposite — that has now been the actual root cause in four separate
+cases this codebase has hit, not model unreliability per se. The distinct, still-valid
+cases from earlier sessions (testimonials, the FDA disclaimer, the illustrated-bottle
+leak, PERSON likeness cloning from a photo reference) had no such competing instruction
+findable on re-audit and remain filed as genuine prompt-only non-compliance — this
+finding narrows which failures belong in that bucket, it does not empty it.
+
+### Corrected standing rule — the `:5433` test failures
+Both earlier versions of this rule in this file were wrong. `tests/conftest.py:6-9`
+forces `DATABASE_URL` to port 5433 for the entire test session. Any test that reaches
+`dedupe.get_conn()`, in **any** file, fails with `psycopg2.OperationalError, connection
+refused` — this is pre-existing and unrelated to code changes. The invariant is the
+**error signature** (`psycopg2.OperationalError`, port 5433, connection refused) —
+never a file name, never a count; both prior versions of this rule tried to pin it to
+`tests/test_core.py` and to a specific number, and both were wrong the moment a
+different DB-backed test file or a growing test count came along. `tests/test_pipeline.py`
+is fully mocked and stays a usable, DB-independent signal.
+
+### Critic coverage gaps closed
+The output critic is the only mechanism actually enforcing anything on the image path
+(see the top guardrails note) — so a rule with no checklist entry is a rule with zero
+enforcement, not just weaker enforcement. Rules 8 and 11 had no checklist entry;
+`CITED_RULE_IDS` is now derived from the numbered rule functions by introspection
+(`_numbered_rule_ids()`) so a newly added rule fails the suite until a matching checklist
+entry is added, rather than silently shipping unenforced. `check_draft` previously
+attached only the generated draft to the critic's vision call — it now also attaches the
+reference image, without which a SUBJECT IDENTITY check would be permanently silent no
+matter what the checklist says, since the critic would have nothing to compare the draft
+against.
+
+### Transient Anthropic timeouts cost real ads
+Two separate runs, two ads lost, same cause: `deconstruct_image` only retries on
+`BlueprintValidationError` and JSON parse failures, so a plain network timeout from
+Anthropic propagates straight up and the ad fails outright. Highest-value cheap fix
+still outstanding — not built today.
+
+### Vertex 429s are bursty, not a fixed ceiling
+Two runs of the same code, same ad count: run one hit twelve 429s and took 23m40s for 5
+ads; run two hit zero 429s and took 14m34s for 5 ads. Not a quota ceiling being
+consistently hit — bursty, unpredictable. The quota question for Usama is still open, as
+is Cloud SQL dropping pooled connections mid-run (see the connection-pool note above —
+this is a second, separate way pooled connections cause trouble, not the same incident).
+
+### Constraint change from the team — latency is negotiable, quality is not
+This reopens several places that were previously capped for speed: retry ceilings
+(critic, copy, deconstruct — all currently capped at 2 attempts), a separate focused
+vision call dedicated to `production_style` classification, and multi-pass deconstruct.
+None of these are built yet — recorded here as the new constraint governing which future
+fixes are worth doing, not as work in progress.
+
+### Still open
+- `subject_bbox` for occlusion (see the OCCLUDE_PERSON section above — unchanged).
+- Oil realism (viscosity/opacity/how it pools — same gap noted 2026-08-07, still open).
+- Bottle as a fixed asset (compositing the product cutout — still blocked on Pillow
+  compositing work, per the existing Known gaps note).
+- Crepey skin looking synthetic.
+- `used_headlines` capped at 3 against a fixed 22-45 phrase pool per angle — raising the
+  cap makes repetition ACROSS a batch worse, not better, since it lets more ads in the
+  same run draw from the same already-small pool; the fix direction is expanding or
+  rotating the pool, not raising the cap.
+- `.last_prompt` must be removed before any parallelism (unchanged from the section
+  above — restated here only because today's work touched adjacent code, not because
+  anything about the finding changed).
+- A production-safety audit before any deploy: prod is still on revision `00041` from 4
+  Aug, and today's `production_style` enum rename plus the seven newly-required
+  blueprint fields are breaking changes against rows written under the old schema —
+  deploying without an audit risks failing validation on every pre-existing row.
+
+### Repo hygiene
+~40 untracked scratch files sitting in the repo root (`chk*.py`, `dump_*.txt`, `sweep.py`,
+uvicorn logs, etc.) need either a `.gitignore` entry or a `scratch/` folder to live in —
+not done today, just flagged so it doesn't keep accumulating silently.
