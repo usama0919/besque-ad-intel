@@ -290,6 +290,7 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
             )
         else:
             product_desc = "(a natural botanical body oil in an elegant bottle). "
+        product_desc += _BOTTLE_MATERIAL_REALISM_CLAUSE
         if resolved_product_count and resolved_product_count > 1:
             # REVERSED 2026-08-12 (live failure, ad with product_count=5): rule 7 above
             # already states "exactly one bottle... NEVER add a second bottle... whether
@@ -800,6 +801,42 @@ def _substance_recolour_clause(substance_colour=None):
         "product\" means this too - a product-derived substance is the product, even "
         "when it has left the bottle. "
     )
+
+
+# BOTTLE MATERIAL REALISM (2026-08-12 15:13 sweep): distinct from _substance_recolour_
+# clause above (which governs a substance that has LEFT the bottle - a drip, pour, or
+# smear elsewhere in the scene) - this is the oil AS SEEN THROUGH THE GLASS, still
+# inside the bottle. Live finding: the oil reads flat and uniform, with no liquid
+# behaviour at all. Deliberately generic/behavioural rather than naming a specific
+# colour or material here (unlike _substance_recolour_clause, which names
+# substance_colour when known) - a specific colour/material claim not present in
+# product.visual_description would be an invented product fact (compliance C3); real
+# glass/pump colour and finish are already carried by visual_description and the
+# product's own reference photos, this only states HOW whatever those are should
+# render as a real, physical object rather than a flat graphic. Works WITH
+# output_critic's existing PRODUCT REGISTER MISMATCH finding (a studio-lit bottle
+# composited into an ambient scene) rather than against it - refraction/reflection are
+# an extension of that same "match the scene's own light, never a separate studio
+# light" principle (see _bottle_register_clause), applied to a transparent object
+# specifically, not a second, competing lighting instruction.
+_BOTTLE_MATERIAL_REALISM_CLAUSE = (
+    "The oil inside the bottle must read as a REAL LIQUID, not a flat, uniform fill: "
+    "render a visible liquid volume with a distinct surface line (a meniscus) where "
+    "the oil meets the air above it - never full to the cap, and never a solid block "
+    "of colour with no surface at all. Its translucency and viscosity should read as "
+    "real liquid - light passes through it, and it visibly settles/pools under gravity "
+    "- never opaque, matte, or plastic-looking. The glass itself refracts and reflects "
+    "THIS SCENE's own lighting (see the bottle's lighting instruction elsewhere in "
+    "this prompt) - never the separate, unrelated studio lighting the product's own "
+    "reference photo(s) happen to have been shot under; a glass bottle with no depth, "
+    "refraction, or reflection reads as a flat sticker, which is a failure. Pump or cap "
+    "hardware renders with correct material properties for what it actually is (metal, "
+    "plastic, or a mix, per the product's own visual appearance) - real specular "
+    "highlights and reflections consistent with this scene's lighting, never a flat, "
+    "single-tone shape. The label wraps the bottle's own curve as a real printed label "
+    "would - legible, without warping, stretching, or reading as a flat decal pasted "
+    "over a curved surface. "
+)
 
 
 # Item 6d (2026-08-04): the container-type list was typed out three times (here, the TEXT

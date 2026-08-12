@@ -144,6 +144,23 @@ def test_critic_system_rule_9_names_wordmark_endorsement_and_competitor_product(
     assert "SECOND competitor product" in critic.CRITIC_SYSTEM
 
 
+# ---- 2026-08-12 15:13 sweep (oil/bottle item): PRODUCT REGISTER MISMATCH already
+# existed for a studio-lit bottle composited into an ambient scene - extended with a
+# THIRD shape (flat/synthetic oil, glass, pump, label) rather than a new competing
+# category, per the instruction to work WITH this finding, not against it. ----
+
+def test_critic_system_product_register_mismatch_covers_liquid_and_material_realism():
+    section = critic.CRITIC_SYSTEM
+    assert "PRODUCT REGISTER MISMATCH" in section
+    assert "meniscus" in section
+    assert "translucency" in section and "viscosity" in section
+    assert "refraction or reflection" in section
+    assert "specular highlight" in section
+    assert "wrapped around its curve" in section
+    assert "product register mismatch" in critic.HIGH_CONFIDENCE_BY_DEFAULT
+    assert "product register mismatch" in section.lower().split("treat a hit")[1]
+
+
 def test_critic_system_competitor_brand_mark_or_product_default_high_confidence():
     assert "competitor brand mark or product" in critic.HIGH_CONFIDENCE_BY_DEFAULT
     assert "competitor brand mark or product" in critic.CRITIC_SYSTEM.lower().split("treat a hit")[1]

@@ -1023,6 +1023,47 @@ def test_build_image_prompt_edit_mode_names_substance_colour_from_product():
            "bright golden-amber oil -" in prompt
 
 
+# ---- 2026-08-12 15:13 sweep: the oil inside the bottle read flat and uniform - a
+# GENERIC, behavioural clause (no hardcoded colour/material - those come from
+# product.visual_description and the reference photos), distinct from
+# _substance_recolour_clause above (which governs substance that has LEFT the
+# bottle, not the oil still inside it). ----
+
+def test_bottle_material_realism_clause_covers_liquid_glass_pump_and_label():
+    clause = generate_image_prompt._BOTTLE_MATERIAL_REALISM_CLAUSE
+    assert "meniscus" in clause
+    assert "translucency" in clause and "viscosity" in clause
+    assert "refracts and reflects" in clause
+    assert "separate, unrelated studio lighting" in clause
+    assert "specular highlight" in clause
+    assert "wraps the bottle's own curve" in clause
+
+
+def test_build_image_prompt_includes_bottle_material_realism_when_product_shown():
+    prompt = generate_image_prompt.build_image_prompt(_blueprint(), edit_mode=True)
+    assert generate_image_prompt._BOTTLE_MATERIAL_REALISM_CLAUSE in prompt
+
+
+def test_build_image_prompt_includes_bottle_material_realism_in_generate_mode_too():
+    """Not edit-mode-specific - the flat-template and writer paths share the same
+    product_clause, so this must reach both, not just the edit-mode branch."""
+    prompt = generate_image_prompt.build_image_prompt(_blueprint())
+    assert generate_image_prompt._BOTTLE_MATERIAL_REALISM_CLAUSE in prompt
+
+
+def test_build_image_prompt_omits_bottle_material_realism_when_productless():
+    prompt = generate_image_prompt.build_image_prompt(_blueprint(), edit_mode=True, include_product=False)
+    assert generate_image_prompt._BOTTLE_MATERIAL_REALISM_CLAUSE not in prompt
+
+
+def test_bottle_material_realism_clause_never_invents_a_colour_or_material():
+    """Deliberately generic - naming a specific colour/material not present in
+    product.visual_description would be an invented product fact (compliance C3)."""
+    clause = generate_image_prompt._BOTTLE_MATERIAL_REALISM_CLAUSE
+    for invented in ("amber", "red label", "black and gold", "terracotta"):
+        assert invented not in clause.lower()
+
+
 def test_build_image_prompt_edit_mode_omits_colour_phrase_when_substance_colour_unset():
     """A product with no substance_colour (or no product at all) must not have one
     invented - falls back to the exact old generic wording."""
