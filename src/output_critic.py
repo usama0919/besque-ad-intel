@@ -61,7 +61,7 @@ HIGH_CONFIDENCE_BY_DEFAULT = (
     "unauthorised offer", "scarcity claim", "promo code", "efficacy claim", "testimonial",
     "product category mismatch", "regulatory text carried over from the reference",
     "product register mismatch", "nudity or sexualised content", "subject age violation",
-    "subject identity",
+    "subject identity", "competitor brand mark or product",
 )
 
 CRITIC_SYSTEM = (
@@ -81,7 +81,18 @@ CRITIC_SYSTEM = (
     "relevant to product application (legs, torso, underarms) is expected for a body-oil "
     "ad and is NOT itself a violation - only actual nudity or sexualisation in what was "
     "generated is\n"
-    "- a competitor logo, seal, badge, or brand mark anywhere in the image (rule 9)\n"
+    "- COMPETITOR BRAND MARK OR PRODUCT (rule 9): a competitor logo, wordmark, seal, "
+    "badge, watermark, roundel, tagline, or \"by X\"-style endorsement line anywhere in "
+    "the image - INCLUDING sitting directly beneath or beside the substituted BESQUE "
+    "branding, not only where the competitor's own logo used to be. Also flag the "
+    "competitor's own product or packaging appearing ANYWHERE in the frame - not only "
+    "the primary item that was supposed to be substituted or removed, but a SECOND "
+    "competitor product elsewhere in the scene that generation left untouched or "
+    "dropped without accounting for it. These are their own dedicated failure, not a "
+    "corner-mark afterthought: confirmed live on separate drafts, a competitor's \"by "
+    "X\" tagline survived directly beneath the BESQUE logo, and a competitor's product "
+    "jar survived in frame beside the substituted Besque bottle - both on drafts this "
+    "exact check passed\n"
     "- a competitor brand or product name in any rendered text (rules 1-2). If the "
     "Besque product's own documented label/bottle design is supplied below, judge the "
     "product's label text against THAT, not against rule 1's bare wording alone: label "
@@ -193,8 +204,8 @@ CRITIC_SYSTEM = (
     "sure it's a false read: unauthorised offer, scarcity claim, promo code, efficacy "
     "claim, testimonial, product category mismatch, regulatory text carried over from the "
     "reference, product register mismatch, nudity or sexualised content, subject age "
-    "violation, subject identity. These are the exact categories that have shipped in "
-    "real drafts before this check existed."
+    "violation, subject identity, competitor brand mark or product. These are the exact "
+    "categories that have shipped in real drafts before this check existed."
 )
 
 # CRITIC_SYSTEM is an INDEPENDENTLY hand-written checklist, not generated from

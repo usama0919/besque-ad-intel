@@ -1461,11 +1461,18 @@ def get_generate_job(job_id):
 # prompted this fix) never reaches finish_fetch_job/finish_generate_job, and
 # without this, try_start_fetch_job's own WHERE guard blocks that competitor's
 # fetches forever, exactly what happened live on 2026-08-04 for competitor 1.
-# fetch_pool is Apify-only (no deconstruct/Gemini) - real calls observed
-# completing in seconds to low minutes, with one actor run as long as ~5 min
-# noted elsewhere in this codebase - 15 minutes gives real runs generous
-# headroom while still self-recovering same-session.
-FETCH_JOB_STALE_SECONDS = 900
+# Raised from 900 to 1800 (2026-08-12, fetch-hang fix): measured live via the Apify
+# API across the actor's last 100 runs, the longest that finished SUCCEEDED was
+# 799s - already within 100s of the old 900s ceiling for a run that worked fine, no
+# hang involved. scrape.py's own new watch loop (see ACTOR_POLL_HARD_CEILING_SECONDS
+# there) now bounds a single fetch_pool call to at most ~1500s of Apify-side
+# waiting - this threshold must stay comfortably above that, or the DB row could be
+# marked stale and reclaimable while a real, still-legitimate fetch is still inside
+# its own ceiling. Matches GENERATE_JOB_STALE_SECONDS below, not a coincidence - the
+# same order-of-magnitude safety margin, for a different long-running background
+# job. Do not tighten this again without a fresh measurement - 799s is real data,
+# not a guess.
+FETCH_JOB_STALE_SECONDS = 1800
 # generate_from_selection is sequential, ~2 min/ad (CLAUDE.md's own measured
 # sweep timing) - a several-ad grid selection can legitimately run well past
 # fetch's own timeout, so this gets a longer one: generous for realistic
@@ -1482,9 +1489,20 @@ def init_fetch_jobs():
                 result        JSONB,
                 error         TEXT,
                 started_at    TIMESTAMPTZ,
-                finished_at   TIMESTAMPTZ
+                finished_at   TIMESTAMPTZ,
+                run_id        TEXT,
+                dataset_id    TEXT
             )
         """)
+        # run_id/dataset_id (2026-08-12, fetch-hang fix): present in CREATE TABLE above
+        # for a fresh DB AND here for the already-existing production table - the 4 Aug
+        # schema-gap class (a column in one but not the other) must not repeat. Written
+        # by record_fetch_run the moment scrape.py's actor run starts (or is adopted),
+        # independent of finish_fetch_job, so a thread that dies mid-poll still leaves
+        # a real run_id behind for the next fetch_pool call to check via
+        # scrape.get_run_status before deciding whether to start a duplicate.
+        cur.execute("ALTER TABLE fetch_jobs ADD COLUMN IF NOT EXISTS run_id TEXT")
+        cur.execute("ALTER TABLE fetch_jobs ADD COLUMN IF NOT EXISTS dataset_id TEXT")
         conn.commit()
 
 
@@ -1533,24 +1551,47 @@ def finish_fetch_job(competitor_id, result=None, error=None):
         conn.commit()
 
 
+def record_fetch_run(competitor_id, run_id, dataset_id):
+    """Persist the Apify run_id/dataset_id for the fetch currently 'running' for this
+    competitor, the moment they're known - immediately after scrape.py starts (or
+    adopts) the actor run, BEFORE its own watch loop, which can legitimately run for
+    minutes. Written independently of finish_fetch_job precisely so a thread that
+    dies mid-poll still leaves behind enough for the NEXT fetch_pool call for this
+    competitor to find the real run via scrape.get_run_status and either adopt it (if
+    still active) or just read its dataset (if it finished unattended), instead of
+    blindly starting a second, billed, concurrent duplicate."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "UPDATE fetch_jobs SET run_id=%s, dataset_id=%s WHERE competitor_id=%s",
+            (run_id, dataset_id, competitor_id),
+        )
+        conn.commit()
+
+
 def get_fetch_job(competitor_id):
     """Return one competitor's fetch job state, or None if none has ever run.
     Self-heals a stale 'running' row (older than FETCH_JOB_STALE_SECONDS) the
     moment anyone reads it - a poller must eventually see a real terminal state
     rather than 'running' forever if the background thread died, even before
     anyone retries the fetch (which is try_start_fetch_job's own, separate
-    self-recovery path)."""
+    self-recovery path).
+
+    run_id/dataset_id (2026-08-12) are returned even once the job is stale/self-
+    healed to 'error' - pipeline.fetch_pool's own duplicate-run check reads them
+    from the row directly (not via this function) before self-healing would fire,
+    but tests and any other caller should still see the last known run, not None,
+    once one has ever been recorded."""
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
-            "SELECT competitor_id, status, result, error, started_at, finished_at "
-            "FROM fetch_jobs WHERE competitor_id=%s",
+            "SELECT competitor_id, status, result, error, started_at, finished_at, "
+            "run_id, dataset_id FROM fetch_jobs WHERE competitor_id=%s",
             (competitor_id,),
         )
         r = cur.fetchone()
         if r is None:
             return None
         job = {"competitor_id": r[0], "status": r[1], "result": r[2], "error": r[3],
-               "started_at": r[4], "finished_at": r[5]}
+               "started_at": r[4], "finished_at": r[5], "run_id": r[6], "dataset_id": r[7]}
     if job["status"] == "running" and _is_stale(job["started_at"], FETCH_JOB_STALE_SECONDS):
         message = f"stale: claimed but never finished within {FETCH_JOB_STALE_SECONDS}s, treated as failed"
         finish_fetch_job(competitor_id, error=message)

@@ -1,42 +1,77 @@
 """Tests for src/scrape.py's shared _scrape_raw core - scrape_ads and
 scrape_ads_with_raw must apply the identical image-only/page-match filter, since
 pipeline.fetch_pool's counts depend on that never drifting apart from run_once's
-own scrape_ads path. No real Apify call: ApifyClient is monkeypatched."""
+own scrape_ads path. No real Apify call: ApifyClient is monkeypatched.
+
+2026-08-12 (fetch-hang fix): _scrape_raw no longer calls client.actor(id).call(...)
+(blocked with no timeout) - it calls .start(...) then watches the run itself via
+client.run(run_id).get() and client.dataset(dataset_id).get().item_count, so the
+fakes below model THAT interaction. Every fake run defaults to an already-terminal
+status (SUCCEEDED) so _watch_actor_run's very first check returns immediately with
+zero real sleeps - tests that need to exercise the watch loop's own timing
+(stagnation/hard-ceiling) monkeypatch time.monotonic/time.sleep with a fake clock
+instead of waiting on wall-clock time."""
 import os
 from src import scrape
 
 
 class _FakeRun:
-    default_dataset_id = "ds1"
+    def __init__(self, run_id="run1", dataset_id="ds1", status="SUCCEEDED"):
+        self.id = run_id
+        self.default_dataset_id = dataset_id
+        self.status = status
 
 
 class _FakeDataset:
     def __init__(self, items):
         self._items = items
+        self.item_count = len(items)
 
     def iterate_items(self):
         return iter(self._items)
 
+    def get(self):
+        return self
+
+
+class _FakeRunHandle:
+    def __init__(self, run, abort_capture=None):
+        self._run = run
+        self._abort_capture = abort_capture
+
+    def get(self):
+        return self._run
+
+    def abort(self, gracefully=None):
+        if self._abort_capture is not None:
+            self._abort_capture.append(gracefully)
+
 
 class _FakeActorHandle:
-    def __init__(self, run_input_capture):
+    def __init__(self, run_input_capture, run):
         self._capture = run_input_capture
+        self._run = run
 
-    def call(self, run_input=None):
+    def start(self, run_input=None):
         self._capture.append(run_input)
-        return _FakeRun()
+        return self._run
 
 
 class _FakeApifyClient:
-    def __init__(self, items, run_input_capture):
+    def __init__(self, items, run_input_capture, run=None, abort_capture=None):
         self._items = items
         self._capture = run_input_capture
+        self._run = run or _FakeRun()
+        self._abort_capture = abort_capture
 
     def actor(self, actor_id):
-        return _FakeActorHandle(self._capture)
+        return _FakeActorHandle(self._capture, self._run)
 
     def dataset(self, dataset_id):
         return _FakeDataset(self._items)
+
+    def run(self, run_id):
+        return _FakeRunHandle(self._run, self._abort_capture)
 
 
 RAW_ITEMS = [
@@ -223,3 +258,194 @@ def test_scrape_ads_threads_date_window_and_active_status_too(monkeypatch):
     run_input = capture[0]
     assert run_input["startDateMin"] == "2026-01-01"
     assert run_input["activeStatus"] == "all"
+
+
+# ---- 2026-08-12 fetch-hang fix: start()+watch replaces the old blocking .call(),
+# which had no timeout and no visibility into the dataset while waiting (the
+# incident: Crepe Erase's run reached 42/50 image ads then produced zero further
+# output for the rest of its own 565s run before self-terminating). ----
+
+class _FakeClock:
+    """Deterministic stand-in for time.monotonic/time.sleep - advances only when
+    the code under test calls sleep(), so stagnation/hard-ceiling logic can be
+    exercised without any real wall-clock wait."""
+    def __init__(self):
+        self.t = 0.0
+        self.sleeps = []
+
+    def monotonic(self):
+        return self.t
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.t += seconds
+
+
+def _patch_clock(monkeypatch):
+    clock = _FakeClock()
+    monkeypatch.setattr(scrape.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(scrape.time, "sleep", clock.sleep)
+    return clock
+
+
+def test_scrape_ads_with_raw_uses_start_not_call(monkeypatch):
+    """The old blocking call() must be gone from this path entirely - start() plus
+    our own watch loop is what replaces it."""
+    _patch_client(monkeypatch, RAW_ITEMS)
+    triples = scrape.scrape_ads_with_raw("Bangn Body")
+    assert [mapped["ad_id"] for raw, mapped, reason in triples if mapped] == ["A1"]
+
+
+def test_watch_actor_run_returns_immediately_on_already_terminal_run(monkeypatch):
+    """A run that's already SUCCEEDED by the first status check must return with
+    zero sleeps - never wait a full poll interval just to notice that."""
+    clock = _patch_clock(monkeypatch)
+    run = _FakeRun(status="SUCCEEDED")
+    client = _FakeApifyClient([], [], run=run)
+    scrape._watch_actor_run(client, run.id, run.default_dataset_id)
+    assert clock.sleeps == []
+
+
+def test_watch_actor_run_aborts_on_stagnation(monkeypatch):
+    """Dataset item count never grows while the run stays RUNNING - must abort once
+    STAGNATION_TIMEOUT_SECONDS of no growth has elapsed, not wait for the (much
+    longer) hard ceiling or a terminal status that never arrives."""
+    clock = _patch_clock(monkeypatch)
+    run = _FakeRun(status="RUNNING")
+    abort_capture = []
+    client = _FakeApifyClient([{"x": 1}] * 42, [], run=run, abort_capture=abort_capture)
+    scrape._watch_actor_run(client, run.id, run.default_dataset_id)
+    assert abort_capture == [True]  # aborted gracefully
+    assert clock.t >= scrape.STAGNATION_TIMEOUT_SECONDS
+    assert clock.t < scrape.ACTOR_POLL_HARD_CEILING_SECONDS  # stagnation fired first
+
+
+def test_watch_actor_run_aborts_on_hard_ceiling_when_still_growing(monkeypatch):
+    """Item count keeps growing every poll (never stagnant) but the run never
+    reaches a terminal status - the absolute ceiling must still fire, or a run
+    that trickles one item per poll forever would never be bounded."""
+    clock = _patch_clock(monkeypatch)
+    run = _FakeRun(status="RUNNING")
+    items = [{"x": 1}]
+    abort_capture = []
+
+    class _GrowingDataset(_FakeDataset):
+        def get(self):
+            items.append({"x": len(items)})
+            self.item_count = len(items)
+            return self
+
+    class _GrowingClient(_FakeApifyClient):
+        def dataset(self, dataset_id):
+            return _GrowingDataset(items)
+
+    client = _GrowingClient(items, [], run=run, abort_capture=abort_capture)
+    scrape._watch_actor_run(client, run.id, run.default_dataset_id)
+    assert abort_capture == [True]
+    assert clock.t >= scrape.ACTOR_POLL_HARD_CEILING_SECONDS
+
+
+def test_watch_actor_run_stops_watching_once_terminal_even_if_never_stagnant(monkeypatch):
+    """A run that keeps growing and then finishes normally must return via the
+    terminal-status branch, not linger until some unrelated ceiling."""
+    clock = _patch_clock(monkeypatch)
+
+    class _FlipRun:
+        def __init__(self):
+            self.id = "run1"
+            self.default_dataset_id = "ds1"
+            self.calls = 0
+
+        @property
+        def status(self):
+            self.calls += 1
+            return "RUNNING" if self.calls < 3 else "SUCCEEDED"
+
+    run = _FlipRun()
+    client = _FakeApifyClient([{"x": 1}], [], run=run)
+    scrape._watch_actor_run(client, run.id, run.default_dataset_id)
+    assert run.calls == 3
+    assert clock.t < scrape.STAGNATION_TIMEOUT_SECONDS
+
+
+def test_run_actor_and_get_dataset_starts_fresh_when_no_existing_run_id(monkeypatch):
+    capture = []
+    run = _FakeRun(run_id="new_run", dataset_id="new_ds", status="SUCCEEDED")
+    client = _FakeApifyClient([], capture, run=run)
+    started = []
+    dataset_id = scrape._run_actor_and_get_dataset(
+        client, "actor1", {"maxAds": 50}, on_run_started=lambda rid, did: started.append((rid, did)),
+    )
+    assert dataset_id == "new_ds"
+    assert capture == [{"maxAds": 50}]  # start() was called with our run_input
+    assert started == [("new_run", "new_ds")]
+
+
+def test_run_actor_and_get_dataset_adopts_active_existing_run_instead_of_starting(monkeypatch):
+    """The duplicate-run guard: if a prior attempt's run_id is still genuinely
+    RUNNING on Apify, do not start a second, real, billed run for the same
+    competitor - adopt and watch the existing one instead. The run is left RUNNING
+    for the whole test (clock patched so the resulting stagnation wait is instant),
+    since this test cares about start() never being called, not about how the
+    watch loop eventually ends."""
+    clock = _patch_clock(monkeypatch)
+    capture = []
+    run = _FakeRun(run_id="old_run", dataset_id="old_ds", status="RUNNING")
+    client = _FakeApifyClient([], capture, run=run, abort_capture=[])
+    started = []
+    dataset_id = scrape._run_actor_and_get_dataset(
+        client, "actor1", {"maxAds": 50}, on_run_started=lambda rid, did: started.append((rid, did)),
+        existing_run_id="old_run",
+    )
+    assert dataset_id == "old_ds"
+    assert capture == []  # start() was NEVER called - no duplicate run
+    assert started == [("old_run", "old_ds")]
+
+
+def test_run_actor_and_get_dataset_starts_fresh_when_existing_run_already_finished(monkeypatch):
+    """A persisted run_id whose run has since reached a terminal state (finished
+    unattended after the prior process died) is not "still active" - a fresh run_id
+    passed as existing_run_id but already SUCCEEDED must fall through to reading
+    its own dataset, not silently loop forever waiting on a run that's already
+    done. on_run_started must NOT fire again for a run this function didn't start
+    or actively adopt-and-watch."""
+    capture = []
+    run = _FakeRun(run_id="finished_run", dataset_id="finished_ds", status="SUCCEEDED")
+    client = _FakeApifyClient([], capture, run=run)
+    started = []
+    dataset_id = scrape._run_actor_and_get_dataset(
+        client, "actor1", {"maxAds": 50}, on_run_started=lambda rid, did: started.append((rid, did)),
+        existing_run_id="finished_run",
+    )
+    assert dataset_id == "finished_ds"
+    assert capture == []
+    assert started == []
+
+
+def test_get_run_status_returns_status_and_dataset(monkeypatch):
+    monkeypatch.setenv("APIFY_TOKEN", "fake-token")
+    run = _FakeRun(run_id="r1", dataset_id="d1", status="RUNNING")
+    monkeypatch.setattr(scrape, "ApifyClient", lambda token: _FakeApifyClient([], [], run=run))
+    result = scrape.get_run_status("r1")
+    assert result == {"status": "RUNNING", "dataset_id": "d1"}
+
+
+def test_get_run_status_returns_none_without_token(monkeypatch):
+    monkeypatch.delenv("APIFY_TOKEN", raising=False)
+    assert scrape.get_run_status("r1") is None
+
+
+def test_get_run_status_returns_none_without_run_id(monkeypatch):
+    monkeypatch.setenv("APIFY_TOKEN", "fake-token")
+    assert scrape.get_run_status(None) is None
+
+
+def test_get_run_status_never_raises_on_lookup_failure(monkeypatch):
+    monkeypatch.setenv("APIFY_TOKEN", "fake-token")
+
+    class _RaisingClient:
+        def run(self, run_id):
+            raise RuntimeError("network error")
+
+    monkeypatch.setattr(scrape, "ApifyClient", lambda token: _RaisingClient())
+    assert scrape.get_run_status("r1") is None

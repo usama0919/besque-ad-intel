@@ -1156,3 +1156,92 @@ fixes are worth doing, not as work in progress.
 ~40 untracked scratch files sitting in the repo root (`chk*.py`, `dump_*.txt`, `sweep.py`,
 uvicorn logs, etc.) need either a `.gitignore` entry or a `scratch/` folder to live in —
 not done today, just flagged so it doesn't keep accumulating silently.
+
+### 15:13 sweep — five live-draft fixes, all removals/re-scopes, none a new clause
+
+**STANDING DIAGNOSIS: deconstruct is not recording enough for the generation step to
+act on.** Three of five items below (competitor branding, competitor product, bottle/
+prop composition) trace to the SAME gap: the blueprint schema has no structured
+inventory of competitor brand elements (no field distinct from `structural_zones`'
+`brand_wordmark` - which only ever means "the ONE zone BESQUE substitutes into," not
+"every competitor mark that must be removed"), and `layout_detail.product_count` is a
+bare number that conflates "N of the reference's own products" with "N of the same
+Besque bottle to render" (see `resolve_product_count`'s own docstring) - there is no
+field distinguishing multiple DISTINCT competitor products from repeats of one, and no
+field for a product's relative SCALE against its own surrounding props. Rules 9 and 7
+therefore have nothing structured to check against beyond what a prompt clause can
+catch by asking nicely - and asking nicely is the exact thing this codebase has
+repeatedly proven does not reliably bind (see the top guardrails note). Not fixed this
+session - recorded so a future schema pass (a `competitor_brand_elements` inventory on
+`structural_zones` or its own field, plus a real product-identity/scale record instead
+of a bare count) knows why it's needed, not just that it might be nice to have.
+
+**Items 1+2 - competitor branding and competitor product surviving** (a "by THE BODY
+FIRM" tagline beneath the substituted BESQUE logo; a competitor's cream jar beside the
+substituted Besque bottle - both legal exposure). Rule 9 (`brand_rules`) already banned
+both; it was losing to `_edit_mode_instruction`'s own "everything else in the scene...
+carries over... exactly" catch-all (five near-identical sites, one per product branch)
+and to `opening`'s "the overall structure and which non-person elements appear must
+still carry over from the reference" - literally the opposite instruction, stated
+CLOSER to the point of use than rule 9. Exactly the PERSON-clause shape from earlier
+today (2026-08-10/12), just never extended to this category. Fixed by RE-SCOPING, not
+adding a clause: a new shared `_non_carryover_exceptions_clause()` (one definition, five
+call sites, so it can't drift the way five independently-typed copies would) excepts
+competitor brand marks and competitor product/packaging from every "carries over
+exactly" site, plus `opening`'s own two branches now name the same exception inline.
+`_competitor_props_clause`'s existing PROP_KEYWORDS mechanism (diagrams/devices/
+applicators) has this SAME unfixed gap - not touched this session, flagged as a sibling
+case for whoever revisits this.
+
+**Item 3 - rule 9's critic checklist entry passed both violations above.** Strengthened
+to name wordmarks, "by X" endorsement lines, and competitor product/packaging
+explicitly (was: "a competitor logo, seal, badge, or brand mark" - no product, no
+tagline, no endorsement-line language). Added "competitor brand mark or product" to
+`HIGH_CONFIDENCE_BY_DEFAULT` - it was reporting this category at all, but never
+defaulting it to HIGH, unlike ten sibling categories already in that tuple.
+
+**Item 4 - composition must adapt to the bottle, not the reverse** (a pool float sized
+for the reference's squat jar wasn't rescaled for a tall narrow bottle; a second
+product the reference showed was dropped rather than accounted for). `layout_detail.
+product_count` IS recorded (see the standing diagnosis above for its limits) and
+already drives one adaptation - `build_image_prompt`'s own `resolved_product_count > 1`
+branch (added earlier the same day) already tells Gemini to resize/rebalance the
+LAYOUT around a single bottle rather than reproduce a multi-product count. But
+`_edit_mode_instruction`'s photographic-substitute branch said to place the bottle "at
+its scale, matching the original shot's composition as faithfully as possible" - i.e.
+match the REFERENCE product's own scale, the literal opposite of what's needed - and
+its own "everything else carries over exactly" catch-all directly contradicted
+`product_clause`'s resize instruction besides. Fixed: that branch no longer says "at
+its scale"; it states the bottle's proportions are fixed (deferring to
+`_bottle_fixed_clause`) and that a prop/holder/float sized for the reference's own
+product is what adapts, never the bottle - plus an explicit "account for every distinct
+product, never silently drop one" line. `_non_carryover_exceptions_clause()` gained a
+third exception for this same reason.
+
+**Item 5 - season/premise contradiction in copy** ("Show it off this spring" headline
+over "Give your skin some love this winter" body copy - the REFERENCE ad's own copy
+mixed seasons, and both were inherited verbatim). Fixed mechanically, not with a prompt
+request: `generate_copy.validate_copy` now rejects copy naming more than one season
+across headline/primary_text/image_subtext (`SEASON_PATTERNS`/`_seasons_mentioned`),
+raising into the SAME retry loop `require_cta`/`require_image_subtext` already use.
+Scoped to SEASON specifically, not "premise" generally - season names are
+keyword-detectable the same way `compliance.py`'s other checks are; a broader tonal or
+problem-aware-vs-solution-aware premise clash has no equivalent keyword and is NOT
+covered by this check.
+
+**Item 6 - reference background texture carrying over** (a crepey-skin background
+reproduced as a coral wrinkled surface; layout barely changed from the reference).
+Confirmed by tracing the code, not assumed: the 5-8% variation clause (`opening`, both
+`retheme_colours` branches) DOES reach the assembled edit-mode prompt every time -
+`_edit_mode_instruction` is unconditionally part of `build_image_prompt`'s edit_mode
+branch. Nothing contradicts the 5-8% NUMBER itself. What actually explains both
+symptoms: the clause is deliberately subtle by design ("the same way two real
+photographs of the same real scene, taken moments apart, are never pixel-identical" -
+never meant to look visibly different, so "layout barely changed" may be working as
+designed, not a bug), and the palette remap only re-maps HUE ("every hue in the scene...
+re-maps to Besque's palette") - nothing tells Gemini to reinterpret a background whose
+actual CONTENT is a body-part texture used as a graphic backdrop; recolouring skin
+texture to Besque's terracotta/coral palette produces exactly a "coral wrinkled
+surface." Not fixed this session (item 6 was scoped as report-only) - if this recurs,
+the fix direction is a background-content clause distinct from the colour-only remap,
+not a stronger version of the 5-8% number.

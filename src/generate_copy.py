@@ -508,6 +508,34 @@ def strip_banned_dashes(copy):
 
 REQUIRED_COPY_FIELDS = {"headline", "primary_text", "cta"}
 
+# SEASON CONTRADICTION (2026-08-12 15:13 sweep): a real draft rendered "Show it off
+# this spring" as the headline with "Give your skin some love this winter" beneath it
+# as body copy - the REFERENCE ad's own copy mixed seasons (a competitor running a
+# stale/rolled-over creative), and both got inherited verbatim into Besque's copy with
+# nothing anywhere noticing they contradict each other. This is a MECHANICAL check,
+# not a prompt request - a prompt asking the model not to do this is the exact class
+# of fix already proven unreliable elsewhere in this codebase (see CLAUDE.md's top
+# note); this catches it deterministically after the fact instead, the same shape as
+# require_cta/require_image_subtext above. Scoped to SEASON specifically, not
+# "premise" generally: season names are keyword-detectable the same way
+# compliance.py's other checks are; a broader problem-aware-vs-solution-aware or
+# tonal premise clash has no equivalent keyword to key off and is not covered here -
+# see the CLAUDE.md note recorded alongside this fix. "fall" is matched as a season
+# alias for autumn and can false-positive on a non-seasonal use of the word, the same
+# accepted trade-off compliance.py's own keyword checks already make.
+SEASON_PATTERNS = {
+    "spring": (r"\bspring\b",),
+    "summer": (r"\bsummer\b",),
+    "autumn": (r"\bautumn\b", r"\bfall\b"),
+    "winter": (r"\bwinter\b",),
+}
+
+
+def _seasons_mentioned(text):
+    text = (text or "").lower()
+    return {season for season, patterns in SEASON_PATTERNS.items()
+            if any(re.search(p, text) for p in patterns)}
+
 
 def validate_copy(copy, require_cta=False, require_image_subtext=False):
     """require_cta/require_image_subtext (2026-08-11): mechanical backstop for the same
@@ -531,6 +559,17 @@ def validate_copy(copy, require_cta=False, require_image_subtext=False):
         raise ValueError(
             "image_subtext is empty but this reference has a sub_line/body_copy zone that "
             "needs matching wording - the zone will be removed from the image otherwise."
+        )
+    combined = " ".join([copy.get("headline") or "", copy.get("primary_text") or "",
+                          copy.get("image_subtext") or ""])
+    seasons = _seasons_mentioned(combined)
+    if len(seasons) > 1:
+        raise ValueError(
+            f"Generated copy names more than one season ({', '.join(sorted(seasons))}) across "
+            f"headline/primary_text/image_subtext - copy must be internally consistent, one "
+            f"season and one premise only. A reference ad's own copy can legitimately mix "
+            f"seasons (e.g. a stale or rolled-over competitor creative) and both get inherited "
+            f"verbatim if nothing catches it."
         )
 
 

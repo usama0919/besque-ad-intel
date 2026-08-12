@@ -130,6 +130,25 @@ def test_critic_system_cites_rule_9_next_to_competitor_marks():
     assert "(rule 9)" in critic.CRITIC_SYSTEM
 
 
+# ---- 2026-08-12 15:13 sweep: rule 9's checklist entry passed both a competitor
+# "by X" tagline surviving beneath the BESQUE logo and a competitor's product jar
+# surviving beside the substituted Besque bottle - strengthened to name both
+# explicitly and confirmed HIGH-confidence-by-default, since the category had shipped
+# in real drafts but was not in HIGH_CONFIDENCE_BY_DEFAULT at all. ----
+
+def test_critic_system_rule_9_names_wordmark_endorsement_and_competitor_product():
+    assert "(rule 9)" in critic.CRITIC_SYSTEM
+    assert "wordmark" in critic.CRITIC_SYSTEM
+    assert "by X" in critic.CRITIC_SYSTEM
+    assert "competitor's own product or packaging" in critic.CRITIC_SYSTEM
+    assert "SECOND competitor product" in critic.CRITIC_SYSTEM
+
+
+def test_critic_system_competitor_brand_mark_or_product_default_high_confidence():
+    assert "competitor brand mark or product" in critic.HIGH_CONFIDENCE_BY_DEFAULT
+    assert "competitor brand mark or product" in critic.CRITIC_SYSTEM.lower().split("treat a hit")[1]
+
+
 def test_critic_system_cites_rule_7_next_to_product_count():
     assert "(rule 7)" in critic.CRITIC_SYSTEM
 

@@ -176,14 +176,40 @@ def fetch_pool(competitor_id, cap=50, start_date_min=None, start_date_max=None, 
     n_raw is every record Apify's dataset returned before the image/page filter;
     skipped breaks down by scrape.py's REJECT_* reason (not_image/wrong_page/
     no_image_url), "duplicate" (same ad_id twice in ONE pull), and "already_present"
-    (ad_id already stored for this competitor from a prior fetch - not upserted again)."""
+    (ad_id already stored for this competitor from a prior fetch - not upserted again).
+
+    Duplicate-run guard (2026-08-12, fetch-hang fix): before starting a fresh Apify
+    actor run, checks whether this competitor's fetch_jobs row already carries a
+    run_id from a PRIOR attempt whose own process died mid-poll (never reached
+    finish_fetch_job) - dedupe.try_start_fetch_job's stale-reclaim path preserves
+    run_id/dataset_id across a reclaim precisely so this check has something to
+    read. If scrape.get_run_status confirms that run is still genuinely active on
+    Apify, adopts and watches it instead of starting a second, real, billed run for
+    the same competitor. Either way, scrape.scrape_ads_with_raw's on_run_started
+    callback persists whatever run this attempt ends up using the moment it's known
+    - not after the (possibly long) watch loop - so a later retry can make this same
+    check even if THIS process also dies mid-poll."""
     competitor = next((c for c in dedupe.get_competitors() if c["id"] == competitor_id), None)
     if not competitor:
         raise ValueError(f"competitor {competitor_id} not found")
     dedupe.init_scraped_ads()
+
+    existing_job = dedupe.get_fetch_job(competitor_id)
+    existing_run_id = None
+    if existing_job and existing_job.get("status") == "running" and existing_job.get("run_id"):
+        run_status = scrape.get_run_status(existing_job["run_id"])
+        if run_status and run_status["status"] in scrape.ACTIVE_RUN_STATUSES:
+            log.info("fetch_pool: adopting still-active Apify run %s for competitor %s instead of "
+                      "starting a duplicate", existing_job["run_id"], competitor_id)
+            existing_run_id = existing_job["run_id"]
+
+    def _on_run_started(run_id, dataset_id):
+        dedupe.record_fetch_run(competitor_id, run_id, dataset_id)
+
     triples = scrape.scrape_ads_with_raw(competitor["name"], max_results=cap, page_id=competitor.get("page_id"),
                                           start_date_min=start_date_min, start_date_max=start_date_max,
-                                          active_status=active_status)
+                                          active_status=active_status,
+                                          on_run_started=_on_run_started, existing_run_id=existing_run_id)
     existing_ad_ids = dedupe.get_scraped_ad_ids(competitor_id)
     skipped = {"not_image": 0, "wrong_page": 0, "no_image_url": 0, "duplicate": 0, "already_present": 0}
     seen_ad_ids = set()

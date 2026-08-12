@@ -1434,6 +1434,41 @@ def _register_clause(style, scene_lighting=None):
     )
 
 
+def _non_carryover_exceptions_clause():
+    """The 'everything else in the scene carries over exactly' family of clauses below
+    (one per product branch) all need the SAME exceptions, in the SAME wording, so they
+    can never drift out of sync with each other the way PERSON almost did (2026-08-10).
+
+    AUDIT, 2026-08-12 15:13 live sweep: two separate drafts proved this catch-all was
+    winning over rule 9 - a competitor's "by THE BODY FIRM" tagline survived directly
+    beneath the substituted BESQUE logo, and a competitor's product jar survived in
+    frame beside the substituted Besque bottle. Rule 9 (brand_rules) already says both
+    must never survive, but it is stated further from the point of use than THIS
+    clause, which was still saying the opposite ("everything else... carries over...
+    exactly", with nothing here naming either exception) right where the model decides
+    what to keep. A THIRD exception is added the same session for the composition-
+    adaptation case (a prop/float/holder sized for the reference's own differently-
+    shaped product, or a second product the reference shows) - the same catch-all was
+    also silently re-asserting "carries over exactly" against the product-count
+    composition-adaptation instruction stated in the product branches above.
+
+    Called fresh each time rather than cached as a module constant so a future
+    exception can be added without hunting for five call sites to update by hand -
+    there is exactly one place this text is written."""
+    return (
+        "EXCEPT THE PERSON (see PERSON below, which governs pose, body position, and "
+        "wardrobe separately), EXCEPT any competitor brand mark - logo, wordmark, "
+        "tagline, or \"by X\" endorsement line, wherever it sits in frame - or the "
+        "competitor's own product or packaging anywhere in the scene, including a "
+        "SECOND product beyond the one being substituted, added, or removed above (see "
+        "rule 9 above, which governs both and wins over this carry-over instruction no "
+        "matter how broadly \"everything else\" might otherwise be read), and EXCEPT "
+        "the scale of any prop, holder, float, or opening sized for the reference's own "
+        "product - that adapts to fit the substituted Besque bottle's real, fixed "
+        "proportions instead, never the reverse (see the product instruction above)"
+    )
+
+
 def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, offer_text=None,
                             include_product=True, reference_has_product=True,
                             reference_has_text_zone=True, layout_detail=None, visual=None,
@@ -1623,7 +1658,12 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             "structure and which non-person elements appear must still carry over from "
             "the reference. This does NOT extend to the person - see PERSON below, "
             "which governs pose, body position, and wardrobe separately and overrides "
-            "anything about the person implied here. "
+            "anything about the person implied here - NOR to any competitor brand mark "
+            "(logo, wordmark, tagline, or \"by X\" endorsement line) or the "
+            "competitor's own product/packaging anywhere in frame, including a SECOND "
+            "product the reference shows - see rule 9 above, which governs those and "
+            "overrides this carry-over instruction entirely, regardless of how broadly "
+            "\"which non-person elements appear\" might otherwise be read. "
             + exception_clause +
             f"At the same time, every hue in the scene (background, props, "
             f"surfaces) re-maps to Besque's palette: {effective_palette} - "
@@ -1642,7 +1682,11 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             "detail, or prop arrangement - not a mechanically exact clone, but never a "
             "different composition either. This does NOT extend to the person - see "
             "PERSON below, which governs pose, body position, and wardrobe separately "
-            "and overrides anything about the person implied here. "
+            "and overrides anything about the person implied here - NOR to any "
+            "competitor brand mark (logo, wordmark, tagline, or \"by X\" endorsement "
+            "line) or the competitor's own product/packaging anywhere in frame, "
+            "including a SECOND product the reference shows - see rule 9 above, which "
+            "governs those and overrides this reproduce instruction entirely. "
             + exception_clause
         )
     opening += _register_clause(style, scene_lighting)
@@ -1659,9 +1703,13 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             f"colour, and the label name alone - \"{name}\". Secondary label content "
             f"(sub-lines, certification icons, fine print) does not need to be legible at "
             f"this scale in this style; name and colour accuracy matter, secondary-text "
-            f"legibility does not. "
+            f"legibility does not. If the reference shows more than one distinct "
+            f"product, account for each explicitly rather than silently dropping any "
+            f"of them - substitute a Besque item where a genuine substitution makes "
+            f"sense, or deliberately remove one with no Besque equivalent and adjust "
+            f"the surrounding composition so the scene makes sense without it. "
             + _substance_recolour_clause(substance_colour) +
-            "Everything else in the scene - EXCEPT THE PERSON, see PERSON below - carries over "
+            f"Everything else in the scene - {_non_carryover_exceptions_clause()} - carries over "
             "from the source image exactly as the reproduce-faithfully instruction above states (never a stricter 'exactly' reintroduced here, including its small natural variation allowance). "
         )
     elif include_product and reference_has_product:
@@ -1681,10 +1729,21 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
         base = opening + (
             "Changing ONLY the product. Remove the competitor's product entirely and "
             "place the Besque product (shown in the reference photo(s) that follow, if "
-            "any) in its position, at its scale, matching the original shot's composition "
-            "as faithfully as possible. " + lighting_instruction
+            "any) in its position, matching the original shot's composition as "
+            "faithfully as possible. The bottle's own geometry and proportions are "
+            "FIXED (see the bottle-fixed instruction above) - if the reference's own "
+            "product sits inside, on, or against a prop, holder, float, or opening "
+            "sized for ITS shape, that PROP is what adapts: resize or reshape it to "
+            "properly fit the Besque bottle's real proportions, never the reverse "
+            "(never stretch, squeeze, or shrink the bottle to fit a prop sized for a "
+            "differently-shaped product). If the reference shows more than one "
+            "distinct product, account for each explicitly rather than silently "
+            "dropping any of them - substitute a Besque item where a genuine "
+            "substitution makes sense, or deliberately remove one with no Besque "
+            "equivalent and adjust the surrounding composition (props, spacing, "
+            "balance) so the scene makes sense without it. " + lighting_instruction
             + _substance_recolour_clause(substance_colour) +
-            "Everything else in the scene - EXCEPT THE PERSON, see PERSON below - carries over "
+            f"Everything else in the scene - {_non_carryover_exceptions_clause()} - carries over "
             "from the source image exactly as the reproduce-faithfully instruction above states (never a stricter 'exactly' reintroduced here, including its small natural variation allowance). "
         )
     elif include_product and not reference_has_product and style == "illustrated":
@@ -1719,7 +1778,7 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             # none almost certainly has no such substance to recolour either, so this
             # would be dead weight text (same reasoning the substitute branches' use of
             # it doesn't need to restate).
-            "Everything else in the scene - EXCEPT THE PERSON, see PERSON below - carries over "
+            f"Everything else in the scene - {_non_carryover_exceptions_clause()} - carries over "
             "from the source image exactly as the reproduce-faithfully instruction above states (never a stricter 'exactly' reintroduced here, including its small natural variation allowance), aside from this addition. "
         )
     elif include_product and not reference_has_product:
@@ -1749,14 +1808,14 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             + lighting_instruction
             # No _substance_recolour_clause here either - see the illustrated ADD
             # branch's own comment above for why.
-            + "Everything else in the scene - EXCEPT THE PERSON, see PERSON below - carries over "
+            + f"Everything else in the scene - {_non_carryover_exceptions_clause()} - carries over "
             "from the source image exactly as the reproduce-faithfully instruction above states (never a stricter 'exactly' reintroduced here, including its small natural variation allowance), aside from this addition. "
         )
     else:
         base = opening + (
             "This is a deliberately productless edit - do NOT add any Besque product, "
-            "bottle, or packaging anywhere in the scene. Everything else in the scene - "
-            "EXCEPT THE PERSON, see PERSON below - carries over from the source image "
+            f"bottle, or packaging anywhere in the scene. Everything else in the scene - "
+            f"{_non_carryover_exceptions_clause()} - carries over from the source image "
             "exactly as the reproduce-faithfully instruction above states (never a "
             "stricter \"exactly\" reintroduced here, including its small natural "
             "variation allowance). "

@@ -583,6 +583,60 @@ def test_copy_from_response_accepts_empty_cta_when_not_required():
     assert copy["cta"] == ""
 
 
+# ---- SEASON CONTRADICTION mechanical check (2026-08-12 15:13 sweep) - a real draft
+# rendered "Show it off this spring" as the headline with "Give your skin some love
+# this winter" as body copy beneath it, both inherited verbatim from a reference ad
+# whose OWN copy mixed seasons. Mechanical, not a prompt request - see SEASON_PATTERNS'
+# own comment. ----
+
+def test_validate_copy_rejects_two_seasons_across_headline_and_primary_text():
+    with pytest.raises(ValueError, match="season"):
+        generate_copy.validate_copy({
+            "headline": "Show it off this spring", "primary_text": "Give your skin some love this winter.",
+            "cta": "Shop Now",
+        })
+
+
+def test_validate_copy_rejects_two_seasons_in_image_subtext_too():
+    with pytest.raises(ValueError, match="season"):
+        generate_copy.validate_copy({
+            "headline": "Summer glow starts here", "primary_text": "P", "cta": "C",
+            "image_subtext": "Cozy up this winter",
+        })
+
+
+def test_validate_copy_allows_a_single_season():
+    generate_copy.validate_copy({
+        "headline": "Show it off this spring", "primary_text": "Fresh, lightweight, radiant.",
+        "cta": "Shop Now",
+    })
+
+
+def test_validate_copy_allows_no_season_mentioned():
+    generate_copy.validate_copy({"headline": "Show it off", "primary_text": "P", "cta": "C"})
+
+
+def test_validate_copy_fall_matches_autumn_not_a_second_distinct_season():
+    """"fall" and "autumn" are the SAME season - naming both must not itself trigger the
+    contradiction check (only a genuinely different season name should)."""
+    generate_copy.validate_copy({
+        "headline": "Fall in love with your skin this autumn", "primary_text": "P", "cta": "C",
+    })
+
+
+def test_seasons_mentioned_is_case_insensitive():
+    assert generate_copy._seasons_mentioned("SPRING into your best skin yet") == {"spring"}
+
+
+def test_copy_from_response_rejects_season_contradiction():
+    raw = json.dumps({
+        "headline": "Show it off this spring", "primary_text": "Give your skin some love this winter.",
+        "cta": "Shop Now",
+    })
+    with pytest.raises(ValueError, match="season"):
+        generate_copy.copy_from_response(raw)
+
+
 def test_generate_copy_live_requires_cta_and_image_subtext_when_zones_present(monkeypatch):
     """End-to-end: a blueprint with a cta zone AND a sub_line zone must reject an empty
     cta/image_subtext on every attempt and raise, rather than silently accepting it."""
