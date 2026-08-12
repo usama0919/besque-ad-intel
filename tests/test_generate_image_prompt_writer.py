@@ -82,8 +82,8 @@ def test_build_user_prompt_reflects_reference_image_count():
 
 
 def test_build_user_prompt_includes_realism():
-    prompt = writer._build_user_prompt({}, realism="ugc_native")
-    assert "ugc_native" in prompt
+    prompt = writer._build_user_prompt({}, realism="ugc")
+    assert "ugc" in prompt
 
 
 # ---- Regression guards for the real incident: writer described "two Besque Magic amber
@@ -258,30 +258,30 @@ def test_build_user_prompt_handles_missing_new_fields_gracefully():
     assert len(prompt) > 20
 
 
-# ---- Medium must match realism: a photographic (high_spec_studio) reference produced
+# ---- Medium must match realism: a photographic (high_spec) reference produced
 # fully illustrated output (drawn eyes, painted skin, rendered bottle) in a real run ----
 
 def test_realism_auto_resolves_to_blueprint_production_style():
     """realism="(auto)" reaches here as realism=None/"" - it must resolve to the
     reference ad's OWN detected production_style, never to no signal at all."""
-    bp = {"production_style": {"style": "high_spec_studio"}}
+    bp = {"production_style": {"style": "high_spec"}}
     prompt = writer._build_user_prompt(bp, realism=None)
     assert "Realism / medium (STRICT" in prompt
-    assert "high_spec_studio" in prompt
+    assert "high_spec" in prompt
 
 
 def test_realism_explicit_overrides_blueprint_production_style():
     """An operator-chosen realism must win over the reference ad's own detected style -
     never auto-detected when explicitly given (matches every other angle-driven control
     in this pipeline)."""
-    bp = {"production_style": {"style": "high_spec_studio"}}
+    bp = {"production_style": {"style": "high_spec"}}
     prompt = writer._build_user_prompt(bp, realism="illustrated")
     assert "The medium must match illustrated exactly" in prompt
 
 
 def test_realism_states_photographic_vs_drawn_taxonomy_explicitly():
-    prompt = writer._build_user_prompt({}, realism="high_spec_studio")
-    assert "high_spec_studio, ugc_native, and hybrid all mean a PHOTOGRAPH" in prompt
+    prompt = writer._build_user_prompt({}, realism="high_spec")
+    assert "high_spec and ugc both mean a PHOTOGRAPH" in prompt
     assert "illustrated means NOT a photograph at all" in prompt
 
 
@@ -471,3 +471,27 @@ def test_efficacy_claims_always_banned_regardless_of_offer_text():
 def test_efficacy_claims_ban_present_even_with_include_product_false():
     prompt = writer._build_user_prompt({}, include_product=False)
     assert "describe NO quantified efficacy claim of any kind" in prompt
+
+
+# ---- Item 10 (2026-08-12): UGC rawness - a studio finish (retouching, brightness lift,
+# colour grading) is a failure of this register, not a stylistic variant of it ----
+
+def test_ugc_style_guidance_bans_retouching_and_colour_grading():
+    ugc = writer.STYLE_GUIDANCE["ugc"]
+    assert "NO retouching" in ugc
+    assert "NO AI brightness lift" in ugc
+    assert "NO colour grading" in ugc
+
+
+def test_ugc_style_guidance_requires_consistent_lack_of_polish():
+    ugc = writer.STYLE_GUIDANCE["ugc"]
+    assert "SAME lack of polish as the rest of the frame" in ugc
+    assert "studio finish" in ugc
+    assert "not a stylistic variant of it" in ugc
+
+
+def test_ugc_style_guidance_reaches_edit_mode_register_clause():
+    from src import generate_image_prompt
+    instruction = generate_image_prompt._edit_mode_instruction(style="ugc")
+    assert "NO retouching" in instruction
+    assert "NO colour grading" in instruction

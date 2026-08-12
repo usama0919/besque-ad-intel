@@ -805,12 +805,21 @@ def _regenerate_existing_draft(ad, angle_id, angle_slug, delta_instruction, shou
                 headline=generated_copy.get("headline"), subtext=generated_copy.get("image_subtext") or None,
                 edit_mode=True,
             )
+            # reference_image_bytes (Item 2, 2026-08-12): always edit_mode=True in this
+            # function (see brand_rules() call above), so a real competitor reference
+            # exists on disk at the artifact's own stored image_path - read it the same
+            # way draft_bytes_for_check is read above, inside the SAME try/except, so a
+            # missing/unreadable reference degrades to no-comparison (same as today)
+            # rather than failing the whole check.
+            reference_path = existing.get("image_path") or ""
+            reference_image_bytes = _Path(reference_path).read_bytes() if reference_path else None
             findings = output_critic.check_draft(
                 draft_bytes_for_check, brand_rules_text, headline=eff_headline,
                 subtext=eff_subtext, offer_text=offer_text, include_product=include_product,
                 visual_description=(product or {}).get("visual_description"),
                 ingredients=(product or {}).get("ingredients"),
                 testimonial=testimonial,
+                reference_image_bytes=reference_image_bytes,
             )
         except Exception as e:
             log.warning("Ad %s: output critic block raised on regenerate (%s: %s), "
@@ -1273,6 +1282,8 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
                 break
             log.warning("Ad %s failed compliance check (attempt %s/%s): %s",
                         ad_id, copy_attempt, MAX_COPY_ATTEMPTS, issues)
+            log.warning("Ad %s generated_copy at failed attempt %s/%s: %s",
+                        ad_id, copy_attempt, MAX_COPY_ATTEMPTS, copy)
         if not ok:
             reason = f"Ad {ad_id} ({ad.get('page_name', '?')}) failed compliance after {MAX_COPY_ATTEMPTS} attempt(s): {issues}"
             dedupe.init_pipeline_warnings()
@@ -1461,6 +1472,13 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
                     # flagged select_testimonial_review's own correct output as a
                     # fabricated quote (C2), never having been told one was authorised.
                     testimonial=testimonial,
+                    # reference_image_bytes (Item 2, 2026-08-12): the SAME competitor ad
+                    # bytes attached to Gemini for generation (see edit_mode's
+                    # competitor_image_bytes below) - without this the critic's SUBJECT
+                    # IDENTITY category has nothing to compare the draft against. Only in
+                    # edit_mode: generate mode never had a real reference photo to clone
+                    # an identity FROM, so there is nothing meaningful to compare there.
+                    reference_image_bytes=(image_bytes if edit_mode else None),
                 )
             except Exception as e:
                 log.warning("Ad %s: output critic block raised (%s: %s), draft left unflagged",

@@ -33,6 +33,46 @@ def test_copy_missing_field_raises():
         generate_copy.copy_from_response(bad)
 
 
+# ---- Em dash/en dash/double-hyphen ban (2026-08-12) - mechanical strip, not a prompt
+# request. Real incident: "The arms I'd been hiding — finally uncovered." ----
+
+def test_copy_from_response_strips_em_dash():
+    raw = json.dumps({
+        "headline": "The arms I’d been hiding — finally uncovered.",
+        "primary_text": "x", "cta": "y",
+    })
+    copy = generate_copy.copy_from_response(raw)
+    assert "—" not in copy["headline"]
+    assert "hiding, finally uncovered" in copy["headline"]
+
+
+def test_copy_from_response_strips_en_dash():
+    raw = json.dumps({"headline": "Firmer skin – naturally.", "primary_text": "x", "cta": "y"})
+    copy = generate_copy.copy_from_response(raw)
+    assert "–" not in copy["headline"]
+    assert "Firmer skin, naturally." == copy["headline"]
+
+
+def test_copy_from_response_strips_double_hyphen():
+    raw = json.dumps({"headline": "Firmer skin -- naturally.", "primary_text": "x", "cta": "y"})
+    copy = generate_copy.copy_from_response(raw)
+    assert "--" not in copy["headline"]
+    assert "Firmer skin, naturally." == copy["headline"]
+
+
+def test_strip_banned_dashes_covers_every_string_field():
+    copy = {"headline": "a — b", "primary_text": "c – d", "cta": "e -- f", "image_subtext": "g"}
+    stripped = generate_copy.strip_banned_dashes(copy)
+    assert stripped == {"headline": "a, b", "primary_text": "c, d", "cta": "e, f", "image_subtext": "g"}
+
+
+def test_strip_banned_dashes_covers_panel_copy_text():
+    copy = {"headline": "x", "panel_copy": [{"position": "top", "text": "before — after"}]}
+    stripped = generate_copy.strip_banned_dashes(copy)
+    assert stripped["panel_copy"][0]["text"] == "before, after"
+    assert stripped["panel_copy"][0]["position"] == "top"
+
+
 # ---- PRODUCT_FACT_KEYS is name-only (2026-08-11): description and ingredients both
 # removed, not just reworded - either one let a copywriter paraphrase a marketing
 # sentence into a headline regardless of PRODUCT's own "constraint, not a copy source"
@@ -320,7 +360,7 @@ def test_build_copy_prompt_states_text_zone_instruction_for_single_zone():
     ]}
     prompt = generate_copy.build_copy_prompt(bp)
     assert "TEXT ZONE COPY" in prompt
-    assert "1 distinct sub_line/body_copy zone" in prompt
+    assert "1 distinct sub_line/body_copy/product_callout zone" in prompt
     assert "panel_copy" in prompt
     assert "top-center" in prompt
     assert "SWEET ALMOND | WARM VANILLA" in prompt
@@ -342,8 +382,56 @@ def test_build_copy_prompt_states_multi_zone_instruction_when_detected():
 
 def test_build_copy_prompt_panel_instruction_states_exact_count():
     prompt = generate_copy.build_copy_prompt(_comparison_blueprint())
-    assert "2 distinct sub_line/body_copy zone(s)" in prompt
+    assert "2 distinct sub_line/body_copy/product_callout zone(s)" in prompt
     assert "EXACTLY 2 objects" in prompt
+
+
+# ---- product_callout added to _PANEL_COPY_ZONE_TYPES (2026-08-13, Item 2): every
+# callout used to receive the bare product name, unconditionally - confirmed live, ad
+# 1576971893931336, four distinct reference callouts all rendered "Besque Magic Body
+# Oil" ----
+
+def test_text_zone_targets_includes_product_callout():
+    bp = {"structural_zones": [
+        {"zone_type": "product_callout", "position": "mid-left", "detail": "flame icon, thermogenic"},
+    ]}
+    targets = generate_copy.text_zone_targets(bp)
+    assert len(targets) == 1
+    assert targets[0]["zone_type"] == "product_callout"
+
+
+def test_build_copy_prompt_states_product_callout_benefit_not_product_name_rule():
+    bp = {"structural_zones": [
+        {"zone_type": "product_callout", "position": "mid-left", "detail": "flame icon, thermogenic"},
+    ]}
+    prompt = generate_copy.build_copy_prompt(bp)
+    assert "TEXT ZONE COPY" in prompt
+    assert "product_callout" in prompt
+    assert "never the product name" in prompt
+    assert "BENEFIT or PROPERTY" in prompt
+
+
+def test_build_copy_prompt_omits_callout_rule_when_no_product_callout_zone():
+    """The callout-specific rule must not appear as dead weight when only sub_line/
+    body_copy zones are present - it's stated once, only when relevant."""
+    bp = {"structural_zones": [
+        {"zone_type": "sub_line", "position": "top-center", "detail": "a tagline"},
+    ]}
+    prompt = generate_copy.build_copy_prompt(bp)
+    assert "TEXT ZONE COPY" in prompt
+    assert "BENEFIT or PROPERTY" not in prompt
+
+
+def test_build_copy_prompt_mixed_zone_types_all_get_targeted():
+    bp = {"structural_zones": [
+        {"zone_type": "sub_line", "position": "top-center", "detail": "a tagline"},
+        {"zone_type": "product_callout", "position": "mid-left", "detail": "flame icon, thermogenic"},
+        {"zone_type": "product_callout", "position": "mid-right", "detail": "lightning icon, energy"},
+    ]}
+    targets = generate_copy.text_zone_targets(bp)
+    assert len(targets) == 3
+    prompt = generate_copy.build_copy_prompt(bp)
+    assert "EXACTLY 3 objects" in prompt
 
 
 # ---- image_subtext's field description is conditional, never contradicted later
@@ -393,6 +481,61 @@ def test_build_copy_prompt_states_cta_clause_when_cta_zone_present():
     assert "bottom-center" in prompt
     assert "DISCOVER NOW" in prompt
     assert "never left empty" in prompt
+
+
+# ---- text_purpose consumption (2026-08-11 schema addition, Item 11) - the replacement
+# copy must serve the SAME communicative function as each reference text block, not just
+# generic product description. Copy path is text-only, so a prompt instruction alone is
+# expected to bind here (unlike the image path). ----
+
+def test_build_copy_prompt_omits_communicative_purpose_when_absent():
+    """Byte-for-byte the same prompt as before this feature existed, for every blueprint
+    with no text_purpose field at all - the overwhelming majority (pre-2026-08-11)."""
+    prompt = generate_copy.build_copy_prompt({"angle": "x"})
+    assert "COMMUNICATIVE PURPOSE" not in prompt
+
+
+def test_build_copy_prompt_offer_led_reference_states_offer_led_requirement():
+    bp = {"angle": "x", "text_purpose": [
+        {"text_verbatim": "50% OFF TODAY ONLY", "purpose": "offer", "placement": "top banner"},
+    ]}
+    prompt = generate_copy.build_copy_prompt(bp)
+    assert "COMMUNICATIVE PURPOSE" in prompt
+    assert "50% OFF TODAY ONLY" in prompt
+    assert "top banner" in prompt
+    assert "offer-led Besque copy" in prompt
+
+
+def test_build_copy_prompt_problem_hook_reference_states_problem_hook_requirement():
+    bp = {"angle": "x", "text_purpose": [
+        {"text_verbatim": "Tired of crepey skin?", "purpose": "problem_hook", "placement": "headline"},
+    ]}
+    prompt = generate_copy.build_copy_prompt(bp)
+    assert "Tired of crepey skin?" in prompt
+    assert "problem-hook" in prompt
+
+
+def test_build_copy_prompt_text_purpose_never_licenses_fabricated_testimonial():
+    """purpose: testimonial names the JOB the reference's text was doing - it must never
+    read as permission to invent a testimonial when approved_testimonials is empty (the
+    exact violation class C2/the top guardrails note exists for)."""
+    bp = {"angle": "x", "text_purpose": [
+        {"text_verbatim": "\"Changed my skin in weeks!\" - Jane", "purpose": "testimonial", "placement": "bottom card"},
+    ]}
+    prompt = generate_copy.build_copy_prompt(bp)
+    assert "never fabricated here" in prompt
+    assert "APPROVED CLAIMS/APPROVED TESTIMONIALS" in prompt
+
+
+def test_build_copy_prompt_lists_every_text_purpose_entry():
+    bp = {"angle": "x", "text_purpose": [
+        {"text_verbatim": "50% OFF", "purpose": "offer", "placement": "top"},
+        {"text_verbatim": "Tired of dry skin?", "purpose": "problem_hook", "placement": "headline"},
+    ]}
+    prompt = generate_copy.build_copy_prompt(bp)
+    assert "50% OFF" in prompt
+    assert "Tired of dry skin?" in prompt
+    assert prompt.count("served as:") == 2
 
 
 # ---- validate_copy mechanical backstop (2026-08-11) - a prompt instruction alone is the

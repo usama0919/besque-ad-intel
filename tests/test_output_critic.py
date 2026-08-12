@@ -89,9 +89,41 @@ def test_critic_system_checks_product_category_regardless_of_reference():
 # brand_rules()/compliance_rules.py's actual text - these citations are the only thing
 # tying it back to the real rule numbering, so they must survive future edits ----
 
-def test_critic_system_cites_every_rule_id_it_claims_to_cover():
-    for rule_id in critic.CITED_RULE_IDS:
-        assert rule_id in critic.CRITIC_SYSTEM
+def test_critic_system_cites_every_individually_numbered_rule():
+    """Item 4 (2026-08-12): derived from generate_image_prompt.py's own _RULE_<N>_...
+    constants (critic._numbered_rule_ids()), not a hand-maintained tuple - this IS the
+    fix for the failure this test guards against. The old version iterated
+    CITED_RULE_IDS, a manually maintained allowlist: rule 11 (SKIN TEXTURE REALISM) was
+    added as a new module constant in generate_image_prompt.py with no checklist entry,
+    and this test kept passing because CITED_RULE_IDS was never told rule 11 existed. A
+    new rule N is now automatically required to be cited the moment its _RULE_N_...
+    constant is added - nothing else to remember to update."""
+    ids = critic._numbered_rule_ids()
+    assert ids, "discovered zero numbered rules - the introspection itself is broken"
+    for rule_id in ids:
+        assert f"rule {rule_id}" in critic.CRITIC_SYSTEM.lower(), (
+            f"rule {rule_id} (generate_image_prompt._RULE_{rule_id}_...) has no citation "
+            f"in CRITIC_SYSTEM"
+        )
+
+
+def test_numbered_rule_ids_excludes_bundled_and_functional_rules():
+    """Rules 1-5 (bundled in one _RULES_1_TO_5 string) and 6-7 (built by functions, not
+    constants) must NOT appear - they were never individually-numbered module constants
+    to derive an id from, and their own citations are pinned by dedicated tests below,
+    not by this derived mechanism."""
+    ids = critic._numbered_rule_ids()
+    for excluded in (1, 2, 3, 4, 5, 6, 7):
+        assert excluded not in ids
+
+
+def test_numbered_rule_ids_includes_rule_8_and_11():
+    """The two rules that were actually missing a checklist entry when this mechanism
+    was introduced - rule 8 (LAYOUT DESCRIPTORS) had never been cited at all, and rule
+    11 (SKIN TEXTURE REALISM) is the rule that motivated this whole inversion."""
+    ids = critic._numbered_rule_ids()
+    assert 8 in ids
+    assert 11 in ids
 
 
 def test_critic_system_cites_rule_9_next_to_competitor_marks():
@@ -116,6 +148,104 @@ def test_critic_system_cites_c2_next_to_testimonial():
 
 def test_critic_system_cites_c3_next_to_efficacy_claim():
     assert "C3" in critic.CRITIC_SYSTEM
+
+
+# ---- Item 3 (2026-08-12): SUBJECT AGE is its OWN dedicated checklist category, not
+# something to notice only incidentally - live evidence a ~30-year-old subject shipped
+# completely unflagged on one ad while a separate ad's violation was correctly caught ----
+
+def test_critic_system_cites_rule_10_next_to_subject_age():
+    assert "(rule 10)" in critic.CRITIC_SYSTEM
+    assert "SUBJECT AGE VIOLATION" in critic.CRITIC_SYSTEM
+
+
+def test_critic_system_subject_age_default_high_confidence():
+    assert "subject age violation" in critic.HIGH_CONFIDENCE_BY_DEFAULT
+    assert "subject age" in critic.CRITIC_SYSTEM.lower().split("treat a hit")[1]
+
+
+def test_critic_system_subject_age_instructs_checking_regardless_of_reference():
+    """Must not be excusable by 'the reference itself showed a young model' - rule 10 is
+    unconditional, and the checklist must say so too, not just cite the rule number."""
+    assert "regardless of what age the reference ad's own model was" in critic.CRITIC_SYSTEM
+
+
+# ---- Item 2 (2026-08-12): SUBJECT IDENTITY - the critic must actually be shown the
+# reference image to compare against, or this category has nothing to judge ----
+
+def test_critic_system_has_subject_identity_category():
+    assert "SUBJECT IDENTITY" in critic.CRITIC_SYSTEM
+    assert "subject identity" in critic.HIGH_CONFIDENCE_BY_DEFAULT
+    assert "subject identity" in critic.CRITIC_SYSTEM.lower().split("treat a hit")[1]
+
+
+def test_build_user_prompt_no_reference_image_keeps_single_image_wording():
+    prompt = critic._build_user_prompt("rules")
+    assert "Review the attached image" in prompt
+    assert "TWO images are attached" not in prompt
+
+
+def test_build_user_prompt_with_reference_image_states_which_image_is_which():
+    prompt = critic._build_user_prompt("rules", has_reference_image=True)
+    assert "TWO images are attached" in prompt
+    assert "FIRST is the competitor's ORIGINAL reference ad" in prompt
+    assert "SECOND is the GENERATED Besque draft" in prompt
+    assert "SUBJECT IDENTITY" in prompt
+
+
+def test_check_draft_without_reference_attaches_only_the_draft(monkeypatch):
+    calls = []
+
+    class _CapturingMessages:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            return _FakeMessage(json.dumps({"violations": []}))
+
+    class _CapturingClient:
+        def __init__(self, *a, **k):
+            self.messages = _CapturingMessages()
+
+    monkeypatch.setattr(critic.anthropic, "Anthropic", _CapturingClient)
+    critic.check_draft(b"\x89PNG\r\n\x1a\ndraft-bytes", "rules")
+    content = calls[0]["messages"][0]["content"]
+    images = [c for c in content if c["type"] == "image"]
+    assert len(images) == 1
+
+
+def test_check_draft_with_reference_attaches_reference_before_draft(monkeypatch):
+    calls = []
+
+    class _CapturingMessages:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            return _FakeMessage(json.dumps({"violations": []}))
+
+    class _CapturingClient:
+        def __init__(self, *a, **k):
+            self.messages = _CapturingMessages()
+
+    monkeypatch.setattr(critic.anthropic, "Anthropic", _CapturingClient)
+    critic.check_draft(
+        b"\x89PNG\r\n\x1a\ndraft-bytes", "rules",
+        reference_image_bytes=b"\x89PNG\r\n\x1a\nreference-bytes",
+    )
+    content = calls[0]["messages"][0]["content"]
+    images = [c for c in content if c["type"] == "image"]
+    assert len(images) == 2
+    import base64
+    assert base64.standard_b64decode(images[0]["source"]["data"]) == b"\x89PNG\r\n\x1a\nreference-bytes"
+    assert base64.standard_b64decode(images[1]["source"]["data"]) == b"\x89PNG\r\n\x1a\ndraft-bytes"
+    text_content = next(c for c in content if c["type"] == "text")
+    assert "TWO images are attached" in text_content["text"]
+
+
+def test_check_draft_reference_bytes_default_none_unaffected(monkeypatch):
+    """Every pre-existing caller (no reference_image_bytes kwarg at all) must be
+    completely unaffected - single image, old closing wording."""
+    monkeypatch.setattr(critic.anthropic, "Anthropic",
+                        lambda *a, **k: _FakeClient(json.dumps({"violations": []})))
+    result = critic.check_draft(b"fake-bytes", "rules")
+    assert result == []
 
 
 # ---- check_draft: never raises, filters confidence, parses JSON ----
@@ -158,19 +288,72 @@ def test_check_draft_returns_empty_list_when_no_violations(monkeypatch):
     assert critic.check_draft(b"fake-bytes", "rules") == []
 
 
-def test_check_draft_returns_none_on_api_error(monkeypatch):
+def test_check_draft_returns_marked_finding_on_persistent_api_error(monkeypatch):
+    """2026-08-12 (item 5): check_draft no longer returns None on any failure - a
+    persistent failure through the retry now returns CRITIC_CHECK_FAILED_FINDING, a
+    synthetic HIGH-confidence finding, so the draft gets marked rather than silently
+    passed. Client construction itself failing (e.g. missing API key) must be caught by
+    the SAME retry/mark path, never propagate uncaught - a real regression this test
+    caught during development (client construction had briefly moved outside the loop's
+    try/except)."""
     class _BoomClient:
         def __init__(self, *a, **k):
             raise RuntimeError("API unavailable")
 
     monkeypatch.setattr(critic.anthropic, "Anthropic", _BoomClient)
-    assert critic.check_draft(b"fake-bytes", "rules") is None
+    result = critic.check_draft(b"fake-bytes", "rules")
+    assert result == critic.CRITIC_CHECK_FAILED_FINDING
+    assert critic.has_high_confidence(result) is True
 
 
-def test_check_draft_returns_none_on_unparseable_response(monkeypatch):
+def test_check_draft_returns_marked_finding_on_persistent_unparseable_response(monkeypatch):
+    """2026-08-12 (item 5): a real incident - "output critic failed (JSONDecodeError:
+    Invalid \\escape), draft left unflagged" - meant this exact scenario silently passed
+    a draft that was never actually reviewed. Now retries once, and if the retry ALSO
+    fails to parse, returns CRITIC_CHECK_FAILED_FINDING instead of None."""
     monkeypatch.setattr(critic.anthropic, "Anthropic",
                         lambda *a, **k: _FakeClient("not valid json at all"))
-    assert critic.check_draft(b"fake-bytes", "rules") is None
+    result = critic.check_draft(b"fake-bytes", "rules")
+    assert result == critic.CRITIC_CHECK_FAILED_FINDING
+    assert critic.has_high_confidence(result) is True
+
+
+def test_check_draft_retries_once_with_json_escape_nudge_then_succeeds(monkeypatch):
+    """The retry must actually be usable, not just present - a client that fails to parse
+    on attempt 1 but returns valid JSON on attempt 2 (the JSON_ESCAPE_SYSTEM nudge having
+    worked) must return the real findings, not the failure marker."""
+    calls = {"n": 0}
+    good_response = json.dumps({"violations": [
+        {"category": "testimonial", "description": "fabricated quote", "confidence": "high"},
+    ]})
+
+    class _FlakyClient:
+        def __init__(self, *a, **k):
+            self.messages = self
+
+        def create(self, **kwargs):
+            calls["n"] += 1
+            text = "not valid json at all" if calls["n"] == 1 else good_response
+            return type("obj", (), {"content": [type("obj", (), {"text": text})()]})()
+
+    monkeypatch.setattr(critic.anthropic, "Anthropic", _FlakyClient)
+    result = critic.check_draft(b"fake-bytes", "rules")
+    assert calls["n"] == 2
+    assert result == [{"category": "testimonial", "description": "fabricated quote", "confidence": "high"}]
+
+
+def test_check_draft_never_calls_api_a_third_time(monkeypatch):
+    """One retry, never a loop - a client that always fails must be called exactly twice."""
+    calls = {"n": 0}
+
+    class _AlwaysBoomClient:
+        def __init__(self, *a, **k):
+            calls["n"] += 1
+            raise RuntimeError("still broken")
+
+    monkeypatch.setattr(critic.anthropic, "Anthropic", _AlwaysBoomClient)
+    critic.check_draft(b"fake-bytes", "rules")
+    assert calls["n"] == 2
 
 
 def test_check_draft_never_raises_even_on_malformed_violation_entries(monkeypatch):

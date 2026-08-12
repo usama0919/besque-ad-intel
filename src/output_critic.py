@@ -9,11 +9,13 @@ supposed to follow and ask what it actually violated.
 
 Non-blocking by design, and this is load-bearing, not incidental: runs AFTER
 dedupe.save_artifact (never before - a slow/failed check must never lose a draft), and
-check_draft() never raises. Any failure (timeout, API error, unparseable JSON) is caught
-and returns None; the caller (pipeline.process_ad) must treat None as "the check did not
-run" - record a pipeline_warning and show the card unflagged, never as a finding of its
-own. A flag is something a human sees and decides on; this module surfaces, it never acts -
-no auto-reject, no auto-regenerate.
+check_draft() never raises. A transient failure retries once (2026-08-12, with a
+JSON-escaping nudge - see MAX_CRITIC_ATTEMPTS); if it STILL fails, check_draft returns
+CRITIC_CHECK_FAILED_FINDING - a synthetic HIGH-confidence finding - rather than silently
+passing a draft that was never actually reviewed. check_draft no longer returns None at
+all: a check that could not run twice in a row is marked, exactly like a genuine
+violation, not treated as "clean." A flag is something a human sees and decides on; this
+module surfaces, it never acts - no auto-reject, no auto-regenerate.
 """
 import os
 import re
@@ -21,8 +23,33 @@ import logging
 import anthropic
 
 from src import json_response
+from src.deconstruct import JSON_ESCAPE_SYSTEM
 
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
+
+# Total vision-call attempts for one check_draft call: the original call plus exactly one
+# retry - mirrors deconstruct.py's _MAX_DECONSTRUCT_ATTEMPTS shape and reuses the SAME
+# JSON_ESCAPE_SYSTEM nudge (imported above, not re-typed) rather than a second copy of it.
+MAX_CRITIC_ATTEMPTS = 2
+
+# Returned instead of None when the critic's response fails to parse even after the retry
+# (2026-08-12, live incident: "output critic failed (JSONDecodeError: Invalid \escape),
+# draft left unflagged" on ad 926730636855002's attempt 2 - a parse failure silently
+# passed the draft with no signal anywhere it was never actually reviewed). Shaped as an
+# ordinary HIGH-confidence finding, not a special sentinel, so has_high_confidence()
+# reads it as a real violation with zero changes needed to pipeline.process_ad's existing
+# retry-then-mark-failed-review logic - a check that genuinely could not run twice in a
+# row gets marked exactly like a real HIGH violation would, never silently passed.
+CRITIC_CHECK_FAILED_FINDING = [{
+    "category": "critic_check_failed",
+    "description": (
+        "The output critic's response could not be parsed, even after one retry with a "
+        "JSON-escaping nudge - this draft could not be automatically reviewed and needs "
+        "manual review. This is a check-mechanism failure, not a defect actually observed "
+        "in the image."
+    ),
+    "confidence": "high",
+}]
 
 log = logging.getLogger("output_critic")
 
@@ -33,7 +60,8 @@ log = logging.getLogger("output_critic")
 HIGH_CONFIDENCE_BY_DEFAULT = (
     "unauthorised offer", "scarcity claim", "promo code", "efficacy claim", "testimonial",
     "product category mismatch", "regulatory text carried over from the reference",
-    "product register mismatch", "nudity or sexualised content",
+    "product register mismatch", "nudity or sexualised content", "subject age violation",
+    "subject identity",
 )
 
 CRITIC_SYSTEM = (
@@ -109,6 +137,46 @@ CRITIC_SYSTEM = (
     "the disclaimer plainly doesn't apply to (the disclaimer-removal instruction). Also "
     "flag a dangling asterisk or footnote marker left with no referent after disclaimer "
     "text was removed - that's its own defect, just as bad as the disclaimer surviving\n"
+    "- SUBJECT AGE VIOLATION (rule 10): any human subject in the GENERATED image reading "
+    "younger than 45, or reading as youthful/smooth-skinned rather than visibly midlife "
+    "(45-60) - this is its OWN dedicated category, checked explicitly, not something to "
+    "notice only incidentally while checking something else. Look specifically for: "
+    "smooth/poreless/airbrushed skin, no visible fine lines or skin laxity, or an overall "
+    "impression of a subject in their 20s-30s. State explicitly: any human subject must "
+    "read 45-60 in FACE, BODY, and CLOTHING/STYLING together - a youthful body shape or "
+    "on-trend youthful clothing paired with an older-reading face is still a violation of "
+    "this category, not just the face in isolation. This applies regardless of what age "
+    "the reference ad's own model was - a young-reading subject is a violation even when "
+    "the reference itself showed a young model, since rule 10 requires 45-60 "
+    "unconditionally, never inherited from the reference's apparent age. Confirmed live: "
+    "a ~30-year-old subject shipped completely unflagged on one ad while a separate ad's "
+    "clear violation was correctly caught - report this category every time a subject "
+    "reads under 45, not only when it seems obviously egregious\n"
+    "- SKIN TEXTURE REALISM (rule 11): wherever loose, crepey, or aged skin is depicted "
+    "in the GENERATED image, it must read as real, photographed human skin - irregular "
+    "wrinkle patterns, uneven tone, real light response. Uniform texture or a smoothed, "
+    "AI-looking skin surface is a violation of this category, independently of whether "
+    "the subject's apparent AGE (above) is otherwise correct - both are separate "
+    "requirements. Applies to BOTH halves of a before/after composition, not only the "
+    "side depicting the concern\n"
+    "- SUBJECT IDENTITY (compares the GENERATED image against the REFERENCE image "
+    "attached alongside it, when one is attached - see below): flag HIGH whenever the "
+    "draft's human subject is recognisably the SAME PERSON as the reference's - same "
+    "face, same hair, same clothing, same pose. The reference's model must be "
+    "SUBSTITUTED, never reproduced (compliance rule C1, rule 10 above) - this is a "
+    "rights/identity violation, not a fidelity choice. Judge holistically: even if no "
+    "single feature is an exact pixel match, a strong overall impression of the same "
+    "individual (same facial structure, same hair colour/style, same wardrobe, same body "
+    "position) is enough to flag - do not require every feature to match before "
+    "reporting this. This category ONLY applies when a reference image is actually "
+    "attached alongside the draft (edit mode) - there is nothing to compare against "
+    "otherwise, and this category should not fire without a reference image present\n"
+    "- LAYOUT DESCRIPTORS RENDERED AS LITERAL TEXT (rule 8): a layout/composition/framing "
+    "descriptor's own WORDS appearing as actual visible typography in the GENERATED "
+    "image - e.g. the literal words 'headline', 'stacked', 'split-screen', 'banner', or "
+    "similar layout terminology rendered as if it were the ad's own copy. These words "
+    "describe how elements are arranged; they must never themselves appear as text in "
+    "the image\n"
     "- PRODUCT REGISTER MISMATCH: the product rendered in a different visual register than "
     "the surrounding scene. This has TWO distinct shapes, both count: (1) a photorealistic "
     "bottle composited into an otherwise illustrated/hand-drawn scene, or the reverse; (2) "
@@ -124,22 +192,50 @@ CRITIC_SYSTEM = (
     "Treat a hit in these categories as HIGH confidence by default unless you are quite "
     "sure it's a false read: unauthorised offer, scarcity claim, promo code, efficacy "
     "claim, testimonial, product category mismatch, regulatory text carried over from the "
-    "reference, product register mismatch, nudity or sexualised content. These are the "
-    "exact categories that have shipped in real drafts before this check existed."
+    "reference, product register mismatch, nudity or sexualised content, subject age "
+    "violation, subject identity. These are the exact categories that have shipped in "
+    "real drafts before this check existed."
 )
 
 # CRITIC_SYSTEM is an INDEPENDENTLY hand-written checklist, not generated from
 # brand_rules()/compliance_rules.py's actual text - flagged as a real drift risk: if those
 # rules are renumbered, reworded, or removed later and nobody updates this checklist to
-# match, the critic keeps citing a rule that no longer says what it claims. This is a
-# tripwire, not a fix for that risk - it only catches the citation disappearing from
-# CRITIC_SYSTEM's own text, not the cited rule drifting out of sync with brand_rules()
-# itself. See test_output_critic.py's rule-citation tests.
-CITED_RULE_IDS = ("C6", "rule 9", "rules 1-2", "C3", "C2", "rule 7", "rule 5", "rule 6")
-assert all(rule_id in CRITIC_SYSTEM for rule_id in CITED_RULE_IDS), (
-    "CRITIC_SYSTEM no longer cites one of CITED_RULE_IDS - the checklist and the actual "
-    "rule numbering have drifted apart"
-)
+# match, the critic keeps citing a rule that no longer says what it claims. See
+# test_output_critic.py's rule-citation tests (rules 1-2/5/6/7/9 and C2/C3/C6 each have
+# their own dedicated test pinning the exact citation text).
+#
+# Item 4 (2026-08-12): the tuple that USED to live here (CITED_RULE_IDS) was a
+# hand-maintained allowlist of "rules I've already cited" - opt-in, so a NEW rule added
+# to generate_image_prompt.py had no way to make itself known to this file. Rule 11
+# (SKIN TEXTURE REALISM) was added there the same session with no checklist entry, and
+# the old assert/test below it happily passed, because neither ever knew rule 11 existed
+# at all - they only ever checked the rules someone had remembered to list. INVERTED:
+# _numbered_rule_ids() below discovers every rule generate_image_prompt.py gives its own
+# dedicated _RULE_<N>_... module constant (currently 8, 9, 10, 11) by introspection, not
+# a maintained list - a new _RULE_12_... constant is automatically required to be cited
+# the moment it's added, with nothing else to remember to update. Rules 1-5 (bundled in
+# one _RULES_1_TO_5 string) and 6-7 (built by functions, not constants) are excluded by
+# this SAME naming convention, not a second exclusion list - they were never individual
+# constants to derive an id FROM, and their own existing citations are independently
+# pinned by test_critic_system_cites_rule_5_next_to_product_category et al above.
+#
+# No module-level assert (unlike the version this replaces): a module-level assert here
+# runs on every import of this file, including the deployed container - exactly the
+# outage shape CLAUDE.md's own note on generate_image_prompt_writer.py's STYLE_GUIDANCE
+# coverage check already describes (and already fixed there the same way, by moving the
+# check into a test). `python -O` also strips assert statements entirely, so it was
+# never a reliable safety net even where it did run.
+def _numbered_rule_ids():
+    """Every generate_image_prompt.py rule with its OWN dedicated module-level constant
+    (the _RULE_<N>_... naming convention), discovered by introspection. See the module
+    comment above for why this replaces a hand-maintained tuple."""
+    from src import generate_image_prompt
+    ids = []
+    for name in dir(generate_image_prompt):
+        m = re.match(r"^_RULE_(\d+)_", name)
+        if m:
+            ids.append(int(m.group(1)))
+    return sorted(ids)
 
 
 def has_high_confidence(findings):
@@ -245,8 +341,16 @@ def _sniff_mime_type(data):
 
 def _build_user_prompt(brand_rules_text, headline=None, subtext=None, offer_text=None,
                         include_product=True, visual_description=None, ingredients=None,
-                        testimonial=None):
+                        testimonial=None, has_reference_image=False):
     """Pure and side-effect free so it's directly testable without mocking the API.
+
+    has_reference_image (Item 2, 2026-08-12): True when check_draft is also attaching
+    the competitor's ORIGINAL reference image alongside the draft (edit mode only - see
+    check_draft's own reference_image_bytes parameter). Changes ONLY the closing
+    instruction, telling Claude which of the two attached images is which and that the
+    SUBJECT IDENTITY category specifically requires comparing them - the checklist text
+    itself already says this category doesn't apply without a reference attached, so
+    this is about orienting Claude to the two images, not duplicating that scope note.
 
     visual_description/ingredients (2026-08-06, PART 1G): the product's OWN documented
     facts - the same fields build_image_prompt's product_clause already hands the
@@ -296,6 +400,19 @@ def _build_user_prompt(brand_rules_text, headline=None, subtext=None, offer_text
         )
     else:
         testimonial_line = "Authorised testimonial: NONE - no testimonial was authorised for this image.\n"
+    if has_reference_image:
+        closing = (
+            "TWO images are attached: the FIRST is the competitor's ORIGINAL reference "
+            "ad; the SECOND is the GENERATED Besque draft you are reviewing. Review the "
+            "SECOND (GENERATED) image against these rules and report every violation "
+            "you actually see, per the categories in your instructions - including "
+            "SUBJECT IDENTITY, which requires comparing the two images directly."
+        )
+    else:
+        closing = (
+            "Review the attached image against these rules and report every violation you "
+            "actually see, per the categories in your instructions."
+        )
     return (
         "RULES THIS IMAGE WAS GENERATED UNDER:\n"
         f"{brand_rules_text.strip()}\n\n"
@@ -305,46 +422,87 @@ def _build_user_prompt(brand_rules_text, headline=None, subtext=None, offer_text
         f"Authorised offer: {offer_line}.\n"
         f"Product presence authorised: {product_line}.\n"
         f"{testimonial_line}\n"
-        "Review the attached image against these rules and report every violation you "
-        "actually see, per the categories in your instructions."
+        f"{closing}"
     )
 
 
 def check_draft(image_bytes, brand_rules_text, headline=None, subtext=None, offer_text=None,
                  include_product=True, visual_description=None, ingredients=None,
-                 testimonial=None):
+                 testimonial=None, reference_image_bytes=None):
     """Ask Claude to inspect a GENERATED draft image for rule violations.
 
     Returns a list of {"category", "description", "confidence"} dicts, medium/high
     confidence only (a critic that flags everything becomes noise, so low-confidence hits
-    are dropped here rather than left for the caller to filter) - or None on ANY failure.
-    Never raises: callers must treat None as "the check did not run", not as "no
-    violations found" - see this module's docstring."""
+    are dropped here rather than left for the caller to filter).
+
+    reference_image_bytes (Item 2, 2026-08-12): the competitor's ORIGINAL reference ad
+    image - the SAME bytes edit_mode attaches to Gemini for generation (pipeline.py
+    passes them through). Attached as a SECOND image ahead of the draft so the critic
+    can actually judge SUBJECT IDENTITY (same face/hair/clothing/pose as the reference)
+    - the checklist previously named this comparison with nothing to compare against,
+    since only the draft was ever attached. None (every pre-existing caller, and every
+    generate-mode call - there is no real reference photo outside edit mode) reproduces
+    today's single-image prompt exactly.
+
+    Retries ONCE (2026-08-12) with the same JSON_ESCAPE_SYSTEM nudge deconstruct_image
+    already uses, appended to CRITIC_SYSTEM - added after a real parse failure
+    ("JSONDecodeError: Invalid \\escape") silently left a draft unflagged with no signal
+    anywhere it was never actually reviewed. If the retry ALSO fails (for any reason -
+    still unparseable, a timeout, an API error), this now returns
+    CRITIC_CHECK_FAILED_FINDING instead of None: never raises, but also never silently
+    passes a draft that was never actually checked - has_high_confidence() reads that
+    finding as a real HIGH violation, so pipeline.process_ad's existing retry-then-mark-
+    failed-review logic marks it exactly like a genuine violation would, with no special
+    case needed there. This module NEVER returns None any more; callers written against
+    the older "None means the check did not run" contract still work, since that branch
+    simply never fires - it is not relied upon here to distinguish anything."""
     user_prompt = _build_user_prompt(brand_rules_text, headline=headline, subtext=subtext,
                                       offer_text=offer_text, include_product=include_product,
                                       visual_description=visual_description, ingredients=ingredients,
-                                      testimonial=testimonial)
-    try:
-        import base64
-        media_type = _sniff_mime_type(image_bytes)
-        b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
-        client = anthropic.Anthropic(timeout=60.0, max_retries=1)  # reads ANTHROPIC_API_KEY from env
-        message = client.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=1024,
-            system=CRITIC_SYSTEM,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64}},
-                    {"type": "text", "text": user_prompt},
-                ],
-            }],
+                                      testimonial=testimonial, has_reference_image=bool(reference_image_bytes))
+    import base64
+    media_type = _sniff_mime_type(image_bytes)
+    b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
+    image_content = []
+    if reference_image_bytes:
+        ref_media_type = _sniff_mime_type(reference_image_bytes)
+        ref_b64 = base64.standard_b64encode(reference_image_bytes).decode("utf-8")
+        image_content.append(
+            {"type": "image", "source": {"type": "base64", "media_type": ref_media_type, "data": ref_b64}}
         )
-        raw = message.content[0].text
-        data = json_response.extract_json(raw)
-        violations = data.get("violations") or []
-        return [v for v in violations if (v.get("confidence") or "").lower() in ("high", "medium")]
-    except Exception as e:
-        log.warning("output critic failed (%s: %s), draft left unflagged", type(e).__name__, e)
-        return None
+    image_content.append({"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64}})
+    system = CRITIC_SYSTEM
+    last_exc = None
+    for attempt in range(1, MAX_CRITIC_ATTEMPTS + 1):
+        try:
+            # Client construction INSIDE the try, not before the loop: a real regression
+            # caught by test_check_draft_returns_none_on_api_error - a constructor failure
+            # (e.g. missing API key) must retry/fall through to CRITIC_CHECK_FAILED_FINDING
+            # exactly like a parse failure does, never propagate uncaught.
+            client = anthropic.Anthropic(timeout=60.0, max_retries=1)  # reads ANTHROPIC_API_KEY from env
+            message = client.messages.create(
+                model=CLAUDE_MODEL,
+                max_tokens=1024,
+                system=system,
+                messages=[{
+                    "role": "user",
+                    "content": image_content + [
+                        {"type": "text", "text": user_prompt},
+                    ],
+                }],
+            )
+            raw = message.content[0].text
+            data = json_response.extract_json(raw)
+            violations = data.get("violations") or []
+            return [v for v in violations if (v.get("confidence") or "").lower() in ("high", "medium")]
+        except Exception as e:
+            last_exc = e
+            log.warning("output critic failed (attempt %s/%s): %s: %s",
+                        attempt, MAX_CRITIC_ATTEMPTS, type(e).__name__, e)
+            if attempt < MAX_CRITIC_ATTEMPTS:
+                system = CRITIC_SYSTEM + "\n\n" + JSON_ESCAPE_SYSTEM
+    log.warning(
+        "output critic failed after %s attempt(s) (%s: %s) - marking draft for manual "
+        "review instead of leaving it unflagged", MAX_CRITIC_ATTEMPTS, type(last_exc).__name__, last_exc,
+    )
+    return list(CRITIC_CHECK_FAILED_FINDING)

@@ -17,6 +17,14 @@ def _fake_claude_json():
         "visual": {"layout": "portrait", "subject": "woman", "palette_mood": "warm", "text_placement": "lower third"},
         "cta": "Shop Now",
         "destination_url": "https://example.com",
+        "structural_zones": [],
+        "production_style": {"style": "ugc", "confidence": "high", "signals": ["handheld framing"]},
+        "body_area_shown": "none",
+        "face_present": {"has_face": False, "prominence": "none", "location": ""},
+        "semantic_split": {"is_split": False, "split_axis": None, "left_or_before": "", "right_or_after": ""},
+        "scene_elements": [],
+        "testimonial_zones": [],
+        "text_purpose": [],
     })
 
 
@@ -153,3 +161,38 @@ def test_deconstruct_image_scraped_ad_copy_with_braces_does_not_raise(monkeypatc
         cta="Shop {Now}",
     )
     assert bp["ad_id"] == "AD123"
+
+
+def test_deconstruct_image_missing_structural_zones_retries_once_then_raises(monkeypatch):
+    """structural_zones is now required (schema/blueprint.schema.json). A response that
+    omits it fails schema validation, not JSON parsing, so it should retry once with the
+    validator's own message appended as a correction instruction, not the JSON-escaping
+    nudge. If the retry still comes back without structural_zones, raise - and the vision
+    call must have been made exactly twice, never a third time."""
+    payload = json.loads(_fake_claude_json())
+    del payload["structural_zones"]
+    bad_json = json.dumps(payload)
+
+    call_count = {"n": 0}
+
+    class FakeMessage:
+        def __init__(self, text):
+            self.content = [type("obj", (), {"text": text})()]
+
+    class FakeMessages:
+        def create(self, **kwargs):
+            call_count["n"] += 1
+            return FakeMessage(bad_json)
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            self.messages = FakeMessages()
+
+    monkeypatch.setattr(deconstruct.anthropic, "Anthropic", FakeClient)
+
+    with pytest.raises(ValueError):
+        deconstruct.deconstruct_image(
+            image_bytes=b"\x89PNG\r\n\x1a\nfakepngbytes",
+            ad_id="AD1", source_page="PageX", captured_at="2026-01-01",
+        )
+    assert call_count["n"] == 2

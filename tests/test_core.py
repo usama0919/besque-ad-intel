@@ -15,6 +15,14 @@ def _valid_blueprint():
         "visual": {"layout": "centered", "subject": "bottle", "palette_mood": "warm", "text_placement": "top"},
         "cta": "Shop Now",
         "destination_url": "https://example.com",
+        "structural_zones": [],
+        "production_style": {"style": "ugc", "confidence": "high", "signals": ["handheld framing"]},
+        "body_area_shown": "none",
+        "face_present": {"has_face": False, "prominence": "none", "location": ""},
+        "semantic_split": {"is_split": False, "split_axis": None, "left_or_before": "", "right_or_after": ""},
+        "scene_elements": [],
+        "testimonial_zones": [],
+        "text_purpose": [],
     }
 
 
@@ -47,6 +55,60 @@ def test_missing_required_field_fails():
 def test_bad_enum_value_fails():
     bp = _valid_blueprint()
     bp["awareness_stage"] = "not_a_real_stage"
+    assert validator.is_valid(bp) is False
+
+
+def test_missing_structural_zones_fails():
+    """structural_zones is now a required field (schema/blueprint.schema.json) - an ad
+    with no zones must return an explicit empty array, not omit the key entirely."""
+    bp = _valid_blueprint()
+    del bp["structural_zones"]
+    assert validator.is_valid(bp) is False
+
+
+def test_missing_production_style_fails():
+    """production_style is now required (2026-08-11 schema change) - promoted from
+    optional; an ad must always classify its own production style, never omit it."""
+    bp = _valid_blueprint()
+    del bp["production_style"]
+    assert validator.is_valid(bp) is False
+
+
+def test_missing_body_area_shown_fails():
+    """body_area_shown is now required (2026-08-11 schema change) - promoted from
+    optional; an ad with no human subject must still say so explicitly ("none")."""
+    bp = _valid_blueprint()
+    del bp["body_area_shown"]
+    assert validator.is_valid(bp) is False
+
+
+def test_missing_face_present_fails():
+    bp = _valid_blueprint()
+    del bp["face_present"]
+    assert validator.is_valid(bp) is False
+
+
+def test_missing_semantic_split_fails():
+    bp = _valid_blueprint()
+    del bp["semantic_split"]
+    assert validator.is_valid(bp) is False
+
+
+def test_missing_scene_elements_fails():
+    bp = _valid_blueprint()
+    del bp["scene_elements"]
+    assert validator.is_valid(bp) is False
+
+
+def test_missing_testimonial_zones_fails():
+    bp = _valid_blueprint()
+    del bp["testimonial_zones"]
+    assert validator.is_valid(bp) is False
+
+
+def test_missing_text_purpose_fails():
+    bp = _valid_blueprint()
+    del bp["text_purpose"]
     assert validator.is_valid(bp) is False
 
 
@@ -85,8 +147,12 @@ def test_blueprint_with_new_creative_fields_validates():
 
 
 def test_production_styles_returns_canonical_list():
+    """Enum tightened 2026-08-11: ugc_native/high_spec_studio renamed to ugc/high_spec,
+    hybrid dropped entirely. generate_image_prompt_writer.STYLE_GUIDANCE still keys on
+    the OLD names - that's a known, deliberately deferred consumption gap, not fixed by
+    this schema/prompt change."""
     styles = validator.production_styles()
-    assert set(styles) == {"ugc_native", "high_spec_studio", "hybrid", "illustrated"}
+    assert set(styles) == {"ugc", "high_spec", "illustrated"}
 
 
 def test_creative_formats_returns_canonical_list():

@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "CreativeBlueprint",
   "type": "object",
-  "required": ["ad_id", "source_page", "captured_at", "format", "hook", "awareness_stage", "claims", "visual", "cta"],
+  "required": ["ad_id", "source_page", "captured_at", "format", "hook", "awareness_stage", "claims", "visual", "cta", "structural_zones", "production_style", "body_area_shown", "face_present", "semantic_split", "scene_elements", "testimonial_zones", "text_purpose"],
   "properties": {
     "ad_id": { "type": "string" },
     "source_page": { "type": "string" },
@@ -134,9 +134,69 @@
     "production_style": {
       "type": "object",
       "properties": {
-        "style": { "type": "string", "enum": ["ugc_native", "high_spec_studio", "hybrid", "illustrated"] },
+        "style": { "type": "string", "enum": ["ugc", "high_spec", "illustrated"] },
         "confidence": { "type": "string", "enum": ["high", "medium", "low"] },
         "signals": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "face_present": {
+      "type": "object",
+      "required": ["has_face", "prominence", "location"],
+      "properties": {
+        "has_face": { "type": "boolean" },
+        "prominence": { "type": "string", "enum": ["primary", "incidental", "none"] },
+        "location": { "type": "string" }
+      }
+    },
+    "semantic_split": {
+      "type": "object",
+      "required": ["is_split", "split_axis", "left_or_before", "right_or_after"],
+      "properties": {
+        "is_split": { "type": "boolean" },
+        "split_axis": { "type": ["string", "null"], "enum": ["vertical", "horizontal", null] },
+        "left_or_before": { "type": "string" },
+        "right_or_after": { "type": "string" }
+      }
+    },
+    "scene_elements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["element", "role", "essential"],
+        "properties": {
+          "element": { "type": "string" },
+          "role": { "type": "string" },
+          "essential": { "type": "boolean" }
+        }
+      }
+    },
+    "testimonial_zones": {
+      "$comment": "NAMING CONSTRAINT: if generate_copy.py ever gains a testimonial output field, it must be named exactly \"testimonial\" to match TESTIMONIAL_FIELD_KEYS in src/compliance.py - that check only scans keys named in that tuple, and a differently-named field would silently bypass the fabricated-testimonial guard the same way an absent one does today.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["text_verbatim", "attribution", "placement", "styling"],
+        "properties": {
+          "text_verbatim": { "type": "string" },
+          "attribution": { "type": "string" },
+          "placement": { "type": "string" },
+          "styling": { "type": "string" }
+        }
+      }
+    },
+    "text_purpose": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["text_verbatim", "purpose", "placement"],
+        "properties": {
+          "text_verbatim": { "type": "string" },
+          "purpose": {
+            "type": "string",
+            "enum": ["offer", "testimonial", "efficacy_claim", "problem_hook", "product_description", "cta", "other"]
+          },
+          "placement": { "type": "string" }
+        }
       }
     },
     "creative_format": {

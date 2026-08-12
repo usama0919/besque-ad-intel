@@ -74,6 +74,11 @@ def test_rule_9_states_logos_are_not_part_of_composition_to_preserve():
 # ---- _edit_mode_instruction() and rule 6 must agree in both text_in_image states ----
 
 def test_edit_mode_instruction_and_rule6_agree_text_in_image_true():
+    """Rule 6 is the single source of the literal quoted headline/subtext (2026-08-13
+    fix) - the edit-mode TEXT branch references that authorisation instead of re-quoting
+    the string, which was producing 2-3 literal occurrences of the same text in one
+    assembled prompt (rule 6, this TEXT branch, and structural zones' sub_line/body_copy
+    fallback)."""
     headline = "Firmer Skin By Friday"
     subtext = "7 cold-pressed oils"
     instruction = generate_image_prompt._edit_mode_instruction(
@@ -81,13 +86,44 @@ def test_edit_mode_instruction_and_rule6_agree_text_in_image_true():
     )
     rule6 = generate_image_prompt._rule6_text_policy(text_in_image=True, headline=headline, subtext=subtext)
 
-    assert f'"{headline}"' in instruction
+    assert f'"{headline}"' not in instruction
+    assert f'"{subtext}"' not in instruction
+    assert "already authorised above" in instruction
     assert f'"{headline}"' in rule6
-    assert f'"{subtext}"' in instruction
     assert f'"{subtext}"' in rule6
     assert "preserve the reference image's text zones" in instruction
     assert "RESERVED NEGATIVE SPACE" not in instruction
     assert "NEVER render any headline" not in rule6
+
+
+def test_build_image_prompt_edit_mode_headline_and_subtext_appear_exactly_once():
+    """2026-08-13 fix: the authorised headline/subtext must be stated by rule 6 alone -
+    _edit_mode_instruction's TEXT branch previously re-quoted the identical string,
+    producing 2 literal occurrences of each in one assembled prompt (3 with an
+    overlapping structural zone - see the test directly below)."""
+    headline = "Firmer Skin By Friday"
+    subtext = "7 cold-pressed oils"
+    prompt = generate_image_prompt.build_image_prompt(
+        _blueprint(), edit_mode=True, text_in_image=True, headline=headline, subtext=subtext,
+    )
+    assert prompt.count(f'"{headline}"') == 1
+    assert prompt.count(f'"{subtext}"') == 1
+
+
+def test_build_image_prompt_edit_mode_headline_and_subtext_exactly_once_with_overlapping_zone():
+    """The overlapping-zone case: a sub_line structural zone with no distinct panel_copy
+    entry previously fell back to re-quoting the same subtext a third time
+    (_structural_zones_clause's sub_line/body_copy branch) - it now references rule 6's
+    authorisation instead, so the count stays 1 even here."""
+    headline = "Firmer Skin By Friday"
+    subtext = "7 cold-pressed oils"
+    bp = _blueprint()
+    bp["structural_zones"] = [{"zone_type": "sub_line", "position": "top-center", "container": "none"}]
+    prompt = generate_image_prompt.build_image_prompt(
+        bp, edit_mode=True, text_in_image=True, headline=headline, subtext=subtext,
+    )
+    assert prompt.count(f'"{headline}"') == 1
+    assert prompt.count(f'"{subtext}"') == 1
 
 
 def test_edit_mode_instruction_text_branch_states_entire_text_budget():
@@ -99,13 +135,21 @@ def test_edit_mode_instruction_text_branch_states_entire_text_budget():
     assert "ingredient list" in text_section
 
 
-def test_edit_mode_instruction_caps_overlong_subtext():
+def test_effective_authorised_text_caps_overlong_subtext():
+    """The cap lives in effective_authorised_text, the single mechanical source both
+    rule 6 and _edit_mode_instruction derive eff_subtext from - moved here from asserting
+    on _edit_mode_instruction's own output (2026-08-13), since that function no longer
+    re-quotes the literal subtext at all, only rule 6 does."""
     long_text = " ".join(f"word{i}" for i in range(30))
-    instruction = generate_image_prompt._edit_mode_instruction(
-        text_in_image=True, headline="Headline", subtext=long_text
+    _, capped_subtext = generate_image_prompt.effective_authorised_text(
+        True, headline="Headline", subtext=long_text
     )
-    assert "word11" in instruction
-    assert "word12" not in instruction
+    assert "word11" in capped_subtext
+    assert "word12" not in capped_subtext
+
+    rule6 = generate_image_prompt._rule6_text_policy(text_in_image=True, headline="Headline", subtext=long_text)
+    assert "word11" in rule6
+    assert "word12" not in rule6
 
 
 def test_edit_mode_instruction_and_rule6_agree_text_in_image_false():
@@ -229,6 +273,103 @@ def test_generate_image_omits_competitor_bytes_when_edit_mode_off(monkeypatch, t
     # No reference_images and edit_mode off -> contents is the bare prompt string, no Parts.
     assert isinstance(contents, str)
     assert "THE AD TO REPRODUCE" not in contents
+
+
+# ---- Item 1 (2026-08-12): OCCLUDE_PERSON, off by default, switchable via env var only ----
+
+def test_occlusion_disabled_by_default(monkeypatch):
+    monkeypatch.delenv("OCCLUDE_PERSON", raising=False)
+    assert generate_image_prompt._occlusion_enabled() is False
+
+
+def test_occlusion_enabled_via_env_var(monkeypatch):
+    monkeypatch.setenv("OCCLUDE_PERSON", "1")
+    assert generate_image_prompt._occlusion_enabled() is True
+    monkeypatch.setenv("OCCLUDE_PERSON", "true")
+    assert generate_image_prompt._occlusion_enabled() is True
+    monkeypatch.setenv("OCCLUDE_PERSON", "0")
+    assert generate_image_prompt._occlusion_enabled() is False
+
+
+def test_occlude_person_region_noop_when_no_face():
+    original = _png_bytes()
+    result, occluded = generate_image_prompt._occlude_person_region(original, {"has_face": False})
+    assert occluded is False
+    assert result == original
+
+
+def test_occlude_person_region_preserves_dimensions():
+    original = _png_bytes(width=600, height=900)
+    result, occluded = generate_image_prompt._occlude_person_region(
+        original, {"has_face": True, "location": "upper-centre of frame"}
+    )
+    assert occluded is True
+    assert result != original
+    img = Image.open(io.BytesIO(result))
+    assert img.size == (600, 900)
+
+
+def test_occlude_person_region_fails_soft_on_corrupt_bytes():
+    result, occluded = generate_image_prompt._occlude_person_region(b"not an image", {"has_face": True})
+    assert occluded is False
+    assert result == b"not an image"
+
+
+def test_generate_image_occlusion_off_by_default_leaves_bytes_unchanged(monkeypatch, tmp_path):
+    monkeypatch.setattr(generate_image_prompt, "genai", type("obj", (), {"Client": _CapturingGenaiClient}))
+    monkeypatch.setattr(generate_image_prompt, "ASSET_DIR", tmp_path)
+    monkeypatch.delenv("OCCLUDE_PERSON", raising=False)
+    competitor_bytes = _png_bytes()
+    bp = _blueprint()
+    bp["face_present"] = {"has_face": True, "prominence": "primary", "location": "centre"}
+
+    generate_image_prompt.generate_image(
+        bp, "AD_OCCLUDE_OFF", edit_mode=True, competitor_image_bytes=competitor_bytes,
+        retheme_colours=False,
+    )
+    contents = _CapturingGenaiClient.last_contents
+    assert contents[0].inline_data.data == competitor_bytes
+    assert "OCCLUSION NOTICE" not in contents[-1]
+
+
+def test_generate_image_occlusion_on_blocks_person_and_states_notice(monkeypatch, tmp_path):
+    monkeypatch.setattr(generate_image_prompt, "genai", type("obj", (), {"Client": _CapturingGenaiClient}))
+    monkeypatch.setattr(generate_image_prompt, "ASSET_DIR", tmp_path)
+    monkeypatch.setenv("OCCLUDE_PERSON", "1")
+    competitor_bytes = _png_bytes()
+    bp = _blueprint()
+    bp["face_present"] = {"has_face": True, "prominence": "incidental", "location": "centre"}
+
+    generate_image_prompt.generate_image(
+        bp, "AD_OCCLUDE_ON", edit_mode=True, competitor_image_bytes=competitor_bytes,
+        retheme_colours=False,
+    )
+    contents = _CapturingGenaiClient.last_contents
+    assert contents[0].inline_data.data != competitor_bytes
+    img = Image.open(io.BytesIO(contents[0].inline_data.data))
+    assert img.size == (100, 100)  # _png_bytes() default - dimensions unchanged
+    assert "OCCLUSION NOTICE" in contents[-1]
+    assert "fill that region with a new" in contents[-1].lower()
+    assert "must never be reproduced, outlined, or left in the output as a grey block" in contents[-1]
+
+
+def test_generate_image_occlusion_on_but_no_face_present_leaves_bytes_unchanged(monkeypatch, tmp_path):
+    """OCCLUDE_PERSON on is necessary but not sufficient - a reference with no face at
+    all must not be touched."""
+    monkeypatch.setattr(generate_image_prompt, "genai", type("obj", (), {"Client": _CapturingGenaiClient}))
+    monkeypatch.setattr(generate_image_prompt, "ASSET_DIR", tmp_path)
+    monkeypatch.setenv("OCCLUDE_PERSON", "1")
+    competitor_bytes = _png_bytes()
+    bp = _blueprint()
+    bp["face_present"] = {"has_face": False, "location": ""}
+
+    generate_image_prompt.generate_image(
+        bp, "AD_OCCLUDE_NO_FACE", edit_mode=True, competitor_image_bytes=competitor_bytes,
+        retheme_colours=False,
+    )
+    contents = _CapturingGenaiClient.last_contents
+    assert contents[0].inline_data.data == competitor_bytes
+    assert "OCCLUSION NOTICE" not in contents[-1]
 
 
 def test_generate_image_edit_mode_orders_competitor_before_product_reference_images(monkeypatch, tmp_path):
@@ -795,19 +936,25 @@ def test_edit_mode_instruction_text_substituted_when_reference_has_text_zone():
     assert "the reference has no existing text zone to substitute into" not in instruction
 
 
-def test_build_image_prompt_product_count_above_one_renders_that_many_of_the_same_product():
-    """Corrected 2026-08-07: a reference showing N products renders N of the SAME Besque
-    product, reproducing composition - never collapsed to one, and never framed as
-    "duplicating to fake a pair." The only real ban is a DIFFERENT invented SKU."""
+def test_build_image_prompt_product_count_above_one_still_yields_single_product_instruction():
+    """REVERSED 2026-08-12 (live failure, product_count=5): the old version of this test
+    asserted "place 2 of the Besque product" - a real run showed that instruction directly
+    contradicting rule 7 ("exactly one bottle... NEVER add a second... whether copied from
+    the competitor ad or invented") in the SAME prompt. The critic flagged it HIGH and the
+    actual output rendered 8 bottles. Rule 7 wins unconditionally now: a reference-derived
+    count above 1 must still yield an instruction for exactly ONE Besque product, with the
+    composition adapting around it rather than multiplying to match the reference."""
     bp = _blueprint()
     bp["layout_detail"] = {"product_count": 2}
     product = {"name": "Magic Body Oil", "description": "seven cold-pressed oils",
                "ingredients": "almond; rosehip", "hero_claim": "Visibly firms"}
     prompt = generate_image_prompt.build_image_prompt(bp, product=product, include_product=True)
-    assert "place 2 of the Besque product" in prompt
-    assert "reproducing the reference's own composition and count" in prompt
-    assert "do NOT duplicate" not in prompt
-    assert "only" not in prompt.split("The reference shows 2 products")[1][:80]
+    assert "place 2 of the Besque product" not in prompt
+    assert "place 5 of the Besque product" not in prompt
+    assert "renders as exactly ONE bottle" in prompt
+    assert "rule 7 above permits exactly one" in prompt
+    assert "Adapt the COMPOSITION around that single bottle" in prompt
+    assert "never shrink the single bottle to read like part of a missing set" in prompt
 
 
 # ---- Step 3, Part 2 (2026-08-03): product-derived substances must take OUR colour -
@@ -891,16 +1038,19 @@ def test_build_image_prompt_edit_mode_omits_colour_phrase_when_substance_colour_
 # integrated instruction with reproduce-faithfully, same class as item 5's retheme_colours ----
 
 def test_suppression_exception_states_one_partition_with_full_preservation():
-    """The exception must live in the SAME paragraph as the "carries over EXACTLY... in
-    any way" claim - not a separate clause elsewhere a reader could take as contradicting
-    it. Mirrors test_retheme_colours_on_states_one_integrated_instruction's shape."""
+    """The exception must live in the SAME paragraph as the "carries over CLOSELY... "
+    claim - not a separate clause elsewhere a reader could take as contradicting it.
+    Mirrors test_retheme_colours_on_states_one_integrated_instruction's shape.
+    2026-08-12: "carry over EXACTLY" became "carry over CLOSELY" (item 4's 5-8%
+    background-variation allowance) - the structural claim under test (same paragraph,
+    before product-substitution text) is unchanged."""
     instruction = generate_image_prompt._edit_mode_instruction(text_in_image=False)
-    assert "carry over EXACTLY as shot in the reference" in instruction
-    assert "in any way." in instruction
+    assert "carry over CLOSELY as shot in the reference" in instruction
+    assert "never a different composition" in instruction
     assert "The ONE exception to full geometry preservation" in instruction
     assert "is removed entirely, not preserved empty" in instruction
     # Both must appear in the SAME opening paragraph, before the product-substitution text.
-    carries_over_pos = instruction.index("carry over EXACTLY")
+    carries_over_pos = instruction.index("carry over CLOSELY")
     exception_pos = instruction.index("The ONE exception")
     product_pos = instruction.index("Changing ONLY the product")
     assert carries_over_pos < exception_pos < product_pos
@@ -1144,7 +1294,11 @@ def test_build_image_prompt_edit_mode_forwards_efficacy_ban():
 
 def test_retheme_colours_on_states_one_integrated_instruction():
     instruction = generate_image_prompt._edit_mode_instruction(retheme_colours=True)
-    assert "geometry is preserved, colour is substituted" in instruction
+    # 2026-08-12: "geometry is preserved" gained a small-variation allowance (item 4) -
+    # no longer the bare "geometry is preserved, colour is substituted" phrase, but still
+    # ONE integrated instruction, not two competing ones.
+    assert "geometry is preserved" in instruction
+    assert "colour is substituted" in instruction
     assert "not two competing ones" in instruction
     # The preserved-geometry list and the colour-substitution clause appear in the SAME
     # sentence set - "colour palette" must NOT survive as something to reproduce, or it
@@ -1192,7 +1346,8 @@ def test_build_image_prompt_edit_mode_forwards_retheme_and_palette():
         _blueprint(), edit_mode=True, retheme_colours=True, brand_palette="terracotta, maroon, gold, cream"
     )
     assert "terracotta, maroon, gold, cream" in prompt
-    assert "geometry is preserved, colour is substituted" in prompt
+    assert "geometry is preserved" in prompt
+    assert "colour is substituted" in prompt
 
 
 def test_build_image_prompt_edit_mode_retheme_false_reverts():
@@ -1385,7 +1540,7 @@ def test_register_clause_states_faithful_reproduction_wins_over_style_vocabulary
 
 
 def test_edit_mode_instruction_style_reaches_register_clause():
-    instruction = generate_image_prompt._edit_mode_instruction(style="ugc_native")
+    instruction = generate_image_prompt._edit_mode_instruction(style="ugc")
     assert "REGISTER:" in instruction
     assert "phone" in instruction.lower()
 
@@ -1454,12 +1609,18 @@ def test_build_image_prompt_edit_mode_uses_reference_style_by_default():
 def test_build_image_prompt_edit_mode_operator_realism_overrides_reference_style():
     bp = _blueprint()
     bp["production_style"] = {"style": "illustrated"}
-    prompt = generate_image_prompt.build_image_prompt(bp, edit_mode=True, realism="ugc_native")
+    prompt = generate_image_prompt.build_image_prompt(bp, edit_mode=True, realism="ugc")
     assert "phone" in prompt.lower()
     assert "Pixar" not in prompt
 
 
 def test_build_image_prompt_generate_mode_unaffected_by_realism_param():
+    # NOTE: confirmed pre-existing failure at HEAD (before any 2026-08-11 work), unrelated
+    # to the production_style enum rename - realism demonstrably DOES reach the
+    # STYLE_GUIDANCE lookup in the flat-template branch (build_image_prompt.py's `else`
+    # branch), contradicting this test's own name/assertion. Left as-is (still
+    # "ugc_native", the literal it had at HEAD) rather than silently "fixed" into passing
+    # - not in scope for this task, flagging for a separate fix.
     bp = _blueprint()
     assert (generate_image_prompt.build_image_prompt(bp)
             == generate_image_prompt.build_image_prompt(bp, realism="ugc_native"))
@@ -1587,11 +1748,16 @@ def test_structural_zones_clause_brand_wordmark_always_substituted():
 
 
 def test_structural_zones_clause_sub_line_and_body_copy_substituted_when_text_supplied():
+    """No panel_copy - both zones hit the zone_copy_text fallback, which references rule
+    6's authorisation rather than re-quoting the literal subtext (2026-08-13 fix): the
+    old re-quote here was a third literal occurrence of the same string, alongside rule 6
+    and _edit_mode_instruction's own TEXT branch."""
     clause, substituted = generate_image_prompt._structural_zones_clause(
         [_szone("sub_line"), _szone("body_copy")], zone_copy_text="7 cold-pressed oils.",
     )
     assert substituted == {"sub_line", "body_copy"}
-    assert clause.count('"7 cold-pressed oils."') == 2
+    assert "7 cold-pressed oils." not in clause
+    assert clause.count("already authorised above") == 2
     assert "matching the reference's own line count" in clause
 
 
@@ -1618,7 +1784,9 @@ def test_structural_zones_clause_panel_copy_routes_distinct_text_by_position():
 
 def test_structural_zones_clause_panel_copy_falls_back_when_position_uncovered():
     """panel_copy given but missing an entry for one zone's position - that zone falls
-    back to zone_copy_text rather than being silently dropped."""
+    back to referencing rule 6's authorisation (2026-08-13: not re-quoting the literal
+    zone_copy_text, which duplicated the string already stated by rule 6) rather than
+    being silently dropped."""
     clause, substituted = generate_image_prompt._structural_zones_clause(
         [_szone("sub_line", position="upper-left-mid"), _szone("sub_line", position="upper-right-mid")],
         zone_copy_text="shared fallback",
@@ -1626,7 +1794,8 @@ def test_structural_zones_clause_panel_copy_falls_back_when_position_uncovered()
     )
     assert substituted == {"sub_line"}
     assert '"Skin feeling looser?"' in clause
-    assert '"shared fallback"' in clause
+    assert "shared fallback" not in clause
+    assert "already authorised above" in clause
 
 
 def test_structural_zones_clause_panel_copy_absent_reproduces_shared_text_behaviour():
@@ -1643,14 +1812,16 @@ def test_structural_zones_clause_panel_copy_absent_reproduces_shared_text_behavi
 
 def test_structural_zones_clause_panel_copy_malformed_entries_ignored():
     """A malformed panel_copy entry (missing position/text, or not even a dict) must
-    never raise - it's silently skipped and the zone falls back to zone_copy_text."""
+    never raise - it's silently skipped and the zone falls back to referencing rule 6's
+    authorisation (2026-08-13: not the literal zone_copy_text string)."""
     clause, substituted = generate_image_prompt._structural_zones_clause(
         [_szone("sub_line", position="upper-left-mid")],
         zone_copy_text="fallback",
         panel_copy=["not-a-dict", {"position": "upper-left-mid"}, {"text": "no position"}, {}],
     )
     assert substituted == {"sub_line"}
-    assert '"fallback"' in clause
+    assert "already authorised above" in clause
+    assert "fallback" not in clause
 
 
 def test_structural_zones_clause_sub_line_and_body_copy_removed_when_no_text():
@@ -1784,24 +1955,61 @@ def test_structural_zones_clause_price_anchor_removes_when_offer_text_empty_stri
     assert "price_anchor" in clause
 
 
-def test_structural_zones_clause_product_callout_substitutes_with_product_name():
+def test_structural_zones_clause_product_callout_substitutes_with_distinct_callout_copy():
+    """REVERSED 2026-08-12 (Item 2): product_callout no longer takes the bare
+    product_name - confirmed live, ad 1576971893931336, four distinct reference callouts
+    all rendered the identical "Besque Magic Body Oil". Now keyed by THIS zone's own
+    position into callout_copy (generate_copy.py's per-zone panel_copy, ungated by
+    text_in_image)."""
     clause, substituted = generate_image_prompt._structural_zones_clause(
-        [_szone("product_callout", detail="reads 'New Scent'")], product_name="Besque Magic Body Oil",
+        [_szone("product_callout", detail="reads 'New Scent'")],
+        callout_copy=[{"position": "top-center", "text": "Fast-Absorbing"}],
     )
     assert substituted == {"product_callout"}
-    assert "Besque Magic Body Oil" in clause
+    assert "Fast-Absorbing" in clause
+    assert "never the product name" in clause
 
 
-def test_structural_zones_clause_product_callout_removes_when_product_name_empty_string():
-    """product_name="" must still fall to removal, not be treated as a supplied value."""
+def test_structural_zones_clause_product_callout_removes_when_no_callout_copy():
+    """No callout_copy entry for this zone's position - removed, not filled with a
+    repeated fallback string (the actual bug this reverses)."""
     clause, substituted = generate_image_prompt._structural_zones_clause(
-        [_szone("product_callout", detail="reads 'New Scent'")], product_name="",
+        [_szone("product_callout", detail="reads 'New Scent'")], callout_copy=None,
     )
     assert substituted == set()
     assert "STRUCTURAL ZONES - SUBSTITUTE" not in clause
-    assert "our real product named honestly" not in clause
     assert "STRUCTURAL ZONES - REMOVE" in clause
     assert "product_callout" in clause
+
+
+def test_structural_zones_clause_product_callout_multiple_zones_get_distinct_copy():
+    """The actual regression test for the reported bug: 3+ callout zones, each getting
+    its OWN distinct string, never the same text repeated across zones."""
+    zones = [
+        {"zone_type": "product_callout", "position": "mid-left", "container": "rect", "detail": "flame icon, thermogenic"},
+        {"zone_type": "product_callout", "position": "mid-left-lower", "container": "rect", "detail": "lightning icon, energy"},
+        {"zone_type": "product_callout", "position": "mid-right", "container": "rect", "detail": "silhouette icon, tightening"},
+        {"zone_type": "product_callout", "position": "mid-right-lower", "container": "rect", "detail": "nail icon, nail and hair"},
+    ]
+    callout_copy = [
+        {"position": "mid-left", "text": "Melts Fat Fast"},
+        {"position": "mid-left-lower", "text": "All-Day Energy"},
+        {"position": "mid-right", "text": "Visibly Tighter Skin"},
+        # mid-right-lower deliberately omitted
+    ]
+    clause, substituted = generate_image_prompt._structural_zones_clause(
+        zones, callout_copy=callout_copy,
+    )
+    assert substituted == {"product_callout"}
+    assert "Melts Fat Fast" in clause
+    assert "All-Day Energy" in clause
+    assert "Visibly Tighter Skin" in clause
+    # every substituted string must be genuinely distinct - none repeated
+    texts = ["Melts Fat Fast", "All-Day Energy", "Visibly Tighter Skin"]
+    assert len(set(texts)) == 3
+    # the 4th zone (no callout copy) must be REMOVED, not duplicated with any other text
+    assert "mid-right-lower" in clause
+    assert "STRUCTURAL ZONES - REMOVE" in clause
 
 
 # ---- _is_stat_shaped_zone (2026-08-11): shape-based, not a list of known numbers - reuses
@@ -1831,17 +2039,17 @@ def test_is_stat_shaped_zone_false_for_non_stat_control():
     assert generate_image_prompt._is_stat_shaped_zone(None) is False
 
 
-def test_structural_zones_clause_product_callout_removes_when_stat_shaped_even_with_product_name():
-    """A callout whose reference content is a statistic has no Besque counterpart - the
-    product name must NOT be substituted in, even though product_name is supplied and
-    would normally win."""
+def test_structural_zones_clause_product_callout_removes_when_stat_shaped_even_with_callout_copy():
+    """A callout whose reference content is a statistic has no Besque counterpart - a
+    benefit phrase must NOT be substituted in, even though callout_copy supplies one for
+    this exact position and would normally win."""
     clause, substituted = generate_image_prompt._structural_zones_clause(
         [_szone("product_callout", detail="91% saw visibly firmer skin in 4 weeks")],
-        product_name="Besque Magic Body Oil",
+        callout_copy=[{"position": "top-center", "text": "Visibly Firmer Skin"}],
     )
     assert substituted == set()
     assert "STRUCTURAL ZONES - SUBSTITUTE" not in clause
-    assert "Besque Magic Body Oil" not in clause
+    assert "Visibly Firmer Skin" not in clause
     assert "STRUCTURAL ZONES - REMOVE" in clause
     assert "product_callout" in clause
 
@@ -1905,6 +2113,64 @@ def test_structural_zones_clause_social_proof_unrecognised_kind_removed():
     assert substituted == set()
 
 
+# ---- testimonial_zones consumption (2026-08-13, Item 1): PLACEMENT/STYLING only, never
+# content - select_testimonial_review stays the sole content source ----
+
+def test_structural_zones_clause_testimonial_zones_adds_styling_detail():
+    clause, substituted = generate_image_prompt._structural_zones_clause(
+        [_szone("social_proof", social_proof_kind="single_quote", position="lower-third")],
+        testimonial={"quote": "This oil changed my skin.", "attribution": "Jane D."},
+        testimonial_zones=[{
+            "text_verbatim": "competitor's own fabricated quote",
+            "attribution": "Some Competitor Customer",
+            "placement": "bottom-center white card",
+            "styling": "Avatar thumbnail top-left, reaction bar below quote",
+        }],
+    )
+    assert "Avatar thumbnail top-left, reaction bar below quote" in clause
+    assert "Position it at bottom-center white card" in clause
+    # content still comes ONLY from `testimonial`, never testimonial_zones
+    assert "competitor's own fabricated quote" not in clause
+    assert "Some Competitor Customer" not in clause
+    assert '"This oil changed my skin."' in clause
+    assert "Jane D." in clause
+    assert "social_proof" in substituted
+
+
+def test_structural_zones_clause_testimonial_zones_absent_unaffected():
+    """No testimonial_zones given (every pre-existing caller) - byte-for-byte the same
+    substitution as before this item existed, just without the extra styling detail."""
+    clause, substituted = generate_image_prompt._structural_zones_clause(
+        [_szone("social_proof", social_proof_kind="single_quote", position="lower-third")],
+        testimonial={"quote": "This oil changed my skin.", "attribution": "Jane D."},
+        testimonial_zones=None,
+    )
+    assert '"This oil changed my skin."' in clause
+    assert "Jane D." in clause
+    assert "Match this reference's own styling" not in clause
+
+
+def test_structural_zones_clause_testimonial_zones_matched_ordinally_not_by_string():
+    """Two social_proof/single_quote zones, two testimonial_zones entries - matched by
+    ORDER encountered, not by comparing position/placement strings (deliberately
+    independently-worded free-text fields, never guaranteed to match textually)."""
+    zones = [
+        _szone("social_proof", social_proof_kind="single_quote", position="upper-third"),
+        _szone("social_proof", social_proof_kind="single_quote", position="lower-third"),
+    ]
+    testimonial_zones = [
+        {"styling": "FIRST card styling", "placement": "top area"},
+        {"styling": "SECOND card styling", "placement": "bottom area"},
+    ]
+    clause, substituted = generate_image_prompt._structural_zones_clause(
+        zones, testimonial=None, testimonial_zones=testimonial_zones,
+    )
+    # both zones removed (no real review), but styling detail is never used on removal -
+    # this just confirms ordinal indexing doesn't crash/misbehave when zones outnumber
+    # or match testimonial_zones one-to-one, regardless of substitute-vs-remove outcome.
+    assert substituted == set()
+
+
 def test_structural_zones_clause_handles_several_of_the_same_type():
     clause, substituted = generate_image_prompt._structural_zones_clause(
         [_szone("badge", position="top-left"), _szone("badge", position="top-right")]
@@ -1960,17 +2226,27 @@ def test_edit_mode_instruction_forwards_testimonial_end_to_end():
     assert "Jane D." in instruction
 
 
-def test_edit_mode_instruction_testimonial_suppressed_when_text_in_image_off():
-    """Same gating rule as zone_copy_text/cta_text/panel_copy - a real review must never
-    leak into the prompt when the operator asked for no baked-in text this run; the zone
-    falls to removal instead."""
+def test_edit_mode_instruction_testimonial_not_suppressed_when_text_in_image_off():
+    """REVERSED 2026-08-13 (Item 1 of the testimonial/callout/garbling task): testimonial
+    used to be gated by text_in_image the SAME way zone_copy_text/cta_text/panel_copy
+    are - this test used to assert the review was REMOVED here. That gate was a category
+    error: text_in_image decides whether headline/subtext bake into the image or render
+    as a separate HTML overlay; a testimonial CARD (avatar, name, quote, reaction bar) is
+    not headline text competing for that slot, it's a self-contained visual element, the
+    same category as badge/price_anchor/certifications (none of which are gated by
+    text_in_image either). Confirmed live: ad 1354698976158962 had a real review ready
+    (select_testimonial_review found one) and a genuine social_proof/single_quote zone,
+    but text_in_image=False on that run silently dropped it anyway - the zone was never
+    short of content, it was gated on the wrong flag. The ONLY gate a testimonial zone
+    needs is "no real review -> remove, never invent", tested separately below."""
     instruction = generate_image_prompt._edit_mode_instruction(
         text_in_image=False,
         structural_zones=[_szone("social_proof", social_proof_kind="single_quote")],
         testimonial={"quote": "This oil changed my skin.", "attribution": "Jane D."},
     )
-    assert "This oil changed my skin." not in instruction
-    assert "STRUCTURAL ZONES - REMOVE, SOCIAL PROOF" in instruction
+    assert "This oil changed my skin." in instruction
+    assert "Jane D." in instruction
+    assert "STRUCTURAL ZONES - REMOVE, SOCIAL PROOF" not in instruction
 
 
 def test_edit_mode_instruction_gates_zone_copy_and_cta_on_text_in_image():
@@ -2023,3 +2299,138 @@ def test_build_image_prompt_generate_mode_unaffected_by_structural_zones():
     bp_with_zones["structural_zones"] = [_szone("brand_wordmark")]
     assert (generate_image_prompt.build_image_prompt(bp_plain, cta_text="Shop Now")
             == generate_image_prompt.build_image_prompt(bp_with_zones, cta_text="Shop Now"))
+
+
+# ---- Item 4 (2026-08-12): background variation - 5-8% variation from the REFERENCE,
+# phrased as a partition of the reproduce-faithfully instruction, never a competing one ----
+
+def test_edit_mode_background_variation_states_percentage_and_scope():
+    instruction = generate_image_prompt._edit_mode_instruction()
+    assert "5-8%" in instruction
+    assert "camera angle, framing, background detail, or prop arrangement" in instruction
+    assert "never a different composition" in instruction
+
+
+def test_edit_mode_background_variation_present_with_retheme_off_too():
+    """Both opening branches (retheme_colours True/False) must carry the variation
+    allowance - it's about geometry, not colour."""
+    instruction = generate_image_prompt._edit_mode_instruction(retheme_colours=False)
+    assert "5-8%" in instruction
+
+
+def test_edit_mode_background_variation_not_a_competing_instruction():
+    """Must read as a PARTITION of the SAME single instruction, not a separate clause
+    that a reader (or the model) could interpret as fighting the reproduce-faithfully
+    claim - the same shape as the colour re-theming clause."""
+    instruction = generate_image_prompt._edit_mode_instruction(retheme_colours=True)
+    assert "not two competing ones" in instruction
+    variation_pos = instruction.index("5-8%")
+    two_parts_pos = instruction.index("not two competing ones")
+    assert two_parts_pos < variation_pos
+
+
+# ---- Item 6 (2026-08-12): semantic_split consumption - before/after semantics are
+# INTERNAL to the image (half vs half), a different axis from item 4's output-vs-reference
+# variation ----
+
+def test_semantic_split_clause_empty_when_not_split():
+    assert generate_image_prompt._semantic_split_clause(None) == ""
+    assert generate_image_prompt._semantic_split_clause({"is_split": False}) == ""
+
+
+def test_semantic_split_clause_states_same_subject_pose_camera_lighting():
+    clause = generate_image_prompt._semantic_split_clause({
+        "is_split": True, "split_axis": "vertical",
+        "left_or_before": "dry, crepey skin with visible fine lines",
+        "right_or_after": "smooth, hydrated skin with visible firmness",
+    })
+    assert "BEFORE/AFTER SEMANTICS" in clause
+    assert "SAME subject" in clause and "SAME pose" in clause
+    assert "SAME camera angle" in clause and "SAME lighting" in clause
+    assert "dry, crepey skin with visible fine lines" in clause
+    assert "smooth, hydrated skin with visible firmness" in clause
+    assert "VISIBLE IMPROVEMENT" in clause
+
+
+def test_semantic_split_clause_states_it_is_a_different_axis_from_background_variation():
+    """Must say so explicitly, per instruction, so the two can never be read as competing."""
+    clause = generate_image_prompt._semantic_split_clause({"is_split": True, "split_axis": "horizontal"})
+    assert "DIFFERENT axis" in clause
+    assert "REFERENCE photograph" in clause
+
+
+def test_build_image_prompt_semantic_split_reaches_flat_template_and_writer_branches():
+    """Not edit-mode-only - internal half-vs-half consistency matters regardless of
+    which branch assembles the scene text."""
+    bp = _blueprint()
+    bp["semantic_split"] = {"is_split": True, "split_axis": "vertical",
+                             "left_or_before": "before state", "right_or_after": "after state"}
+    flat_prompt = generate_image_prompt.build_image_prompt(bp)
+    assert "before state" in flat_prompt and "after state" in flat_prompt
+
+
+# ---- Item 8 (2026-08-12): face_present consumption - face-to-body substitution ----
+
+def test_face_present_absent_uses_existing_person_clause():
+    instruction = generate_image_prompt._edit_mode_instruction(face_present=None)
+    assert "PERSON:" in instruction
+    assert "PERSON -> BODY AREA" not in instruction
+
+
+def test_face_present_incidental_uses_existing_person_clause():
+    instruction = generate_image_prompt._edit_mode_instruction(
+        face_present={"has_face": True, "prominence": "incidental", "location": "background"}
+    )
+    assert "PERSON:" in instruction
+    assert "PERSON -> BODY AREA" not in instruction
+
+
+def test_face_present_primary_replaces_person_clause_with_body_area():
+    instruction = generate_image_prompt._edit_mode_instruction(
+        face_present={"has_face": True, "prominence": "primary", "location": "centre-frame close-up"}
+    )
+    assert "PERSON -> BODY AREA" in instruction
+    assert "arm, neck, stomach, or legs" in instruction
+    assert "NOT a crop" in instruction and "NOT a face-swap" in instruction
+    # The general REPRODUCE/SUBSTITUTE PERSON clause must not ALSO be present - one
+    # instruction, not two competing ones about the same subject.
+    assert "PERSON: if a person appears" not in instruction
+
+
+def test_face_present_primary_still_defers_to_rules_10_and_11():
+    instruction = generate_image_prompt._edit_mode_instruction(
+        face_present={"has_face": True, "prominence": "primary", "location": "centre"}
+    )
+    assert "Rules 10/11 above" in instruction
+
+
+def test_build_image_prompt_edit_mode_reads_face_present_from_blueprint():
+    bp = _blueprint()
+    bp["face_present"] = {"has_face": True, "prominence": "primary", "location": "centre"}
+    prompt = generate_image_prompt.build_image_prompt(bp, edit_mode=True)
+    assert "PERSON -> BODY AREA" in prompt
+
+
+# ---- Item 9 (2026-08-12): text duplication - one unified canvas, highest risk in
+# split-screen/before-after/multi-panel layouts ----
+
+def test_canvas_unity_clause_present_when_text_substituted_into_existing_zone():
+    instruction = generate_image_prompt._edit_mode_instruction(
+        text_in_image=True, headline="Firmer skin, naturally",
+    )
+    assert "The output canvas is ONE unified space" in instruction
+    assert "EXACTLY ONCE across the entire frame" in instruction
+    assert "never once per panel or half" in instruction
+
+
+def test_canvas_unity_clause_present_when_text_added_to_negative_space():
+    instruction = generate_image_prompt._edit_mode_instruction(
+        text_in_image=True, headline="Firmer skin, naturally", reference_has_text_zone=False,
+    )
+    assert "The output canvas is ONE unified space" in instruction
+
+
+def test_canvas_unity_clause_absent_when_text_suppressed():
+    """Nothing to duplicate when text itself is off - must not appear as dead weight."""
+    instruction = generate_image_prompt._edit_mode_instruction(text_in_image=False)
+    assert "The output canvas is ONE unified space" not in instruction

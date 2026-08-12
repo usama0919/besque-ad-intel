@@ -830,8 +830,12 @@ nickname and first initial only — no ages, no full names, no platform name.
 - Prompt-only rules DO NOT BIND on the image path. A prompt stating PRODUCTLESS MODE
   four times still rendered a bottle.
 - Name the files in every task; unscoped tasks cost 20+ minutes.
-- Never run the full suite. The five `:5433` failures are a missing local test Postgres,
-  not regressions.
+- Never run the full suite. All `:5433` failures in `tests/test_core.py` are
+  pre-existing - a missing local test Postgres, not regressions. No fixed count: it was
+  five when this rule was first written, is 19 as of 2026-08-11 evening, and will keep
+  growing as DB-backed tests are added to that file - don't treat any number here as
+  the invariant, only the file and the error signature (`psycopg2.OperationalError`,
+  port 5433, connection refused).
 - No `ad_id`, `page_id` or `competitor_id` in `src/`. Example ads are evidence of a
   failure, never the scope of a fix.
 
@@ -1032,3 +1036,31 @@ read pattern never crosses call boundaries. **This must be removed (return value
 threaded explicitly instead) before any parallelism work starts** — the moment two calls
 to the same function can overlap, this becomes a genuine cross-request data leak, not
 just an architectural smell.
+
+### OCCLUDE_PERSON — probed 2026-08-13, not viable as built, stays default OFF
+`_derive_occlusion_box` keyword-matches `face_present.location`'s free text against a
+generous fixed set of position buckets (upper/lower/left/right/centre) - but
+`face_present.location` describes where the FACE is, not where the PERSON's whole body
+is. On ad `1859386398364761` (`face_present.location` = "Upper-centre of frame, face
+angled downward...") it derived `(0, 0, 768, 894)` on a 768x1376 source - full width, top
+65% of the frame. That block covers the headline and any logo sitting in the upper
+region while leaving the subject's lower body and clothing (the actual identity-bearing
+region the whole exercise exists to occlude) fully exposed - the **inverse** of what
+Item 1 needed. Confirmed via `scripts/occlusion_probe.py` (throwaway, not in `src/`) -
+no Gemini call, no DB write, just the real stored image + the real stored
+`face_present` value.
+
+**Root cause**: the blueprint has no person/subject bounding box at all -
+`face_present.location` was only ever designed to localise the FACE (for the
+face-to-body substitution decision, Item 8), and a keyword-matched box derived from
+face-location text has no way to also cover a body that may extend well outside the
+region the face itself occupies. There is no segmentation/detection library in this
+codebase to derive one directly from pixels either (evaluated and set aside earlier this
+session - `opencv-python-headless` alone is a ~60MB wheel for a single detector).
+
+**Next step, not built**: a `subject_bbox` field, populated by `deconstruct.py` itself
+(the vision model can plausibly localise "where is the human subject" as its own
+question, the same way it already localises `face_present`/`structural_zones`), giving
+`_occlude_person_region` a real region to work from instead of inferring one from
+face-location keywords. `OCCLUDE_PERSON` stays default OFF until that exists - flipping
+it on today would reliably occlude the wrong part of the frame.

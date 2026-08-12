@@ -41,7 +41,11 @@ WRITER_SYSTEM = (
     "codename nano banana), for Besque, a natural body-oil skincare brand for women 40+. "
     "You are NOT writing brand rules, compliance rules, or the product's exact ingredient "
     "list - those are enforced separately and mechanically by the calling system; do not "
-    "restate, invent, or contradict them. Your job is purely creative: scene and setting, "
+    "restate, invent, or contradict them. In particular, if your scene includes a human "
+    "subject, never assign or imply a specific age or a youthful descriptor (e.g. do not "
+    "write 'a young woman' or 'a woman in her 20s/30s') - subject age is governed entirely "
+    "by a brand-level rule appended separately, and a specific age you invent here would "
+    "compete with it. Your job is purely creative: scene and setting, "
     "subject, product placement, text content and styling if any is mentioned below, "
     "colour palette, and realism/production register. Write ONE flowing paragraph of plain "
     "prose - no headers, no bullet points, no markdown, no JSON inside the description "
@@ -108,53 +112,54 @@ def effective_body_area(blueprint, body_area):
 # of the bottle (and its label) always matches the surrounding scene's own visual style. Fixed
 # to say "accurate and legible, rendered in this scene's own illustrated visual language".
 STYLE_GUIDANCE = {
-    "ugc_native": (
+    # 2026-08-11: keys renamed ugc_native->ugc, high_spec_studio->high_spec, and "hybrid"
+    # dropped entirely, matching the tightened production_style.style enum in
+    # schema/blueprint.schema.json (deconstruct.py's classifier prompt now instructs the
+    # UGC signals directly, so this entry restates the same observable vocabulary - phone-
+    # camera framing, available light, imperfect composition, domestic setting, natural
+    # grain - for the writer/edit-mode consumers of this dict specifically).
+    "ugc": (
         "Framing: extremely realistic UGC-style photograph, shot on a smartphone/phone front "
-        "camera, authentic phone-camera quality, not professionally staged or shot. Imperfection "
-        "cues are critical - without them the output skews too polished: slightly grainy, "
-        "authentic amateur photo quality, minor grain and imperfect exposure, slight natural lens "
-        "characteristics, casual and unposed like a genuine quick photo, natural imperfections, "
-        "raw and unpolished, no studio polish, no AI-smooth skin. Lighting: natural indoor or "
-        "window light for a daytime scene; for an evening or low-light scene, state the time of "
-        "day explicitly (e.g. warm artificial evening bathroom lighting only, no natural "
-        "daylight) - left unstated, the model defaults to bright even daylight regardless of what "
-        "the scene otherwise describes. Describe shadows as realistic, never as 'dramatic' or "
-        "'cinematic' - those two words push the look toward a studio production instead. Skin/"
-        "subject: realistic natural skin texture with visible fine lines, freckles, and authentic "
-        "detail, not overly airbrushed; genuine, unposed, candid framing; for an older/mature "
-        "subject specifically, describe the skin as authentic and dignified so the model doesn't "
-        "over-smooth it."
+        "camera, authentic phone-camera quality, not professionally staged or shot - an "
+        "authentic UNPOLISHED look, never a polished studio look mistaken for this register. "
+        "Setting: a domestic or non-studio setting (bathroom, bedroom, kitchen, car, outdoors), "
+        "never a studio or professionally art-directed backdrop. Imperfection cues are critical "
+        "- without them the output skews too polished: slightly grainy, authentic amateur photo "
+        "quality, minor grain and imperfect exposure, slight natural lens characteristics, "
+        "casual and unposed like a genuine quick photo, natural imperfections, raw and "
+        "unpolished, no studio polish, no AI-smooth skin. Composition: imperfect and "
+        "unposed - off-centre, slightly tilted, or awkwardly cropped, like a real quick photo, "
+        "never a deliberately balanced studio composition. Lighting: natural indoor or window "
+        "light for a daytime scene, available/uncontrolled light only - never a lighting rig; "
+        "for an evening or low-light scene, state the time of day explicitly (e.g. warm "
+        "artificial evening bathroom lighting only, no natural daylight) - left unstated, the "
+        "model defaults to bright even daylight regardless of what the scene otherwise "
+        "describes. Describe shadows as realistic, never as 'dramatic' or 'cinematic' - those "
+        "two words push the look toward a studio production instead. Skin/subject: realistic "
+        "natural skin texture with visible fine lines, freckles, and authentic detail, not "
+        "overly airbrushed; genuine, unposed, candid framing; for an older/mature subject "
+        "specifically, describe the skin as authentic and dignified so the model doesn't "
+        "over-smooth it. Post-processing (STRICT, 2026-08-12): NO retouching, NO AI "
+        "brightness lift, and NO colour grading of any kind - a real UGC photo straight "
+        "off a phone has none of these, and applying any of them is what turns this "
+        "register into a studio finish. Skin texture specifically must show the SAME lack "
+        "of polish as the rest of the frame - grain, imperfect exposure, and unretouched "
+        "skin are one consistent look, not skin rendered smoother/brighter than the "
+        "surrounding photo. A UGC reference rendered with a studio finish (smoothed, "
+        "colour-graded, or brightness-lifted, even subtly) is a failure of this register, "
+        "not a stylistic variant of it."
     ),
-    "high_spec_studio": (
+    "high_spec": (
         "Framing: high-end studio product photograph, professional editorial beauty-campaign "
         "lighting, polished and editorial, premium beauty-brand aesthetic, ultra-realistic "
         "high-end product photography. Lighting: soft diffused key light with subtle rim "
         "lighting, sharp studio lighting with a clean reflection on the glass, gentle highlights, "
         "shallow depth of field with the subject in sharp focus. 'Dramatic' and 'cinematic' both "
-        "belong here, not in ugc_native. Composition: clean and minimal, sophisticated and "
+        "belong here, not in ugc. Composition: clean and minimal, sophisticated and "
         "luxurious, a high-end editorial skincare aesthetic matching a luxury brand campaign. "
         "Describe only how the product is lit and shot, never its own geometry or label (fixed "
         "elsewhere): realistic glass reflections, accurate light falloff, natural shadows, sharp "
         "label detail, true-to-life material texture."
-    ),
-    "hybrid": (
-        "Framing: a realistic UGC-style photo of a physical object - whiteboard, notebook, "
-        "printed page - propped or resting on a real surface. The single most important "
-        "instruction for this register: state explicitly that the base layer IS a real "
-        "photograph and the illustrated/graphic element is drawn ON that real surface - without "
-        "this, the model treats the whole image as one flat illustration instead of a photo with "
-        "a graphic on it. Diagram/whiteboard cues: a hand-drawn marker diagram in a casual "
-        "explainer style, black marker with a colour accent marker for highlights, realistic "
-        "dry-erase marker smudges and slight unevenness in line thickness, authentic whiteboard "
-        "surface texture with soft reflections from natural light. Text-in-photo: specify the "
-        "handwriting look explicitly - casual natural handwriting with slightly uneven lines, or "
-        "authentic handwritten style, not a clean digital font; for pen/marker on skin or paper, "
-        "describe a black sketch pen or marker, casual handwriting, following the natural curve "
-        "of the surface. Physical realism bridge, the part most prone to breaking: resting "
-        "shadow, realistic paper texture, authentic curling or lifting at the corners, slight "
-        "bend around the bottle's curve - these are what make a graphic (sticky note, printed "
-        "page, taped photo) look physically present in the photographed scene rather than pasted "
-        "on top."
     ),
     "illustrated": (
         "Framing: name the exact reference style, never a generic label - '3D Pixar/Disney "
@@ -342,7 +347,7 @@ def _build_user_prompt(blueprint, product=None, angle=None, realism=None, body_a
     if realism:
         # realism="(auto)" on the run strip resolves to empty/None here, which falls back
         # to the reference ad's OWN detected production_style - never to no signal at all,
-        # which is exactly how a photographic (high_spec_studio) reference produced fully
+        # which is exactly how a photographic (high_spec) reference produced fully
         # illustrated output (drawn eyes, painted skin, rendered bottle) in a real run.
         effective_realism = realism
     else:
@@ -350,7 +355,7 @@ def _build_user_prompt(blueprint, product=None, angle=None, realism=None, body_a
     if effective_realism:
         lines.append(
             f"Realism / medium (STRICT, overrides anything above): {effective_realism}. "
-            f"high_spec_studio, ugc_native, and hybrid all mean a PHOTOGRAPH - real light, "
+            f"high_spec and ugc both mean a PHOTOGRAPH - real light, "
             f"real skin, real materials, camera-realistic rendering throughout. illustrated "
             f"means NOT a photograph at all - a drawn or rendered whiteboard diagram, 3D "
             f"render, or comic-strip panel, with no photographic lighting and no "

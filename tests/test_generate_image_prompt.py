@@ -124,28 +124,31 @@ def test_plain_template_branch_explicit_realism_wins_over_blueprint_style():
     must win over the blueprint's own detected production_style here too, same as edit
     mode - never a different resolution order for this branch."""
     bp = _blueprint()
-    bp["production_style"] = {"style": "high_spec_studio"}
+    bp["production_style"] = {"style": "high_spec"}
     prompt = generate_image_prompt.build_image_prompt(bp, realism="illustrated")
     assert generate_image_prompt_writer.STYLE_GUIDANCE["illustrated"] in prompt
-    assert generate_image_prompt_writer.STYLE_GUIDANCE["high_spec_studio"] not in prompt
+    assert generate_image_prompt_writer.STYLE_GUIDANCE["high_spec"] not in prompt
 
 
 def test_plain_template_branch_falls_back_to_blueprint_style_when_realism_omitted():
     """Companion to the override test above - confirms the fallback leg of the same
     precedence still works when realism is None (today's existing, unchanged behaviour)."""
     bp = _blueprint()
-    bp["production_style"] = {"style": "ugc_native"}
+    bp["production_style"] = {"style": "ugc"}
     prompt = generate_image_prompt.build_image_prompt(bp, realism=None)
-    assert generate_image_prompt_writer.STYLE_GUIDANCE["ugc_native"] in prompt
+    assert generate_image_prompt_writer.STYLE_GUIDANCE["ugc"] in prompt
 
 
 def test_style_guidance_has_every_canonical_style():
     """Mirrors the module-level assertion in generate_image_prompt_writer.py - a schema
     addition to validator.production_styles() can't silently ship without matching
     guidance text, for any of STYLE_GUIDANCE's three consumers (writer, edit mode, and
-    this flat-template branch)."""
+    this flat-template branch). Full equality, not just subset (2026-08-11): the enum was
+    tightened the same session (ugc_native/high_spec_studio renamed, hybrid dropped) - an
+    orphaned STYLE_GUIDANCE key that no longer matches any enum value is exactly the drift
+    this test exists to catch, in either direction."""
     from src import validator
-    assert set(validator.production_styles()) <= set(generate_image_prompt_writer.STYLE_GUIDANCE)
+    assert set(validator.production_styles()) == set(generate_image_prompt_writer.STYLE_GUIDANCE)
 
 
 # ---- Part 4: conditional brand_rules() ----
@@ -156,7 +159,10 @@ def test_brand_rules_default_reproduces_prior_rules_verbatim():
     string literal copied from the file as it existed before the constant->function
     refactor - it is NOT imported from or derived from generate_image_prompt in any way,
     so this can't pass by comparing the code to itself."""
-    from src.generate_image_prompt import brand_rules, _RULE_8_LAYOUT_IS_COMPOSITION
+    from src.generate_image_prompt import (
+        brand_rules, _RULE_8_LAYOUT_IS_COMPOSITION, _RULE_10_SUBJECT_AGE,
+        _RULE_11_SKIN_TEXTURE_REALISM,
+    )
     from src.compliance_rules import COMPLIANCE_RULES
 
     OLD_BRAND_RULES_THROUGH_RULE_7 = (
@@ -174,9 +180,13 @@ def test_brand_rules_default_reproduces_prior_rules_verbatim():
 
     assert result.startswith(OLD_BRAND_RULES_THROUGH_RULE_7)
     assert result.endswith(COMPLIANCE_RULES)
-    # Pins down the ENTIRE string: the only thing brand_rules() adds beyond the old
-    # verbatim text is rule 8, in exactly this position - no reordering, no extra content.
-    assert result == OLD_BRAND_RULES_THROUGH_RULE_7 + _RULE_8_LAYOUT_IS_COMPOSITION + COMPLIANCE_RULES
+    # Pins down the ENTIRE string: the only things brand_rules() adds beyond the old
+    # verbatim text are rule 8, rule 10 (SUBJECT AGE, 2026-08-11), and rule 11 (SKIN
+    # TEXTURE REALISM, 2026-08-12) - both 10 and 11 unconditional, see their own docstring
+    # for why they're positioned after the edit-mode-only rule 9 rather than renumbering
+    # it - in exactly this position, no reordering, no extra content.
+    assert result == (OLD_BRAND_RULES_THROUGH_RULE_7 + _RULE_8_LAYOUT_IS_COMPOSITION
+                       + _RULE_10_SUBJECT_AGE + _RULE_11_SKIN_TEXTURE_REALISM + COMPLIANCE_RULES)
 
 
 def test_rule7_relaxes_when_include_product_false():
@@ -213,6 +223,98 @@ def test_rule8_layout_is_composition_present():
     result = brand_rules()
     assert "LAYOUT DESCRIPTORS ARE COMPOSITION, NOT TEXT" in result
     assert "'headline'" in result and "'stacked'" in result
+
+
+# ---- Rule 10: SUBJECT AGE (2026-08-11) - a brand constant, not a detection field. Must
+# fire on EVERY generation path (flat template, writer/creative_description, edit mode),
+# unlike rule 9 which is edit-mode-only. ----
+
+def test_rule10_subject_age_present_by_default():
+    """2026-08-12: rule 10 rewritten for specificity (item 3) - "must NOT be inherited"
+    became "age is never one of the reproduced/matched attributes... with no exception",
+    stated as winning over any competing age/appearance instruction elsewhere."""
+    from src.generate_image_prompt import brand_rules
+    result = brand_rules()
+    assert "10) SUBJECT AGE" in result
+    assert "45-60" in result
+    assert "age is never one of the reproduced/matched attributes" in result
+    assert "OVERRIDES ANY OTHER" in result
+
+
+def test_rule10_subject_age_present_in_edit_mode_alongside_rule_9():
+    """Additive to rule 9, not a replacement - both must be present in edit mode."""
+    from src.generate_image_prompt import brand_rules
+    result = brand_rules(edit_mode=True)
+    assert "10) SUBJECT AGE" in result
+    assert "9) SOURCE IMAGE IS THE COMPETITOR'S OWN AD" in result
+
+
+def test_rule10_subject_age_reaches_flat_template_branch():
+    """build_image_prompt's flat-template branch (no edit_mode, no creative_description)
+    must carry rule 10 - it's inside brand_rules(), called unconditionally in every branch."""
+    prompt = generate_image_prompt.build_image_prompt(_blueprint())
+    assert "SUBJECT AGE" in prompt
+    assert "45-60" in prompt
+
+
+def test_rule10_subject_age_reaches_edit_mode_branch():
+    prompt = generate_image_prompt.build_image_prompt(_blueprint(), edit_mode=True)
+    assert "SUBJECT AGE" in prompt
+    assert "45-60" in prompt
+
+
+# ---- scene_elements consumption (2026-08-11 schema addition, Item 9): a positive
+# inclusion list, only entries flagged essential=true, phrased as MUST-include rather
+# than a prohibition. ----
+
+def test_scene_elements_clause_empty_when_absent():
+    assert generate_image_prompt._scene_elements_clause(None) == ""
+    assert generate_image_prompt._scene_elements_clause([]) == ""
+
+
+def test_scene_elements_clause_omits_non_essential_entries():
+    elements = [{"element": "a folded towel", "role": "background", "essential": False}]
+    assert generate_image_prompt._scene_elements_clause(elements) == ""
+
+
+def test_scene_elements_clause_includes_essential_entries_by_name_and_role():
+    elements = [
+        {"element": "wooden bathroom shelf", "role": "product rests on it", "essential": True},
+        {"element": "a folded towel", "role": "background set-dressing", "essential": False},
+    ]
+    clause = generate_image_prompt._scene_elements_clause(elements)
+    assert "SCENE ELEMENTS TO INCLUDE" in clause
+    assert "wooden bathroom shelf" in clause
+    assert "product rests on it" in clause
+    assert "MUST appear" in clause
+    # non-essential entry must not be forced into the inclusion list
+    assert "a folded towel" not in clause
+
+
+def test_scene_elements_clause_reaches_flat_template_branch():
+    bp = _blueprint()
+    bp["scene_elements"] = [{"element": "a second person's hand", "role": "applying the product",
+                              "essential": True}]
+    prompt = generate_image_prompt.build_image_prompt(bp)
+    assert "a second person's hand" in prompt
+    assert "SCENE ELEMENTS TO INCLUDE" in prompt
+
+
+def test_scene_elements_clause_reaches_edit_mode_branch():
+    bp = _blueprint()
+    bp["scene_elements"] = [{"element": "a wicker basket", "role": "holds the product",
+                              "essential": True}]
+    prompt = generate_image_prompt.build_image_prompt(bp, edit_mode=True)
+    assert "a wicker basket" in prompt
+
+
+def test_scene_elements_absent_produces_no_change():
+    """A blueprint from before this field existed produces byte-for-byte the same prompt
+    as before this existed."""
+    with_key = generate_image_prompt.build_image_prompt({**_blueprint(), "scene_elements": []})
+    without_key = generate_image_prompt.build_image_prompt(_blueprint())
+    assert with_key == without_key
+    assert "SCENE ELEMENTS TO INCLUDE" not in with_key
 
 
 def test_build_image_prompt_default_closing_text_unchanged():

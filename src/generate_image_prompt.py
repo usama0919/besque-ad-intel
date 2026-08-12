@@ -4,7 +4,7 @@ import logging
 import math
 import os
 import re
-from PIL import Image
+from PIL import Image, ImageDraw
 from src import assets, generate_image_prompt_writer, compliance
 from src.compliance_rules import COMPLIANCE_RULES
 
@@ -291,25 +291,37 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
         else:
             product_desc = "(a natural botanical body oil in an elegant bottle). "
         if resolved_product_count and resolved_product_count > 1:
-            # Corrected 2026-08-07: rendering N of the SAME Besque product when the
-            # reference shows N products is reproducing composition, not faking a pair -
-            # the rule against duplication is about inventing a DIFFERENT product, never
-            # about matching a count. An earlier version of this clause banned rendering
-            # more than one bottle outright, which is why two real two-bottle references
-            # (both showing distinct products side by side) both came back with only one
-            # bottle - traced directly to this wording, not to anything upstream.
+            # REVERSED 2026-08-12 (live failure, ad with product_count=5): rule 7 above
+            # already states "exactly one bottle... NEVER add a second bottle... whether
+            # copied from the competitor ad or invented" - unconditionally, every branch.
+            # The clause below used to instruct "place {N} of the Besque product", which
+            # directly contradicted rule 7 in the SAME prompt - two authorities, same
+            # subject, opposite answers. The critic caught it as a HIGH violation and the
+            # actual output rendered 8 bottles. This is not a wording tweak, it is a
+            # structural fix: this branch can no longer construct a sentence asking for
+            # more than one Besque product - there is no code path left that does. What
+            # DOES still vary by count is the COMPOSITION instruction: the reference's
+            # multi-product layout (spacing, framing, negative space sized for several
+            # items) needs to be adapted around a single bottle, not reproduced with empty
+            # slots or a shrunken bottle standing in for a missing set. Kept as its own
+            # branch (rather than collapsing into the ==1 case below) only because that
+            # composition-adaptation instruction has nothing to say when the reference
+            # never had multiple products to adapt away from.
             log.info(
-                "product_count resolved to %s (source=%s) - rendering that many of the "
-                "SAME Besque product, reproducing the reference's own composition/count",
+                "product_count resolved to %s (source=%s) - reference shows multiple "
+                "products, but exactly ONE Besque product renders per rule 7; composition "
+                "adapts around the single bottle instead of reproducing the count",
                 resolved_product_count, product_count_source,
             )
             product_clause = (
-                f"The reference shows {resolved_product_count} products together - place "
-                f"{resolved_product_count} of the Besque product described below, "
-                f"reproducing the reference's own composition and count exactly. Every "
-                f"one is the SAME Besque product - identical bottle, identical label - "
-                f"never a different SKU, size, or variant invented to match whatever the "
-                f"reference's own individual products actually are. Do not render the "
+                f"The reference shows {resolved_product_count} products together, but "
+                f"Besque's product renders as exactly ONE bottle - rule 7 above permits "
+                f"exactly one, with no exception for what the reference happens to show. "
+                f"Adapt the COMPOSITION around that single bottle: keep the reference's "
+                f"setting, lighting, and framing, but resize, recentre, or rebalance the "
+                f"layout so the one bottle occupies the space naturally - never leave empty "
+                f"slots where the reference's other products were, and never shrink the "
+                f"single bottle to read like part of a missing set. Do not render the "
                 f"competitor's product. "
                 + product_desc
             )
@@ -352,6 +364,8 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
                         headline=headline, subtext=subtext, edit_mode=True) +
             _operator_instruction_clause(operator_instruction) +
             _critic_feedback_clause(critic_feedback) +
+            _scene_elements_clause(blueprint.get("scene_elements")) +
+            _semantic_split_clause(blueprint.get("semantic_split")) +
             # include_product here is the RAW operator toggle - identical to
             # effective_include_product since the 2026-08-07 reference usability gate
             # reversal (reference_has_product no longer forces effective_include_product
@@ -374,6 +388,8 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
                                    panel_copy=panel_copy, testimonial=testimonial,
                                    certifications=(product or {}).get("certifications"),
                                    competitor_props_clause=_competitor_props_clause(blueprint),
+                                   face_present=blueprint.get("face_present"),
+                                   testimonial_zones=blueprint.get("testimonial_zones"),
                                    clone_mode=clone_mode) +
             product_clause +
             closing
@@ -389,6 +405,8 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
                         headline=headline, subtext=subtext) +
             _operator_instruction_clause(operator_instruction) +
             _critic_feedback_clause(critic_feedback) +
+            _scene_elements_clause(blueprint.get("scene_elements")) +
+            _semantic_split_clause(blueprint.get("semantic_split")) +
             creative_description.strip() + " "
             + product_clause
             + _bottle_fixed_clause() + _bottle_register_clause(scene_lighting) +
@@ -401,9 +419,12 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
                         headline=headline, subtext=subtext) +
             _operator_instruction_clause(operator_instruction) +
             _critic_feedback_clause(critic_feedback) +
+            _scene_elements_clause(blueprint.get("scene_elements")) +
+            _semantic_split_clause(blueprint.get("semantic_split")) +
             f"A premium skincare advertisement image for Besque, a natural body-oil brand for women 40+. "
             f"Composition and setting: {layout}. (If this implies a person, render them per compliance "
-            f"rule C1 - a generic, non-identifiable model, never the specific individual described.) "
+            f"rule C1 - a generic, non-identifiable model, never the specific individual described - "
+            f"and per rule 10 above, reading 45-60 years old with visibly age-appropriate skin.) "
             + product_clause +
             f"Palette and mood: {palette}. Text placement: {text_placement}. "
             f"Square 1:1 aspect ratio composition. "
@@ -565,19 +586,63 @@ _RULE_9_SOURCE_IMAGE_IS_THE_COMPETITORS_AD = (
 )
 
 
+_RULE_10_SUBJECT_AGE = (
+    "10) SUBJECT AGE (STRICT, BRAND-LEVEL, EVERY GENERATION PATH, OVERRIDES ANY OTHER "
+    "AGE/APPEARANCE INSTRUCTION ANYWHERE IN THIS PROMPT): Besque's audience is women 40+. "
+    "Any human subject appearing anywhere in the output image must read as 45-60 years "
+    "old - visibly midlife, never youthful. Concretely: visible fine lines around the eyes "
+    "and mouth, some natural skin laxity at the jawline/neck, real tone and texture "
+    "variation across the skin, hair that may show natural greying or a mature styling - "
+    "never smooth, poreless, airbrushed, or a visibly younger face with 'mature' framing "
+    "bolted on. Competitor reference ads typically show a model in their 20s-30s: "
+    "rendering that age, or anything read as under 45, is the exact failure this rule "
+    "exists to catch, confirmed live (ad 1986367985280315 shipped a ~30-year-old subject "
+    "unflagged). This rule wins over ANY other instruction in this prompt that describes "
+    "matching, reproducing, or preserving the reference subject's age or appearance - "
+    "including a REPRODUCE/SUBSTITUTE partition elsewhere that covers pose, framing, or "
+    "skin-condition presentation: age is never one of the reproduced/matched attributes, "
+    "on any path, with no exception. "
+)
+
+_RULE_11_SKIN_TEXTURE_REALISM = (
+    "11) SKIN TEXTURE REALISM (STRICT, BRAND-LEVEL, EVERY GENERATION PATH): wherever "
+    "loose, crepey, or aged skin is depicted, it must read as real, photographed human "
+    "skin - irregular wrinkle patterns (never a repeating or symmetrical texture), "
+    "uneven tone and pigmentation, and a real, uneven light response across the skin's "
+    "surface. Uniform texture, poreless smoothness, or a visibly AI-smoothed/plastic look "
+    "is a failure, independently of whether the subject's apparent AGE (rule 10 above) is "
+    "otherwise correct - age-appropriate NUMBER and age-appropriate SKIN TEXTURE are two "
+    "separate requirements; satisfying one does not excuse failing the other. Applies to "
+    "BOTH halves of a before/after composition (see the BEFORE/AFTER SEMANTICS "
+    "instruction below, where one is used), not only the side depicting the concern - the "
+    "after side's improvement must still read as real skin, never a smoothed/idealised "
+    "render standing in for 'better.' "
+)
+
+
 def brand_rules(include_product=True, text_in_image=False, headline=None, subtext=None, edit_mode=False):
     """The mechanically-enforced brand + compliance rules prepended to every image prompt.
     Called with all defaults (include_product=True, text_in_image=False, edit_mode=False),
     this reproduces the old flat BRAND_RULES constant character for character through rule
-    7 - see test_brand_rules_default_reproduces_prior_rules_verbatim. Rule 8, rule 9, and
-    the include_product/text_in_image/edit_mode conditionality are additive, not a rewrite
-    of the existing default path."""
+    7 - see test_brand_rules_default_reproduces_prior_rules_verbatim. Rule 8, rule 9, rule
+    10, and the include_product/text_in_image/edit_mode conditionality are additive, not a
+    rewrite of the existing default path.
+
+    Rule 10 (SUBJECT AGE, 2026-08-11) and rule 11 (SKIN TEXTURE REALISM, 2026-08-12) are
+    both unconditional - unlike rule 9, which is edit-mode-only, these must fire on every
+    path (flat template, writer/creative_description, and edit mode) since the problems
+    they guard against are not specific to edit mode; they happen wherever a person/skin
+    appears in the output. Positioned after rule 9 rather than renumbering it, so edit
+    mode reads 9, 10, 11 and every other path reads 8, 10, 11 (a numbering gap, not a
+    numbering error) rather than disturbing rule 9's own existing number."""
     return (
         _RULES_1_TO_5
         + _rule6_text_policy(text_in_image, headline, subtext)
         + _rule7_product_policy(include_product)
         + _RULE_8_LAYOUT_IS_COMPOSITION
         + (_RULE_9_SOURCE_IMAGE_IS_THE_COMPETITORS_AD if edit_mode else "")
+        + _RULE_10_SUBJECT_AGE
+        + _RULE_11_SKIN_TEXTURE_REALISM
         + COMPLIANCE_RULES
     )
 
@@ -628,6 +693,77 @@ def _critic_feedback_clause(critic_feedback=None):
         f"of this exact image and found it violated the following - every one of these is a "
         f"real defect in what was actually rendered, not a hypothetical, and every one must "
         f"be fixed this time, none may repeat in any form: {bullets} "
+    )
+
+
+def _scene_elements_clause(scene_elements=None):
+    """Item 9 consumption (2026-08-11): deconstruct's scene_elements inventory
+    (schema/blueprint.schema.json), injected as a positive MUST-INCLUDE list - only
+    entries flagged essential=true, each named individually with its own role, never a
+    blanket "keep everything" instruction that would just restate the reproduce-
+    faithfully language already above it in edit mode, and would have nothing to attach
+    to at all in generate mode. Phrased as inclusion, not prohibition, per instruction:
+    this tells the model what must be IN the output, not what to avoid.
+
+    Fixed position, same reasoning as _operator_instruction_clause/_critic_feedback_
+    clause: called identically in all three build_image_prompt branches (edit mode,
+    writer/creative_description, flat template), right after critic feedback and before
+    whatever supplies the scene text - so a reference's essential elements are never lost
+    to whichever branch happens to fire. Returns "" when scene_elements is empty or has
+    nothing flagged essential, so a blueprint from before this field existed produces
+    byte-for-byte the same prompt as before this existed."""
+    essential = [e for e in (scene_elements or []) if e.get("essential")]
+    if not essential:
+        return ""
+    bullets = " ".join(
+        f"({i}) {e.get('element', '')} - {e.get('role', '')}"
+        for i, e in enumerate(essential, start=1)
+    )
+    return (
+        f"SCENE ELEMENTS TO INCLUDE (STRICT): the reference's own composition depends on "
+        f"the following elements - each one MUST appear in the output, named individually "
+        f"with the role it plays here, not merely implied by the setting or left to chance: "
+        f"{bullets} "
+    )
+
+
+def _semantic_split_clause(semantic_split=None):
+    """Item 6 consumption (2026-08-12): deconstruct's semantic_split field
+    (schema/blueprint.schema.json). When a reference is a before/after, side-by-side, or
+    split-screen composition, the two halves of the OUTPUT must hold the same subject,
+    pose, camera angle, and lighting - only the skin condition differs between them. One
+    side shows the concern clearly and realistically; the other shows VISIBLE IMPROVEMENT
+    in that SAME concern - rendering the same condition on both sides is a failure, since
+    the contrast between the two is the entire point of the format.
+
+    INTERNAL to the image (half vs half) - explicitly NOT the same axis as the
+    background-variation allowance elsewhere in this prompt (item 4/edit mode's opening
+    instruction), which governs how much the OUTPUT may vary from the REFERENCE
+    photograph. Stated explicitly, by name, so the two can never be read as competing:
+    one governs output-vs-reference, this one governs half-vs-half within the output.
+
+    Fixed position, same reasoning as _scene_elements_clause: called identically in all
+    three build_image_prompt branches. Returns "" when is_split is false/absent, so a
+    blueprint with no split, or one from before this field existed, produces byte-for-byte
+    the same prompt as before this existed."""
+    semantic_split = semantic_split or {}
+    if not semantic_split.get("is_split"):
+        return ""
+    axis = semantic_split.get("split_axis") or "vertical"
+    before = (semantic_split.get("left_or_before") or "").strip() or "the reference's own before/concern side, as shown"
+    after = (semantic_split.get("right_or_after") or "").strip() or "a visibly improved version of that same concern"
+    return (
+        f"BEFORE/AFTER SEMANTICS (STRICT, INTERNAL TO THE IMAGE - this is a DIFFERENT "
+        f"axis from the background-variation allowance elsewhere in this prompt, which "
+        f"governs how much the output may vary from the REFERENCE photograph, never how "
+        f"the two halves below relate to EACH OTHER): this reference is a {axis} split "
+        f"composition. Both halves MUST show the SAME subject, the SAME pose, the SAME "
+        f"camera angle, and the SAME lighting - the only thing that may differ between "
+        f"them is the skin condition itself. One side shows the concern clearly and "
+        f"realistically: {before}. The other side shows VISIBLE IMPROVEMENT in that SAME "
+        f"concern, on the SAME subject: {after}. Rendering the same skin condition on "
+        f"both sides is a failure - the contrast between them is the entire point of "
+        f"this format. "
     )
 
 
@@ -828,7 +964,8 @@ def _is_stat_shaped_zone(detail):
 
 
 def _structural_zones_clause(structural_zones, zone_copy_text=None, cta_text=None, panel_copy=None,
-                              testimonial=None, certifications=None, offer_text=None, product_name=None):
+                              testimonial=None, certifications=None, offer_text=None,
+                              testimonial_zones=None, callout_copy=None):
     """Wires blueprint.structural_zones (2026-08-06 schema addition) into edit mode - every
     zone type gets a real substitute-or-remove decision now, read from what THIS reference
     actually shows, never a hardcoded position or layout:
@@ -854,14 +991,21 @@ def _structural_zones_clause(structural_zones, zone_copy_text=None, cta_text=Non
       position/shape/size when supplied - a price zone IS an offer zone, whatever its own
       currency/amount said, that's the competitor's price, not Besque's. Removed when
       offer_text is falsy, same as any other suppressed-offer container.
-    - product_callout (2026-08-07, generalised): substituted with product_name (the one
-      real Besque product genuinely being featured) when available - the callout still
-      says something honest, never left as a "New Scent" card with no scent named. Removed
-      when no product_name is available (e.g. productless mode). Checked FIRST, same
-      precedence as award-shaped badges (2026-08-11): a stat-shaped callout (see
-      _is_stat_shaped_zone) ALWAYS removes regardless of product_name - a callout whose
-      reference content is a numeric/percentage/ratio/timescale claim has no Besque
-      counterpart; repeating the product name in that container isn't a substitution.
+    - product_callout (REVERSED 2026-08-12, Item 2 - was substituted with the bare
+      product_name, unconditionally, on EVERY callout zone found; confirmed live, ad
+      1576971893931336: four callout zones with four genuinely distinct reference
+      details - "Flame & Burns"/thermogenic, "Energy", "Tight Skin", "Nail & Hair" - all
+      four rendered the identical string "Besque Magic Body Oil", because nothing ever
+      gave each zone its OWN copy). Now substituted with callout_copy_by_position's
+      entry for THIS zone's own position (see callout_copy below) - a genuine Besque
+      benefit or property per zone, never the product name repeated across several
+      callouts. A zone with no matching callout copy is REMOVED, not filled with a
+      repeated fallback string - this is the actual fix, not a smaller duplicate.
+      Checked FIRST, same precedence as award-shaped badges (2026-08-11): a stat-shaped
+      callout (see _is_stat_shaped_zone) ALWAYS removes regardless of callout copy - a
+      callout whose reference content is a numeric/percentage/ratio/timescale claim has
+      no Besque counterpart; repeating a benefit phrase in that container isn't a
+      substitution either.
     - disclaimer: always REMOVED, same as above, but a legal/regulatory/medical disclaimer
       belonging to the reference brand is never Besque's for ANY product - the removal
       instruction also explicitly takes any pointing asterisk/footnote marker with it, so
@@ -894,13 +1038,45 @@ def _structural_zones_clause(structural_zones, zone_copy_text=None, cta_text=Non
 
     testimonial, when given, is {"quote": str, "attribution": str} - a single real review,
     already selected and length-filtered by the caller (pipeline.py); this function never
-    picks or rewrites it, only decides whether to render it here or remove the zone."""
+    picks or rewrites it, only decides whether to render it here or remove the zone.
+
+    testimonial_zones (Item 1, 2026-08-12 - deconstruct.py's schema field, previously
+    unread anywhere) supplies PLACEMENT/STYLING detail ONLY for the social_proof
+    substitution above - never content. `testimonial` (select_testimonial_review's real
+    review) stays the sole content source; testimonial_zones' own text_verbatim/
+    attribution (the COMPETITOR's testimonial content) is never read here at all. Matched
+    to a social_proof/single_quote zone by ORDINAL position among such zones encountered
+    in structural_zones, not by string-matching testimonial_zones.placement against
+    structural_zones.position - those are two independently-worded free-text fields, and
+    the common case is exactly one testimonial per ad, where ordinal matching is exact
+    and a string-similarity match would only add a way to guess wrong. None (absent, or
+    exhausted before this zone) reproduces the byte-for-byte prior behaviour - the
+    zone's own container/position still govern, just without the extra styling detail.
+
+    callout_copy (Item 2, 2026-08-12) is the SAME shape as panel_copy - a list of
+    {"position", "text"} dicts, generate_copy.text_zone_targets/_text_zone_copy_clause
+    now covering product_callout zones too (_PANEL_COPY_ZONE_TYPES) - but passed as its
+    OWN parameter, deliberately NOT merged into panel_copy: panel_copy is gated by
+    text_in_image at the caller (_edit_mode_instruction), because sub_line/body_copy
+    zones are genuinely part of the same in-image TEXT BUDGET as headline/subtext (rule
+    6's own wording already lists "additional body copy" in that budget). A
+    product_callout is a self-contained visual element with an icon and a short label -
+    the same category as badge/price_anchor/certifications above, none of which are
+    gated by text_in_image - so callout_copy is passed UNGATED, and product_callout
+    keeps working exactly like badge/price_anchor do regardless of the operator's
+    text_in_image choice."""
     substituted_zone_types = set()
+    testimonial_zones = testimonial_zones or []
+    testimonial_zone_index = 0
     if not structural_zones:
         return "", substituted_zone_types
 
     panel_copy_by_position = {
         p.get("position"): p.get("text") for p in (panel_copy or [])
+        if isinstance(p, dict) and p.get("position") and p.get("text")
+    }
+    callout_copy_by_position = {
+        p.get("position"): p.get("text") for p in (callout_copy or [])
         if isinstance(p, dict) and p.get("position") and p.get("text")
     }
 
@@ -919,12 +1095,25 @@ def _structural_zones_clause(structural_zones, zone_copy_text=None, cta_text=Non
             )
             substituted_zone_types.add(zt)
         elif zt in ("sub_line", "body_copy"):
-            text_for_zone = panel_copy_by_position.get(z.get("position")) or zone_copy_text
-            if text_for_zone:
+            panel_text = panel_copy_by_position.get(z.get("position"))
+            if panel_text:
                 substitute_lines.append(
                     f"- {zt} at {pos} (container: {container}): replace its wording with "
-                    f"\"{text_for_zone}\" - same position, same container, matching the "
+                    f"\"{panel_text}\" - same position, same container, matching the "
                     f"reference's own line count for this zone where possible, our words only."
+                )
+                substituted_zone_types.add(zt)
+            elif zone_copy_text:
+                # No distinct panel copy for this position - it would otherwise fall
+                # back to re-quoting the same subtext already stated by rule 6's TEXT
+                # POLICY and by _edit_mode_instruction's own TEXT branch, producing a
+                # third literal occurrence of the identical string (2026-08-13 live
+                # finding). Reference that authorisation instead of re-quoting it.
+                substitute_lines.append(
+                    f"- {zt} at {pos} (container: {container}): replace its wording with "
+                    f"the same supporting text already authorised above (TEXT POLICY) - "
+                    f"same position, same container, matching the reference's own line "
+                    f"count for this zone where possible, never a different string."
                 )
                 substituted_zone_types.add(zt)
             else:
@@ -978,32 +1167,63 @@ def _structural_zones_clause(structural_zones, zone_copy_text=None, cta_text=Non
         elif zt == "product_callout":
             detail = z.get("detail") or ""
             # Checked first, same reasoning as award-shaped badges above: a stat-shaped
-            # callout has no Besque counterpart at all - Besque's product name is not a
+            # callout has no Besque counterpart at all - a benefit phrase is not a
             # substitute for someone else's numeric claim, so this wins regardless of
-            # whether product_name is available.
+            # whether callout copy is available.
             if _is_stat_shaped_zone(detail):
                 remove_lines.append(f"- product_callout at {pos} (container: {container})")
-            elif product_name:
-                substitute_lines.append(
-                    f"- product_callout at {pos} (container: {container}): replace its "
-                    f"content with {product_name} - same position and shape, our real "
-                    f"product named honestly, never the competitor's variant/descriptor."
-                )
-                substituted_zone_types.add(zt)
             else:
-                remove_lines.append(f"- product_callout at {pos} (container: {container})")
+                # REVERSED 2026-08-12 (Item 2): was `elif product_name:` - substituted
+                # the bare product name into EVERY callout zone found, unconditionally.
+                # Confirmed live: 4 distinct reference callouts (thermogenic/energy/
+                # skin-tightening/nail-and-hair) all rendered the identical "Besque
+                # Magic Body Oil". Now keyed by THIS zone's own position into
+                # callout_copy_by_position (generate_copy.py's per-zone panel_copy,
+                # ungated by text_in_image - see this function's own docstring) - a
+                # zone with no matching callout copy is REMOVED, never filled with a
+                # repeated fallback string.
+                text_for_zone = callout_copy_by_position.get(z.get("position"))
+                if text_for_zone:
+                    substitute_lines.append(
+                        f"- product_callout at {pos} (container: {container}): replace "
+                        f"its content with \"{text_for_zone}\" - a genuine Besque "
+                        f"benefit or property specific to THIS callout, same position "
+                        f"and shape, never the product name and never the same text "
+                        f"as any other callout in this image."
+                    )
+                    substituted_zone_types.add(zt)
+                else:
+                    remove_lines.append(f"- product_callout at {pos} (container: {container})")
         elif zt == "disclaimer":
             disclaimer_lines.append(f"- disclaimer at {pos} (container: {container})")
         elif zt == "social_proof":
             kind = z.get("social_proof_kind")
             if kind == "single_quote" and testimonial and testimonial.get("quote"):
                 attribution = testimonial.get("attribution") or "a verified customer"
+                # testimonial_zones supplies PLACEMENT/STYLING only (see this function's
+                # own docstring) - matched by ordinal position among social_proof/
+                # single_quote zones, never by string-matching two independently-worded
+                # free-text fields. Exhausted/absent leaves styling_instruction empty -
+                # byte-for-byte the prior wording, just without the extra detail.
+                styling_zone = (testimonial_zones[testimonial_zone_index]
+                                if testimonial_zone_index < len(testimonial_zones) else None)
+                testimonial_zone_index += 1
+                styling_instruction = ""
+                if styling_zone and styling_zone.get("styling"):
+                    styling_instruction = (
+                        f" Match this reference's own styling for the card/container "
+                        f"itself (never its wording, which comes only from the real "
+                        f"review above): {styling_zone['styling']}"
+                    )
+                    if styling_zone.get("placement"):
+                        styling_instruction += f" Position it at {styling_zone['placement']}."
                 substitute_lines.append(
                     f"- social_proof (single_quote) at {pos} (container: {container}): "
                     f"replace with this REAL customer review, rendered EXACTLY as given, "
                     f"never reworded, shortened, or invented: \"{testimonial['quote']}\" "
                     f"— attributed to {attribution}. No star rating, age, or timeframe "
                     f"unless the review text itself states one."
+                    + styling_instruction
                 )
                 substituted_zone_types.add(zt)
             else:
@@ -1222,7 +1442,8 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
                             typography_zones=None,
                             structural_zones=None, cta_text=None, product_name=None,
                             panel_copy=None, testimonial=None, certifications=None,
-                            competitor_props_clause="", clone_mode=False):
+                            competitor_props_clause="", face_present=None,
+                            testimonial_zones=None, clone_mode=False):
     """EDIT MODE (2026-08-01): Gemini receives the competitor's own ad as an input image
     Part, not just a text description of it - the reference image IS the creative brief,
     so no template scene/layout/palette description is assembled here (see
@@ -1336,11 +1557,21 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
     exactly as it appears" catch-all lines below, none of which named the person either
     way. Fixed the same way colour/text/offer already are: a new named PERSON row in
     this same enumerated partition (added once, unconditionally, after the product
-    branches - see below), stating REPRODUCE for the person's pose/framing/lighting and
-    SUBSTITUTE for the person themselves, PLUS carving the person out of all five
-    "everything else" catch-all lines so they no longer contradict it. Without the
-    catch-all edit the new clause would just be demanded and forbidden in the same
-    prompt - the exact shape that produced artifact 1136's fabricated testimonials."""
+    branches - see below), PLUS carving the person out of all five "everything else"
+    catch-all lines so they no longer contradict it. Without the catch-all edit the new
+    clause would just be demanded and forbidden in the same prompt - the exact shape
+    that produced artifact 1136's fabricated testimonials.
+
+    AUDIT, item 3 (2026-08-12): the PERSON row's original REPRODUCE side listed pose,
+    body position, and wardrobe silhouette alongside pure camera mechanics - reproducing
+    most of the person's identity while calling the OTHER half (face/hair) a
+    "substitution." Confirmed live (ad 1859386398364761: same face, clothing, and pose
+    all survived). Rewritten so REPRODUCE covers only camera/scene mechanics (framing,
+    crop, camera angle, distance, lighting, compositional position); pose, body
+    position, and wardrobe moved to SUBSTITUTE. The retheme_colours opening (both
+    branches) also used to imply the person's own pose/wardrobe carried over as part of
+    "geometry preserved"/"overall layout reproduced" - both now say explicitly that this
+    does not extend to the person, deferring entirely to PERSON below."""
     suppressing_text = not (text_in_image and headline)
     # Clone mode (2026-08-11): the OFFER clause below used to trust offer_text's own
     # truthiness alone and ask Gemini to judge VISUALLY whether the reference shows an
@@ -1381,14 +1612,21 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
         opening = (
             "EDIT MODE: the FIRST attached image is the competitor's own advertisement. "
             "This is a single instruction with two parts, not two competing ones: "
-            "geometry is preserved, colour is substituted. Composition, layout, camera "
-            "angle, spacing, lighting direction, contrast relationships, tonal "
-            "hierarchy, and text placement all carry over EXACTLY as shot in the "
-            "reference - do not change the framing, angle, spacing, or structure in any "
-            "way. "
+            "geometry is preserved with a small, natural amount of variation - not a "
+            "mechanically exact clone - and colour is substituted. Composition, layout, "
+            "camera angle, spacing, lighting direction, contrast relationships, tonal "
+            "hierarchy, and text placement all carry over CLOSELY as shot in the "
+            "reference: camera angle, framing, background detail, or prop arrangement "
+            "may shift by roughly 5-8%, the same way two real photographs of the same "
+            "real scene, taken moments apart, are never pixel-identical. This is a "
+            "small natural variation only, never a different composition - the overall "
+            "structure and which non-person elements appear must still carry over from "
+            "the reference. This does NOT extend to the person - see PERSON below, "
+            "which governs pose, body position, and wardrobe separately and overrides "
+            "anything about the person implied here. "
             + exception_clause +
             f"At the same time, every hue in the scene (background, props, "
-            f"wardrobe, surfaces) re-maps to Besque's palette: {effective_palette} - "
+            f"surfaces) re-maps to Besque's palette: {effective_palette} - "
             f"overriding the reference's own colours entirely. This colour substitution "
             f"NEVER reaches text/typography (see TEXT below - its colour is INHERITED "
             f"from the reference, not re-themed) or a substituted offer/price badge's own "
@@ -1399,7 +1637,12 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
         opening = (
             "EDIT MODE: the FIRST attached image is the competitor's own advertisement. "
             "Reproduce its composition, background, camera angle, lighting, colour "
-            "palette, text placement, and overall layout as closely as possible. "
+            "palette, text placement, and overall layout closely, with a small, "
+            "natural 5-8% variation allowed in camera angle, framing, background "
+            "detail, or prop arrangement - not a mechanically exact clone, but never a "
+            "different composition either. This does NOT extend to the person - see "
+            "PERSON below, which governs pose, body position, and wardrobe separately "
+            "and overrides anything about the person implied here. "
             + exception_clause
         )
     opening += _register_clause(style, scene_lighting)
@@ -1418,8 +1661,8 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             f"this scale in this style; name and colour accuracy matter, secondary-text "
             f"legibility does not. "
             + _substance_recolour_clause(substance_colour) +
-            "Everything else in the scene - EXCEPT THE PERSON, see PERSON below - stays "
-            "exactly as it appears in the source image. "
+            "Everything else in the scene - EXCEPT THE PERSON, see PERSON below - carries over "
+            "from the source image exactly as the reproduce-faithfully instruction above states (never a stricter 'exactly' reintroduced here, including its small natural variation allowance). "
         )
     elif include_product and reference_has_product:
         lighting_facts = _scene_lighting_facts(scene_lighting)
@@ -1441,8 +1684,8 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             "any) in its position, at its scale, matching the original shot's composition "
             "as faithfully as possible. " + lighting_instruction
             + _substance_recolour_clause(substance_colour) +
-            "Everything else in the scene - EXCEPT THE PERSON, see PERSON below - stays "
-            "exactly as it appears in the source image. "
+            "Everything else in the scene - EXCEPT THE PERSON, see PERSON below - carries over "
+            "from the source image exactly as the reproduce-faithfully instruction above states (never a stricter 'exactly' reintroduced here, including its small natural variation allowance). "
         )
     elif include_product and not reference_has_product and style == "illustrated":
         # ADD, illustrated register (2026-08-07, reference usability gate reversal): the
@@ -1476,8 +1719,8 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             # none almost certainly has no such substance to recolour either, so this
             # would be dead weight text (same reasoning the substitute branches' use of
             # it doesn't need to restate).
-            "Everything else in the scene - EXCEPT THE PERSON, see PERSON below - stays "
-            "exactly as it appears in the source image, aside from this addition. "
+            "Everything else in the scene - EXCEPT THE PERSON, see PERSON below - carries over "
+            "from the source image exactly as the reproduce-faithfully instruction above states (never a stricter 'exactly' reintroduced here, including its small natural variation allowance), aside from this addition. "
         )
     elif include_product and not reference_has_product:
         # ADD, photographic register (2026-08-07, reference usability gate reversal):
@@ -1506,15 +1749,17 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             + lighting_instruction
             # No _substance_recolour_clause here either - see the illustrated ADD
             # branch's own comment above for why.
-            + "Everything else in the scene - EXCEPT THE PERSON, see PERSON below - stays "
-            "exactly as it appears in the source image, aside from this addition. "
+            + "Everything else in the scene - EXCEPT THE PERSON, see PERSON below - carries over "
+            "from the source image exactly as the reproduce-faithfully instruction above states (never a stricter 'exactly' reintroduced here, including its small natural variation allowance), aside from this addition. "
         )
     else:
         base = opening + (
             "This is a deliberately productless edit - do NOT add any Besque product, "
             "bottle, or packaging anywhere in the scene. Everything else in the scene - "
-            "EXCEPT THE PERSON, see PERSON below - stays exactly as it appears in the "
-            "source image. "
+            "EXCEPT THE PERSON, see PERSON below - carries over from the source image "
+            "exactly as the reproduce-faithfully instruction above states (never a "
+            "stricter \"exactly\" reintroduced here, including its small natural "
+            "variation allowance). "
         )
 
     # PERSON (2026-08-10): unconditional, appended once regardless of which product
@@ -1523,22 +1768,74 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
     # being appended once rather than duplicated per branch. Placed right after the
     # product branches and before TEXT, so the enumerated partition reads in scene order:
     # composition (opening) -> product -> person -> text -> offer -> efficacy claims.
-    base += (
-        "PERSON: if a person appears anywhere in the reference image, this is one "
-        "instruction with two parts, not two competing ones, the same shape as the "
-        "colour instruction above. REPRODUCE exactly as shown: pose, body position, "
-        "framing, crop, camera angle, distance, lighting on the subject, wardrobe "
-        "silhouette, and where the person sits in the composition. SUBSTITUTE the person "
-        "themselves: face, hair, and every other identifying feature must belong to a "
-        "different, generic, non-identifiable model - never the reference's own "
-        "individual, even partially or approximately. Match the same apparent age "
-        "bracket and the same skin-condition presentation shown in the reference - that "
-        "presentation is the ad's argument - but never the same face, hair, or identity. "
-        "The person in a competitor's ad is their licensed model or a real customer, not "
-        "a Besque asset; reproducing their actual likeness is a rights violation, not a "
-        "fidelity choice. This is compliance rule C1 above, made specific at the point "
-        "of use for this reference. "
-    )
+    #
+    # face_present (Item 8, 2026-08-12): face-to-body substitution. When the reference's
+    # own face_present says has_face AND prominence=="primary" (deconstruct.py's schema),
+    # the usual REPRODUCE-pose/SUBSTITUTE-identity split below is REPLACED, not
+    # supplemented, by a face-to-body instruction - having both present at once would be
+    # exactly the "demand and forbid the same element" contradiction shape this session
+    # has repeatedly found (see item 1/product_count above). Absent/incidental/none falls
+    # through to the existing clause unchanged, so a blueprint with no face_present field,
+    # or one where the face isn't the compositional focus, sees byte-for-byte the same
+    # prompt as before this item existed. Prompt-level only: no actual pixel masking/
+    # cropping happens here - that structural work is a separate, later task.
+    face_present = face_present or {}
+    face_is_primary = bool(face_present.get("has_face")) and face_present.get("prominence") == "primary"
+    if face_is_primary:
+        base += (
+            "PERSON -> BODY AREA (STRICT, face_present.prominence=primary - REPLACES the "
+            "usual PERSON reproduce/substitute instruction, not additional to it): the "
+            "reference's human subject is FACE-PRIMARY - the compositional focus is the "
+            "face itself, not incidental. Rather than substituting a different generic "
+            "face onto the same framing, the subject in frame becomes a BODY AREA "
+            "instead - arm, neck, stomach, or legs, chosen to match the skin concern "
+            "this reference actually addresses - never the face or head. This is NOT a "
+            "crop of the existing composition and NOT a face-swap: preserve the "
+            "composition, lighting, emotional tone, and overall structure of the scene "
+            "exactly as the reference shows (subject to the small variation allowance "
+            "above), but the chosen body area occupies where the person's face/upper "
+            "body was, at a scale and framing that reads as a deliberately composed "
+            "shot of that body area - never an obviously cropped or awkwardly "
+            "substituted fragment. Rules 10/11 above (age-appropriate skin texture) "
+            "still apply fully to this body area. This is prompt-level guidance only; "
+            "no structural masking or compositing happens here. "
+        )
+    else:
+        base += (
+            # AUDIT (item 3, 2026-08-12): "REPRODUCE exactly as shown: pose, body
+            # position, ... wardrobe silhouette..." used to sit on the REPRODUCE side -
+            # telling the model to keep the reference's own pose, body position, and
+            # clothing silhouette, then separately telling it to swap only the face/hair.
+            # That is reproducing most of the person's identity while calling it
+            # "substitution" - confirmed live (ad 1859386398364761: same face, same
+            # clothing, same pose survived). REPRODUCE is now scoped to pure camera/scene
+            # mechanics only; pose, body position, and wardrobe moved to SUBSTITUTE,
+            # alongside face/hair/identity - the person is substituted, not partially
+            # preserved.
+            "PERSON: if a person appears anywhere in the reference image, this is one "
+            "instruction with two parts, not two competing ones, the same shape as the "
+            "colour instruction above. REPRODUCE only the camera/scene mechanics: "
+            "framing, crop, camera angle, distance, lighting on the subject, and where "
+            "in the composition the person sits. SUBSTITUTE the person themselves: "
+            "face, hair, pose, body position, wardrobe/clothing, and every other "
+            "identifying or appearance-defining feature must belong to a different, "
+            "generic, non-identifiable Besque subject - never the reference's own "
+            "individual's face, hair, pose, or clothing, even partially or "
+            "approximately. Match ONLY the skin-condition presentation shown in the "
+            "reference - that presentation is the ad's argument - but never the same "
+            "face, hair, pose, clothing, or identity. AGE IS THE ONE EXCEPTION TO "
+            "'MATCH THE REFERENCE': do NOT match the reference's own apparent age bracket, "
+            "even though skin-condition presentation is otherwise matched - rule 10 above "
+            "(SUBJECT AGE) governs the substituted model's age instead, unconditionally, "
+            "regardless of what age the reference's own model happens to be. A previous "
+            "version of this clause said to match the reference's age bracket - that directly "
+            "contradicted rule 10 and is why it did not reliably bind; there is no 'match the "
+            "reference's age' instruction anywhere in this prompt any more. The person in a "
+            "competitor's ad is their licensed model or a real customer, not a Besque asset; "
+            "reproducing their actual likeness - face, pose, or clothing included - is a "
+            "rights violation, not a fidelity choice. This is compliance rule C1 above, made "
+            "specific at the point of use for this reference. "
+        )
 
     eff_headline, eff_subtext = effective_authorised_text(text_in_image, headline, subtext)
     # structural_zones' sub_line/body_copy/cta substitution must never be offered when
@@ -1548,7 +1845,20 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
     zone_copy_text = eff_subtext if text_in_image else None
     zone_cta_text = cta_text if text_in_image else None
     zone_panel_copy = panel_copy if text_in_image else None
-    zone_testimonial = testimonial if text_in_image else None
+    # testimonial is deliberately NOT gated by text_in_image (UNGATED 2026-08-12, Item 1
+    # - was `testimonial if text_in_image else None`, matching sub_line/body_copy/cta).
+    # That gate was a category error: text_in_image decides whether HEADLINE/SUBTEXT
+    # bake into the image pixels or render as a separate HTML overlay - a testimonial
+    # CARD (avatar, name, quote, reaction bar) is not headline text competing for that
+    # same overlay slot, it's a self-contained visual element, the same category as
+    # badge/price_anchor/product_callout/certifications below, none of which are gated
+    # by text_in_image either. Confirmed live: ad 1354698976158962 had a real review
+    # ready to substitute (select_testimonial_review found one) and a genuine
+    # social_proof/single_quote zone, but text_in_image=False on that run silently
+    # dropped it anyway - the zone was never actually short of content, it was gated on
+    # the wrong flag. The "no real review -> remove, never invent" rule inside
+    # _structural_zones_clause is the ONLY gate the testimonial zone needs.
+    zone_testimonial = testimonial
     # certifications is deliberately NOT gated by text_in_image - a cert badge is a
     # brand/product graphic element baked into the base image regardless of whether
     # headline/subtext render separately as an HTML overlay, the same treatment
@@ -1556,12 +1866,19 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
     structural_clause, substituted_zone_types = _structural_zones_clause(
         structural_zones, zone_copy_text=zone_copy_text, cta_text=zone_cta_text,
         panel_copy=zone_panel_copy, testimonial=zone_testimonial, certifications=certifications,
-        offer_text=offer_text, product_name=product_name,
+        offer_text=offer_text, testimonial_zones=testimonial_zones,
+        # callout_copy (Item 2, 2026-08-12): the RAW panel_copy, NOT zone_panel_copy -
+        # product_callout is a self-contained visual element (icon + label), the same
+        # category as badge/price_anchor/certifications above, none of which are gated
+        # by text_in_image - see _structural_zones_clause's own docstring.
+        callout_copy=panel_copy,
     )
     if eff_headline:
-        permitted = f'the headline "{eff_headline}"'
-        if eff_subtext:
-            permitted += f' and the supporting text "{eff_subtext}"'
+        # The exact headline/subtext wording is stated ONCE, by rule 6's TEXT POLICY
+        # above - this function must reference that authorisation, never re-quote the
+        # string itself, or the same text ends up stated twice (2026-08-13 live finding:
+        # the literal string appeared 2-3x in one assembled prompt across rule 6, this
+        # TEXT branch, and STRUCTURAL ZONES' sub_line/body_copy fallback).
         # The "entire text budget" ban must never contradict STRUCTURAL ZONES below by
         # banning a category that clause is simultaneously authorising (2026-08-06) - the
         # same writer/rule6 contradiction shape this codebase has already hit more than
@@ -1578,11 +1895,27 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
                 "no ingredient list, mechanism or benefit paragraph, additional body "
                 "copy, or CTA sentence may ALSO be rendered"
             )
+        # Item 9 (2026-08-12): the highest-risk failure is split-screen/before-after/
+        # multi-panel layouts each receiving their OWN copy of the same headline/subtext -
+        # stated once here, ahead of both text sub-branches below, since duplication risk
+        # applies to substituting into an existing zone and adding into negative space
+        # equally. Not gated on semantic_split specifically: a multi-panel layout that
+        # deconstruct didn't classify as a before/after split (e.g. typography_zones with
+        # several headline-shaped entries) has the identical risk.
+        canvas_unity_clause = (
+            "The output canvas is ONE unified space, even when the composition shows a "
+            "split-screen, before/after, or multi-panel layout (see BEFORE/AFTER "
+            "SEMANTICS above, where one applies) - the headline, the supporting text, "
+            "and any authorised review text each render EXACTLY ONCE across the entire "
+            "frame, never once per panel or half. "
+        )
         if reference_has_text_zone:
             base += (
+                canvas_unity_clause +
                 f"TEXT: preserve the reference image's text zones EXACTLY as they appear - "
                 f"same size, position, weight, casing, and text colour - and replace ONLY "
-                f"the wording with {permitted}, same layout, our words. Typography (typeface "
+                f"the wording with the headline/supporting text already authorised above "
+                f"(TEXT POLICY) - never a different string, same layout, our words. Typography (typeface "
                 f"weight, casing, placement) and text colour are INHERITED from the "
                 f"reference exactly as shown, never re-themed or restyled to a different "
                 f"look - the wording is the ONLY thing that changes. This is the ENTIRE text "
@@ -1605,9 +1938,11 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
                 "independently of what this scene shows. "
             )
             base += (
+                canvas_unity_clause +
                 f"TEXT: the reference has no existing text zone to substitute into - "
-                f"place {permitted} newly into the scene as in-scene typography, in "
-                f"clean negative space. " + placement_instruction +
+                f"place the headline/supporting text already authorised above (TEXT "
+                f"POLICY) - never a different string - newly into the scene as in-scene "
+                f"typography, in clean negative space. " + placement_instruction +
                 f"Do not invent a container, badge, banner, or bubble shape that isn't "
                 f"already part of the scene to hold it. This is the ENTIRE text "
                 f"budget for this image - {budget_ban}, even if such text exists in the "
@@ -1717,6 +2052,96 @@ def _sniff_mime_type(data):
     if data[:4] == b"GIF8":
         return "image/gif"
     return "image/jpeg"
+
+
+def _occlusion_enabled():
+    """OCCLUDE_PERSON env var (Item 1, 2026-08-12), read FRESH on every call - not
+    cached at module-import time the way FORCE_REPROCESS is (see CLAUDE.md's own
+    warning about that pattern leaving a stale value active for a whole process
+    lifetime). Deliberate here: this flag exists specifically to be flipped mid manual
+    test ("switchable off without a code change"), and an import-time cache would defeat
+    exactly that. Off by default - prompt-only guardrails have already failed twice on
+    this exact problem (PERSON identity, then SUBJECT AGE), so blocking pixels outright
+    is a genuinely new, unverified mechanism, not a proven one."""
+    return os.getenv("OCCLUDE_PERSON", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+# Coarse position-keyword -> occlusion box, as (left, top, right, bottom) fractions of
+# (width, height). Derived from face_present.location's own free text (deconstruct.py's
+# schema) - never a fixed per-ad box; the same generic keyword set applies to every
+# reference regardless of which ad it is. Deliberately GENEROUS, not a tight bounding
+# box: this codebase has no face/person segmentation library (adding one was evaluated
+# and set aside earlier this session - opencv-python-headless alone is a ~60MB wheel for
+# a single detector), so "occlude a wide enough region to plausibly contain the whole
+# person" is what's actually achievable today. Ordered most-specific compound phrase
+# first, so "upper-left" doesn't fall through to the plain "upper" bucket.
+_OCCLUSION_KEYWORD_BOXES = (
+    (("upper-left", "top-left"), (0.0, 0.0, 0.65, 0.65)),
+    (("upper-right", "top-right"), (0.35, 0.0, 1.0, 0.65)),
+    (("lower-left", "bottom-left"), (0.0, 0.35, 0.65, 1.0)),
+    (("lower-right", "bottom-right"), (0.35, 0.35, 1.0, 1.0)),
+    (("upper", "top"), (0.0, 0.0, 1.0, 0.65)),
+    (("lower", "bottom"), (0.0, 0.35, 1.0, 1.0)),
+    (("left",), (0.0, 0.0, 0.65, 1.0)),
+    (("right",), (0.35, 0.0, 1.0, 1.0)),
+    (("centre", "center", "middle"), (0.15, 0.0, 0.85, 1.0)),
+)
+# No positional keyword matched at all in face_present.location - a generous central
+# vertical band, since deconstruct already confirmed has_face=true (a person is present
+# SOMEWHERE in frame); never the full frame, so surrounding composition/background clues
+# still reach Gemini for everything _occlude_person_region does not black out.
+_DEFAULT_OCCLUSION_BOX = (0.15, 0.0, 0.85, 1.0)
+
+
+def _derive_occlusion_box(location_text):
+    text = (location_text or "").lower()
+    for keywords, box in _OCCLUSION_KEYWORD_BOXES:
+        if any(kw in text for kw in keywords):
+            return box
+    return _DEFAULT_OCCLUSION_BOX
+
+
+def _occlude_person_region(image_bytes, face_present):
+    """Item 1 (2026-08-12), gated by _occlusion_enabled() (default off): when the
+    blueprint's face_present.has_face is true, at ANY prominence, block out an
+    approximate person-shaped region of the COMPETITOR's reference bytes before they
+    ever reach Gemini - structural, not textual, the same lever that worked for the
+    illustrated-bottle leak (drop/alter the input rather than ask the model not to look
+    at it). Unlike that fix, this one is UNVERIFIED: prompt-only guardrails have already
+    failed twice on this exact problem, so this is a genuinely new mechanism being
+    tested live, not a proven one - hence the flag and the manual test it exists for.
+
+    Returns (bytes, occluded: bool) - the caller needs to know whether occlusion
+    actually happened, to decide whether to add the "this is a blocked region, not a
+    shape to reproduce" prompt clause; stating that when nothing was occluded would be
+    describing something that isn't there.
+
+    Dimensions are NEVER changed - only pixels within the derived box are overwritten -
+    so derive_aspect_ratio reading these same bytes downstream sees the identical
+    width:height it would see unoccluded. On ANY failure (corrupt bytes, decode error),
+    returns the ORIGINAL bytes unoccluded rather than raising - a broken mask must never
+    take down a generation that would otherwise have worked."""
+    if not (face_present or {}).get("has_face"):
+        return image_bytes, False
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        img.load()
+        width, height = img.size
+        img = img.convert("RGB")
+        left_f, top_f, right_f, bottom_f = _derive_occlusion_box(face_present.get("location"))
+        box = (int(left_f * width), int(top_f * height), int(right_f * width), int(bottom_f * height))
+        ImageDraw.Draw(img).rectangle(box, fill=(128, 128, 128))
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        occluded_bytes = buf.getvalue()
+        occluded_img = Image.open(io.BytesIO(occluded_bytes))
+        if occluded_img.size != (width, height):
+            raise ValueError(f"occlusion changed dimensions: {(width, height)} -> {occluded_img.size}")
+        return occluded_bytes, True
+    except Exception as e:
+        log.warning("OCCLUDE_PERSON: failed to occlude person region (%s: %s) - using "
+                    "the reference image unoccluded", type(e).__name__, e)
+        return image_bytes, False
 
 
 # ImageConfig.image_size defaults to "1K" whenever it's left unset, which is every call
@@ -1887,6 +2312,21 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
                                  panel_copy=panel_copy, testimonial=testimonial,
                                  product_count=product_count, clone_mode=clone_mode)
     stem = _draft_stem(ad_id, angle_slug)
+    # OCCLUDE_PERSON (Item 1, 2026-08-12): applied to the IN-MEMORY bytes only, right
+    # before they're attached to Gemini - never to the on-disk image_path fetch, which
+    # is a separate read (assets.download_image, called from pipeline.py) this function
+    # never touches. Deliberately BEFORE build_image_prompt is called above would also
+    # have worked (occlusion doesn't affect any text the prompt builder produces), but
+    # placing it here, right next to Part.from_bytes, keeps the "these bytes are what
+    # Gemini sees" concern in one place rather than splitting it across the function.
+    occluded_this_call = False
+    if edit_mode and competitor_image_bytes and _occlusion_enabled():
+        competitor_image_bytes, occluded_this_call = _occlude_person_region(
+            competitor_image_bytes, blueprint.get("face_present")
+        )
+        if occluded_this_call:
+            log.info("Ad %s: OCCLUDE_PERSON active - person region blocked before "
+                     "attaching the reference image to Gemini", ad_id)
     try:
         client = genai.Client(vertexai=True, project="besque-martech", location="global")
         from google.genai import types as genai_types
@@ -1910,6 +2350,20 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
                     "brand name, and any person's actual likeness must NOT survive - see "
                     "the instructions below. "
                 )
+                if occluded_this_call:
+                    framing += (
+                        "OCCLUSION NOTICE (STRICT): a solid grey rectangle in this "
+                        "attached image is a DELIBERATE BLOCK placed over the "
+                        "reference's original human subject before this image was ever "
+                        "sent to you - it is NOT a graphic element, badge, panel, or "
+                        "shape that belongs to the original ad, and it must never be "
+                        "reproduced, outlined, or left in the output as a grey block, "
+                        "box, or panel. Fill that region with a NEW, generic "
+                        "Besque-appropriate subject (per rule 10 above: 45-60, "
+                        "age-appropriate skin) whose pose, framing, and lighting fit "
+                        "naturally into the surrounding composition - never a shape "
+                        "standing in for a person. "
+                    )
             if reference_images:
                 image_parts += [genai_types.Part.from_bytes(data=img, mime_type="image/png")
                                 for img in reference_images]

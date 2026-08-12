@@ -42,25 +42,42 @@ def test_incident_first_person_endorsement_flagged():
 
 
 def test_quoted_testimonial_flagged_without_approved_material():
-    copy = {"headline": "Real results", "primary_text": '"This changed my skin completely in two weeks"', "cta": "y"}
+    """QUOTE_PATTERN only scans TESTIMONIAL_FIELD_KEYS (compliance.py) - a quote in a real
+    testimonial-shaped field must still be flagged."""
+    copy = {"headline": "Real results", "primary_text": "x", "cta": "y",
+            "testimonial": '"This changed my skin completely in two weeks"'}
     ok, issues = compliance.check_compliance(copy, "Brand", "")
     assert ok is False
     assert any("Quoted" in i for i in issues)
 
 
 def test_quoted_testimonial_passes_when_matching_approved_material():
-    testimonial = "This changed my skin completely in two weeks - Jane, verified customer"
-    copy = {"headline": "Real results", "primary_text": '"This changed my skin completely in two weeks"', "cta": "y"}
-    ok, issues = compliance.check_compliance(copy, "Brand", "", approved_testimonials=testimonial)
+    testimonial_material = "This changed my skin completely in two weeks - Jane, verified customer"
+    copy = {"headline": "Real results", "primary_text": "x", "cta": "y",
+            "testimonial": '"This changed my skin completely in two weeks"'}
+    ok, issues = compliance.check_compliance(copy, "Brand", "", approved_testimonials=testimonial_material)
     assert ok is True
     assert issues == []
 
 
 def test_short_quoted_phrase_not_flagged():
     """A short quoted word/phrase (e.g. emphasis) is not testimonial-shaped."""
-    copy = {"headline": '"Natural" beauty, redefined', "primary_text": "x", "cta": "y"}
+    copy = {"headline": "x", "primary_text": "x", "cta": "y", "testimonial": '"Natural" beauty, redefined'}
     ok, issues = compliance.check_compliance(copy, "Brand", "")
     assert ok is True
+
+
+def test_quoted_headline_copy_not_flagged_as_testimonial():
+    """2026-08-11 false positive: QUOTE_PATTERN used to scan every generated_copy value,
+    so a quoted headline/sub_line - purely a stylistic/editorial treatment, not a
+    customer attribution - was misread as a fabricated testimonial and blocked the ad
+    before save_artifact. generate_copy.py's real schema (headline/primary_text/cta/
+    image_subtext) has no testimonial field, so a quote here must never fire."""
+    copy = {"headline": '"Because your skin deserves better care"',
+            "primary_text": "x", "cta": "y"}
+    ok, issues = compliance.check_compliance(copy, "Brand", "")
+    assert ok is True
+    assert issues == []
 
 
 def test_reported_speech_flagged_without_approved_material():

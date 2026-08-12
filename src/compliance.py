@@ -147,18 +147,50 @@ def check_unauthorized_offer(generated_copy, offer_text=""):
     return issues
 
 
+# Field names that could actually carry a customer testimonial/quote, if generate_copy.py
+# ever grows one - today's real schema (headline/primary_text/cta/image_subtext, see
+# COPY_PROMPT, plus the panel_copy/cta-zone extras) has none of these. QUOTE_PATTERN's
+# blanket scan across every generated_copy value (2026-08-11 finding) was misreading a
+# quoted headline/sub_line as a fabricated testimonial purely because it happened to be
+# 4+ words and in quotes - a stylistic/editorial quote treatment, not a customer
+# attribution. Scoping QUOTE_PATTERN to this list means it finds nothing and passes on
+# today's real fields, and starts working the moment a real testimonial-shaped field is
+# added, with no further code change needed here.
+#
+# FIRST_PERSON_PATTERN/REPORTED_SPEECH_PATTERN are deliberately NOT scoped the same way -
+# unlike a quote mark, first-person ("I ordered...") or reported-speech ("customers
+# say...") phrasing has no legitimate stylistic use in Besque's copy at all (this
+# module's own docstring: "Besque's brand voice is never written in first person or with
+# quoted/reported speech"), so a hit in ANY field is real regardless of which field it's
+# in - confirmed by actual incidents in headline/primary_text (see
+# test_incident_first_person_endorsement_flagged,
+# test_my_new_staple_testimonial_without_pronoun_i_is_flagged,
+# test_reported_speech_flagged_without_approved_material). Narrowing those two the same
+# way QUOTE_PATTERN was narrowed would silently reopen those exact incidents.
+TESTIMONIAL_FIELD_KEYS = ("testimonial",)
+
+
 def check_fabricated_testimonial(generated_copy, approved_testimonials=""):
     """Rule C2 mechanical check: quoted speech, first-person endorsement patterns,
     and reported-speech framing. Any hit is allowed through only if the flagged
     text shares real content with approved_testimonials (a 6-word run, or full
     containment for a short supplied testimonial) - otherwise it's flagged as
     fabricated. approved_testimonials is empty in current real usage, so every
-    hit is flagged today; that's intentional, not a bug."""
+    hit is flagged today; that's intentional, not a bug.
+
+    QUOTE_PATTERN only scans TESTIMONIAL_FIELD_KEYS (see its own comment above) - not
+    every generated_copy value - because a quote mark alone is not testimonial-shaped
+    without a field that's actually meant to carry a customer's words; today that list
+    matches nothing in generate_copy.py's real schema, so this sub-check always passes.
+    FIRST_PERSON_PATTERN/REPORTED_SPEECH_PATTERN still scan every value, unchanged."""
     issues = []
     gen = " ".join(str(v) for v in generated_copy.values())
+    testimonial_gen = " ".join(
+        str(generated_copy[k]) for k in TESTIMONIAL_FIELD_KEYS if generated_copy.get(k)
+    )
     approved_norm = _normalize(approved_testimonials)
 
-    for match in QUOTE_PATTERN.finditer(gen):
+    for match in QUOTE_PATTERN.finditer(testimonial_gen):
         quoted = match.group(1)
         if len(quoted.split()) < 4:
             continue  # short quoted phrase (e.g. a single emphasized word) - not testimonial-shaped

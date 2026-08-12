@@ -1,6 +1,7 @@
 import logging
 import os
 import json
+import re
 
 from src import json_response
 from src.compliance_rules import COMPLIANCE_RULES
@@ -208,13 +209,23 @@ def _angle_language_clause(angle_language):
 # zone_types that carry per-zone copy via the panel_copy output field (structural_zones,
 # 2026-08-06 schema addition) - cta is deliberately excluded here: it's a single output
 # field, not a list, so it gets its own detector/clause below (_cta_zone/_cta_zone_clause).
-_PANEL_COPY_ZONE_TYPES = ("sub_line", "body_copy")
+#
+# product_callout ADDED 2026-08-12 (Item 2): every product_callout zone used to receive
+# generate_image_prompt's bare product_name, unconditionally - confirmed live, ad
+# 1576971893931336: four callout zones with four genuinely distinct reference details
+# (thermogenic/energy/skin-tightening/nail-and-hair) all rendered the identical "Besque
+# Magic Body Oil", because nothing ever gave each zone its OWN copy to substitute. This
+# module's own per-zone machinery (text_zone_targets/_text_zone_copy_clause, and
+# generate_image_prompt._structural_zones_clause's position-keyed panel_copy lookup) was
+# already fully general - it needed zero structural changes, only this one zone type
+# added to the tuple it already iterates.
+_PANEL_COPY_ZONE_TYPES = ("sub_line", "body_copy", "product_callout")
 
 
 def text_zone_targets(blueprint):
-    """Every sub_line/body_copy structural_zones entry in this reference (2026-08-06
-    schema), each with its own position and its own detail describing what that specific
-    zone shows. Returns [] when there are none at all - callers must treat an empty list
+    """Every sub_line/body_copy/product_callout structural_zones entry in this reference,
+    each with its own position and its own detail describing what that specific zone
+    shows. Returns [] when there are none at all - callers must treat an empty list
     as "nothing to target", never a target with nothing in it.
 
     Renamed from comparison_panels (2026-08-11): that name and its old >=2 gate were
@@ -240,15 +251,24 @@ def text_zone_targets(blueprint):
 
 def _text_zone_copy_clause(zones):
     """Instruction text appended when text_zone_targets() finds at least one sub_line/
-    body_copy zone - lists each zone's own position/detail so Claude writes copy matching
-    what THAT specific zone shows, rather than relying on a generic image_subtext line to
-    also happen to satisfy it. Position strings are echoed back VERBATIM from the
-    blueprint (not rephrased) so generate_image_prompt._structural_zones_clause can match
-    panel_copy entries back to the exact structural_zones entry they belong to by position
-    string. Works identically for exactly one zone or several - the "never repeat" rule
-    only has anything to bite on when there's more than one to repeat against."""
+    body_copy/product_callout zone - lists each zone's own position/detail so Claude
+    writes copy matching what THAT specific zone shows, rather than relying on a generic
+    image_subtext line to also happen to satisfy it. Position strings are echoed back
+    VERBATIM from the blueprint (not rephrased) so generate_image_prompt._structural_
+    zones_clause can match panel_copy entries back to the exact structural_zones entry
+    they belong to by position string. Works identically for exactly one zone or
+    several - the "never repeat" rule only has anything to bite on when there's more
+    than one to repeat against.
+
+    product_callout zones get an ADDITIONAL rule (2026-08-12, Item 2): the copy for
+    those specifically must be a benefit or property, never the product name - a
+    callout's job is to say what makes the product worth choosing, and the product's
+    own identity is already established elsewhere (rule 1/rule 4, the brand_wordmark
+    substitution). Stated once, only when at least one product_callout zone is present,
+    not duplicated per zone."""
     zone_lines = "\n".join(
-        f'  - position "{z.get("position", "")}": the reference shows - {z.get("detail", "")}'
+        f'  - position "{z.get("position", "")}" ({z.get("zone_type", "")}): the '
+        f'reference shows - {z.get("detail", "")}'
         for z in zones
     )
     repeat_rule = (
@@ -256,15 +276,23 @@ def _text_zone_copy_clause(zones):
         "content - never repeat the same phrase across zones, and never let one zone's "
         "text describe what a DIFFERENT zone shows."
     ) if len(zones) > 1 else ""
+    callout_rule = (
+        " For any zone of type product_callout specifically: its copy is a single "
+        "BENEFIT or PROPERTY (e.g. \"Fast-Absorbing\" or \"Deeply Hydrating\"), never "
+        "the product name and never the same phrase repeated across multiple callouts - "
+        "the product's own identity is established elsewhere in this image, this zone's "
+        "job is to say what makes it worth choosing."
+    ) if any(z.get("zone_type") == "product_callout" for z in zones) else ""
     return (
         "\n\nTEXT ZONE COPY (STRICT): this reference has "
-        f"{len(zones)} distinct sub_line/body_copy zone(s) that need matching Besque "
-        f"copy, not the reference's own words, per the zone-specific detail below:\n{zone_lines}\n"
+        f"{len(zones)} distinct sub_line/body_copy/product_callout zone(s) that need "
+        f"matching Besque copy, not the reference's own words, per the zone-specific "
+        f"detail below:\n{zone_lines}\n"
         "Also return an ADDITIONAL field, panel_copy: a list of EXACTLY "
         f"{len(zones)} objects, one per zone above, each "
         '{"position": "<the exact position string from the list above, verbatim>", '
         '"text": "<a short line of Besque copy matching what THAT zone specifically '
-        f'shows>"}}.{repeat_rule}'
+        f'shows>"}}.{repeat_rule}{callout_rule}'
     )
 
 
@@ -330,6 +358,45 @@ def _used_copy_clause(used_headlines):
     )
 
 
+def _text_purpose_clause(blueprint):
+    """text_purpose consumption (2026-08-11 schema addition, Item 11): each reference
+    text block's FUNCTION (offer/testimonial/efficacy_claim/problem_hook/
+    product_description/cta/other), not its wording - read straight from the blueprint
+    like text_zone_targets/_cta_zone below, no new parameter needed since blueprint is
+    already passed to build_copy_prompt in full. The point: an offer-led reference must
+    produce offer-led Besque copy, a problem-hook reference must produce a problem-hook -
+    matching the FUNCTION the original text performed, never flattening every reference
+    into the same generic product description regardless of what job its text was doing.
+    This is a copy-path-only fix (unlike the image path, text-only prompt instructions
+    reliably bind here - see generate_copy's own compliance-check history) but it still
+    never grants permission beyond APPROVED CLAIMS/APPROVED TESTIMONIALS above: a
+    testimonial-purposed block tells the model the JOB a real testimonial would do here,
+    never license to fabricate one. Returns "" when text_purpose is empty or absent, so a
+    blueprint from before this field existed produces byte-for-byte the same prompt as
+    before this existed."""
+    entries = (blueprint or {}).get("text_purpose") or []
+    if not entries:
+        return ""
+    lines = "\n".join(
+        f'  - "{e.get("text_verbatim", "")}" (placement: {e.get("placement", "")}) served '
+        f'as: {e.get("purpose", "other")}'
+        for e in entries
+    )
+    return (
+        "\n\nCOMMUNICATIVE PURPOSE (STRICT): the reference ad's own text blocks each did a "
+        f"specific JOB, not just occupied space - here is what each one was actually "
+        f"doing:\n{lines}\n"
+        "Your Besque copy must accomplish the SAME job(s): an offer-led reference needs "
+        "offer-led Besque copy, a problem-hook reference needs a problem-hook, an "
+        "efficacy_claim reference needs a claim bounded by APPROVED CLAIMS/PRODUCT above, "
+        "a product_description reference needs product description. This names the JOB "
+        "only, never permission beyond what APPROVED CLAIMS/APPROVED TESTIMONIALS above "
+        "allow - a testimonial-purposed block is never fabricated here just because the "
+        "reference had one in that role. Never flatten every reference into generic "
+        "product description regardless of what job its original text was doing."
+    )
+
+
 def build_copy_prompt(blueprint, brand_voice="", approved_claims="", product=None,
                        approved_testimonials="", compliance_feedback=None, offer_text="",
                        angle_language=None, used_headlines=None):
@@ -383,6 +450,7 @@ def build_copy_prompt(blueprint, brand_voice="", approved_claims="", product=Non
         prompt += _text_zone_copy_clause(zones)
     if cta_zone:
         prompt += _cta_zone_clause(cta_zone)
+    prompt += _text_purpose_clause(blueprint)
     if used_headlines:
         prompt += _used_copy_clause(used_headlines)
     if compliance_feedback:
@@ -399,6 +467,43 @@ def parse_copy(raw_text):
     """Parse Claude's text response into a copy dict. Tolerates markdown fences
     and surrounding prose - see json_response.extract_json."""
     return json_response.extract_json(raw_text)
+
+
+# Em dash (—), en dash (–), and the double-hyphen substitute ("--") all read as
+# distinctly AI-generated punctuation in ad copy - a real draft's "The arms I'd been
+# hiding — finally uncovered." is the exact tell. Mechanical strip, not a prompt request
+# (COPY_PROMPT rules like "no preamble or markdown" have never reliably bound model
+# output on their own - see CLAUDE.md's top note on prompt-only guardrails). Replaced
+# with a plain comma+space rather than dropped outright: a dash overwhelmingly joins two
+# clauses that read fine comma-joined, and dropping it with nothing in its place would
+# glue two words together. Not fully safe for a numeric range ("7-10 days"), but numeric
+# timeframe/efficacy language is already heavily restricted elsewhere in this file's own
+# rules, so that collision is rare enough not to special-case here.
+BANNED_DASH_PATTERN = re.compile(r"\s*(?:--|—|–)\s*")
+
+
+def strip_banned_dashes(copy):
+    """Mechanically replaces every em dash/en dash/double-hyphen in every string value of
+    a parsed copy dict with a plain comma - applied uniformly to every field, never
+    guessing which ones might contain one. panel_copy (see _text_zone_copy_clause) is the
+    one field whose real copy text sits nested inside a list of {"position", "text"}
+    dicts rather than as a plain string value - handled by name, the same way this
+    module's other panel_copy-aware code already does, rather than generic recursion into
+    every possible nested shape."""
+    result = {}
+    for k, v in copy.items():
+        if isinstance(v, str):
+            result[k] = BANNED_DASH_PATTERN.sub(", ", v)
+        elif k == "panel_copy" and isinstance(v, list):
+            result[k] = [
+                {**entry, "text": BANNED_DASH_PATTERN.sub(", ", entry["text"])}
+                if isinstance(entry, dict) and isinstance(entry.get("text"), str)
+                else entry
+                for entry in v
+            ]
+        else:
+            result[k] = v
+    return result
 
 
 REQUIRED_COPY_FIELDS = {"headline", "primary_text", "cta"}
@@ -431,6 +536,7 @@ def validate_copy(copy, require_cta=False, require_image_subtext=False):
 
 def copy_from_response(raw_text, require_cta=False, require_image_subtext=False):
     copy = parse_copy(raw_text)
+    copy = strip_banned_dashes(copy)
     validate_copy(copy, require_cta=require_cta, require_image_subtext=require_image_subtext)
     return copy
 

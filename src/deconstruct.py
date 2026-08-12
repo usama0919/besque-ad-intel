@@ -33,12 +33,13 @@ The JSON must have exactly these fields:
 - social_proof (object): {{ "type": ..., "owner": ... }} — owner is the brand/body the proof belongs to, or null
 - layout_detail (object): {{ "text_zone": ..., "product_count": number, "background_type": ..., "zone_positions": array of short phrases locating each element top to bottom (e.g. ["headline top-center", "product mid-frame", "CTA bottom-full-width"]), "has_bottom_banner": true/false, "has_corner_badge": true/false, "frame_division": short description of how the frame splits (e.g. "three stacked horizontal bands" or "single uninterrupted gradient ground, no hard divisions") }}
 - legibility_notes (string): whether in-image text is readable at feed size
-- body_area_shown (string): if a human subject appears in the image, name the specific body region shown or emphasised (e.g. "legs", "arms", "torso", "hands", "neck and décolletage"); if NO human subject appears at all (e.g. a product-only shot, an illustration/diagram, or text-only creative), use exactly "none". This is read downstream to decide whether a per-run body-area instruction may be applied to this reference at all - do not guess a body part onto a productless or human-less image.
+- body_area_shown (string): REQUIRED - this key must ALWAYS be present in your JSON output. if a human subject appears in the image, name the specific body region shown or emphasised (e.g. "legs", "arms", "torso", "hands", "neck and décolletage"); if NO human subject appears at all (e.g. a product-only shot, an illustration/diagram, or text-only creative), use exactly "none". This is read downstream to decide whether a per-run body-area instruction may be applied to this reference at all - do not guess a body part onto a productless or human-less image.
+- face_present (object): REQUIRED - this key must ALWAYS be present. {{ "has_face": true/false, "prominence": one of primary/incidental/none, "location": free-text description of where in the frame the face sits (e.g. "centre-frame, close-up, looking directly at camera") }}. has_face is false and prominence is exactly "none" when no face is visible anywhere in the image - location is "" in that case, never a guess at where a face would be. prominence "primary" means the face is the compositional focus (e.g. a close-up beauty shot); "incidental" means a person is visible but the face is not what the ad is about (e.g. a wide lifestyle shot, a person shown from behind or cropped above the shoulders, a hands-only shot with a face barely visible in the background).
 - creative_objective (string): the ad's primary strategic goal in one short phrase, e.g. "drive urgency around a limited-time offer" or "build trust via a testimonial"
 - target_audience (string): who this ad is speaking to, in one short phrase, e.g. "women 40+ concerned about skin texture and firmness"
 - typography (object): {{ "headline_face": typeface style e.g. serif/sans/script, "headline_weight": e.g. bold/light/regular, "hierarchy_levels": array of short phrases describing each distinct text tier top to bottom (e.g. ["large bold serif headline", "medium sans subhead", "small CTA button label"]), "case_treatment": e.g. "all caps headline, sentence case body" }}
 - typography_zones (array): one entry PER DISTINCT TEXT ZONE in the image (brand logo, headline, sub-copy, offer/CTA, badge text - every zone that carries its own visible text, not just the headline). This is PER-ZONE detail; the `typography`/`hierarchy_levels` fields above describe the ad's typography in general prose - this field must actually enumerate each zone so the treatment isn't lost. Each entry: {{ "zone": short label matching a zone_positions phrase above (e.g. "headline upper-right"), "typeface_class": serif/sans/script, "weight": e.g. bold/light/regular, "case": upper/title/sentence, "letter_spacing": tight/normal/wide, "colour": this zone's OWN text colour - distinct from the scene's overall palette_mood, e.g. "gold" or "white", "size_relative": e.g. large/medium/small relative to the frame, "decorative_elements": array of short phrases for anything attached to the zone (a pipe divider, a rule, an underline, a bullet mark) or [] if none, "line_count": number of lines this zone actually occupies }}. A reference commonly has THREE OR FOUR distinct typographic levels (e.g. a large serif headline, a small-caps accent line with wide letter-spacing, small body copy, a button label) - give each its own entry; never collapse two visually distinct levels into one, and never omit a zone just because its text is short.
-- structural_zones (array): every occurrence of these NINE structural zone types. Described by what each type IS STRUCTURALLY, never by which brand happens to be in front of you right now - this must generalise to any ad, any category, any layout. Zero, one, or several entries of the same zone_type are all valid: if a type doesn't appear at all, it simply has no entries; if an ad has two badges, return two entries with zone_type "badge". An ad with none of these nine zones returns an empty array - do not force a fit. If a zone_type is NOT present, OMIT it entirely - do not add an entry for it just to say it is absent (e.g. never write a sub_line entry whose detail says "no explicit sub-line"). An entry in this array means the zone EXISTS; anything downstream that reads this array will treat every entry as real and try to act on it, so a placeholder entry describing an absence would be read as a zone that is actually there. Each entry: {{ "zone_type": one of brand_wordmark/sub_line/body_copy/cta/price_anchor/product_callout/badge/social_proof/disclaimer, "position": short phrase locating it (e.g. "top-center", "bottom-right banner"), "container": one of none/oval/rect/banner/ribbon/other - the shape holding it, "detail": a short structural description specific to what this zone_type needs (see below), "social_proof_kind": one of aggregate_bar/single_quote - ONLY set when zone_type is social_proof, omit or null otherwise }}.
+- structural_zones (array): REQUIRED - this key must ALWAYS be present in your JSON output, never omitted, regardless of how many zones the ad actually has. Every occurrence of these NINE structural zone types. Described by what each type IS STRUCTURALLY, never by which brand happens to be in front of you right now - this must generalise to any ad, any category, any layout. Zero, one, or several entries of the same zone_type are all valid: if a type doesn't appear at all, it simply has no entries; if an ad has two badges, return two entries with zone_type "badge". An ad with none of these nine zones returns structural_zones as an explicit empty array [] - the key is still present, it is simply empty; do not force a fit and do not drop the key itself. If a zone_type is NOT present, OMIT it entirely - do not add an entry for it just to say it is absent (e.g. never write a sub_line entry whose detail says "no explicit sub-line"). An entry in this array means the zone EXISTS; anything downstream that reads this array will treat every entry as real and try to act on it, so a placeholder entry describing an absence would be read as a zone that is actually there. Each entry: {{ "zone_type": one of brand_wordmark/sub_line/body_copy/cta/price_anchor/product_callout/badge/social_proof/disclaimer, "position": short phrase locating it (e.g. "top-center", "bottom-right banner"), "container": one of none/oval/rect/banner/ribbon/other - the shape holding it, "detail": a short structural description specific to what this zone_type needs (see below), "social_proof_kind": one of aggregate_bar/single_quote - ONLY set when zone_type is social_proof, omit or null otherwise }}.
     brand_wordmark = the advertiser's own logo or name mark, distinct from a product's own printed label if a product is shown
     sub_line = a short accent line below the headline (e.g. a tagline, a small-caps line with wide letter-spacing) - a DISTINCT in-scene text zone from the headline itself, not a second name for it
     body_copy = a paragraph or multi-line block of supporting text rendered IN the image itself - NEVER the scraped ad_text/primary_text supplied separately as a text block above; that is off-image Facebook copy, not part of the visual, and must never be reported here
@@ -48,10 +49,13 @@ The JSON must have exactly these fields:
     badge = a discrete graphic badge, seal, or roundel - detail should name its actual content (e.g. "reads NEW", "star rating icon", "%-off roundel", "award/certification seal")
     social_proof = a testimonial or aggregate-review element rendered in the image - social_proof_kind distinguishes an AGGREGATE BAR (a review count + star average, e.g. "Trustpilot · Over 30,000 · ★★★★★") from a SINGLE QUOTE (one customer's words plus attribution), since these need different treatment downstream; set social_proof_kind for every social_proof entry, never leave it unset when this zone_type is used
     disclaimer = fine-print or footnote text (e.g. "*T&Cs apply", a small legal line)
-- production_style (object): {{ "style": one of {production_style_options}, "confidence": high/medium/low, "signals": array of short phrases justifying the choice }}
-    ugc_native = phone-camera framing, natural/available light, real hands or skin, imperfect staging
-    high_spec_studio = controlled premium lighting, deliberate composition, macro texture, editorial typography
-    hybrid = studio-grade product quality inside casual framing (e.g. hero-lit product on a real countertop, or polished product with handwritten annotation). Only choose hybrid when both are genuinely present — do not use it as a hedge when uncertain.
+- scene_elements (array): REQUIRED - this key must ALWAYS be present, [] when there is genuinely nothing beyond the product itself to inventory. Every element in the scene OTHER THAN the product: hands, skin, props, background objects, secondary figures, surfaces the product rests on - anything visually present that a faithful reproduction of this reference would need to include. Each entry: {{ "element": short noun phrase (e.g. "wooden bathroom shelf", "a second person's hand", "a folded white towel"), "role": what it is doing in the scene (e.g. "product rests on it", "applying the product to skin", "softly blurred in the background"), "essential": true if omitting it would change what the ad is communicating, false if it is incidental set-dressing }}. An incomplete inventory here means those elements get silently dropped when this reference is cloned - list everything visible, not just the obviously important pieces.
+- testimonial_zones (array): REQUIRED - this key must ALWAYS be present, [] when the ad carries no testimonial. Every customer-testimonial-shaped text element in the image - distinct from structural_zones' social_proof entries above, which record WHERE/HOW it is contained; this records the actual testimonial CONTENT. Each entry: {{ "text_verbatim": the exact testimonial text as it appears in the image, "attribution": the name/initial/handle it is attributed to, verbatim, or "" if unattributed, "placement": short phrase locating it (e.g. "bottom-left card"), "styling": how it is visually presented (e.g. "quote marks, no card", "5-star rating above the quote inside a white rounded card") }}.
+- text_purpose (array): REQUIRED - this key must ALWAYS be present, [] when the image carries no text at all. One entry per distinct text block in the image - this classifies EVERY text block by function, at a finer grain than the fields above. Each entry: {{ "text_verbatim": the exact text, "purpose": one of offer/testimonial/efficacy_claim/problem_hook/product_description/cta/other, "placement": short phrase locating it }}. purpose describes what the text is DOING - the job it performs in the ad's argument - never what it literally says; this is what drives what the REPLACEMENT copy must accomplish when this reference is cloned, so classify by function even when the wording itself doesn't obviously announce its purpose (e.g. a rhetorical question is still a problem_hook, not "other").
+- semantic_split (object): REQUIRED - this key must ALWAYS be present. {{ "is_split": true/false, "split_axis": "vertical" or "horizontal" or null, "left_or_before": free text describing what that side/panel depicts, "right_or_after": free text describing what the other side/panel depicts }}. is_split is true whenever the image is visually divided into two comparable panels or halves - a before/after, a side-by-side comparison, a split-screen. When is_split is false, split_axis is null and both left_or_before and right_or_after are "". For a genuine before/after ad, the two sides MUST be described as materially DIFFERENT states (e.g. left_or_before: "dry, crepey skin with visible fine lines"; right_or_after: "smooth, hydrated skin with visible firmness") - recording both sides as showing the same condition is a failure, since the contrast between them is the entire point of the format.
+- production_style (object): REQUIRED - this key must ALWAYS be present. {{ "style": one of {production_style_options}, "confidence": high/medium/low, "signals": array of short phrases justifying the choice }}
+    ugc = handheld or phone-camera framing, uncontrolled or available lighting (window light, room light, natural daylight - never a lighting rig), imperfect composition (off-centre, tilted, awkwardly cropped), a domestic or non-studio setting (bathroom, bedroom, kitchen, car, outdoors), visible grain or motion blur, a selfie or arm's-length POV. These are OBSERVABLE SIGNALS in the pixels, not a vibe - two or more present means ugc.
+    high_spec = controlled premium lighting, deliberate composition, macro texture, editorial typography, a studio or professionally art-directed setting. A polished studio look is NOT the default answer: default to ugc unless the image actually shows deliberate studio lighting/composition/setting. Misclassifying a genuinely UGC reference as high_spec is a KNOWN FAILURE - check for the ugc signals above FIRST, and only choose high_spec when they are absent AND real studio signals are present instead.
     illustrated = not a photograph at all - a whiteboard-style diagram, 3D render, or comic-strip/illustrated panel. Choose this when the ad is drawn or rendered rather than shot.
 - creative_format (string): exactly one of testimonial_review, before_after, problem_solution, product_hero, offer_led, comparison, listicle_tips, founder_story, ingredient_focus, lifestyle_scene, text_led_editorial
     (production_style and creative_format are two independent axes — a testimonial can be UGC or studio.)
@@ -92,12 +96,24 @@ def parse_blueprint(raw_text: str) -> dict:
     return json_response.extract_json(raw_text)
 
 
+class BlueprintValidationError(ValueError):
+    """Raised by deconstruct_from_response when the parsed blueprint fails schema
+    validation. Carries the raw validator message (validation_error) separately from
+    the ValueError text so deconstruct_image's retry loop can quote the specific problem
+    back to Claude as a correction instruction, distinct from the generic JSON-escaping
+    nudge used for an unparseable response."""
+
+    def __init__(self, message, validation_error):
+        super().__init__(message)
+        self.validation_error = validation_error
+
+
 def deconstruct_from_response(raw_text: str) -> dict:
     """Parse and validate a blueprint from a raw model response. Raises if invalid."""
     blueprint = parse_blueprint(raw_text)
     err = validator.validation_error(blueprint)
     if err:
-        raise ValueError(f"Blueprint failed schema validation: {err}")
+        raise BlueprintValidationError(f"Blueprint failed schema validation: {err}", err)
     return blueprint
 
 # ---- Live Claude vision call (wired at kickoff) ----
@@ -130,11 +146,23 @@ JSON_ESCAPE_SYSTEM = (
     "JSON remains parseable. Never leave a bare unescaped \" inside a string value."
 )
 
-# (system) per attempt - None on attempt 1 (unchanged existing behaviour), the escaping
-# nudge above on the retry. Mirrors generate_copy.py's _COPY_ATTEMPTS shape, but
-# deconstruct's one observed failure mode is a malformed-JSON string, not truncation, so
-# only the system prompt changes between attempts, not max_tokens.
-_DECONSTRUCT_ATTEMPTS = (None, JSON_ESCAPE_SYSTEM)
+# Nudge for the retry attempt only - added when structural_zones became a required
+# field (see schema/blueprint.schema.json). A response that parses as JSON but fails
+# schema validation (e.g. structural_zones missing) is a different failure from
+# malformed JSON, so it gets the validator's own message quoted back as a correction
+# instruction, not the escaping nudge above - see deconstruct_image's retry loop.
+def _validation_retry_system(err_message):
+    return (
+        "Your previous response was valid JSON but failed schema validation: "
+        f"{err_message} Correct this specific problem and return the full corrected "
+        "JSON blueprint again. Return ONLY valid JSON, no markdown fences, no preamble."
+    )
+
+
+# Total vision-call attempts for one ad: the original call plus exactly one retry,
+# whichever failure mode triggers it (parse or schema validation). Mirrors
+# generate_copy.py's _COPY_ATTEMPTS shape - one retry, never a loop.
+_MAX_DECONSTRUCT_ATTEMPTS = 2
 
 # Claude's API default temperature is 1.0 - fine for creative copy, wrong for this call.
 # deconstruct_image is an OBSERVATION task (what does this specific image actually show),
@@ -169,10 +197,15 @@ def _log_parse_failure(attempt, total, message, raw_text, exc):
 def deconstruct_image(image_bytes, ad_id, source_page, captured_at, destination_url="", ad_text="", cta=""):
     """Send one ad image to Claude vision and return a validated blueprint dict.
 
-    Normally ONE API call. If the response cannot be parsed/validated, retries ONCE with
-    a system-prompt nudge about JSON string escaping (see JSON_ESCAPE_SYSTEM). Raises if
-    the retry fails too, logging the raw response on every failed attempt so an
-    unparseable ad stays diagnosable from the run log."""
+    Normally ONE API call. If the response cannot be parsed as JSON, retries ONCE with a
+    system-prompt nudge about JSON string escaping (see JSON_ESCAPE_SYSTEM). If the
+    response parses but fails schema validation (e.g. structural_zones missing - now a
+    required field), retries ONCE instead with the validator's own message appended as a
+    correction instruction (see _validation_retry_system) - a different problem gets a
+    different nudge, not the JSON-escaping one. Either way, raises if the retry fails
+    too, logging ad_id plus the raw response or the validation message on every failed
+    attempt so an unfixable ad stays diagnosable from the run log. One retry, never a
+    loop."""
     b64, media_type = _b64_from_bytes(image_bytes)
     prompt = build_prompt(ad_id, source_page, captured_at, destination_url)
 
@@ -187,8 +220,9 @@ def deconstruct_image(image_bytes, ad_id, source_page, captured_at, destination_
     content.append({"type": "text", "text": prompt})
 
     client = anthropic.Anthropic(timeout=60.0, max_retries=1)  # reads ANTHROPIC_API_KEY from env
-    total = len(_DECONSTRUCT_ATTEMPTS)
-    for attempt, system in enumerate(_DECONSTRUCT_ATTEMPTS, 1):
+    total = _MAX_DECONSTRUCT_ATTEMPTS
+    system = None
+    for attempt in range(1, total + 1):
         kwargs = {
             "model": CLAUDE_MODEL,
             # Part B added creative_objective/target_audience/typography (4 sub-fields) and
@@ -206,8 +240,17 @@ def deconstruct_image(image_bytes, ad_id, source_page, captured_at, destination_
         try:
             raw_text = message.content[0].text if message.content else ""
             return deconstruct_from_response(raw_text)
+        except BlueprintValidationError as e:
+            log.error("deconstruct schema validation failed for ad %s (attempt %s/%s): %s",
+                      ad_id, attempt, total, e.validation_error)
+            if attempt == total:
+                raise
+            log.warning("retrying deconstruct for ad %s with the validation error appended "
+                        "as a correction instruction", ad_id)
+            system = _validation_retry_system(e.validation_error)
         except Exception as e:
             _log_parse_failure(attempt, total, message, raw_text, e)
             if attempt == total:
                 raise
             log.warning("retrying deconstruct for ad %s with a JSON-escaping system prompt nudge", ad_id)
+            system = JSON_ESCAPE_SYSTEM
