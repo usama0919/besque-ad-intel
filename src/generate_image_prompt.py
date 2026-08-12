@@ -258,6 +258,11 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
     text_placement = visual.get("text_placement", "minimal")
     scene_lighting = visual.get("scene_lighting") or {}
     prod_style = (blueprint.get("production_style") or {}).get("style", "")
+    # Computed once, reused everywhere "which register is this" is needed (the three
+    # style= call sites below, and _illustrated_elements_clause) - the same operator-
+    # override-else-reference-observed precedence, never duplicated as three separate
+    # inline expressions that could drift.
+    resolved_style = (realism or "").strip() or prod_style
 
     layout_detail_bp = blueprint.get("layout_detail") or {}
     effective_include_product, reference_has_product = resolve_effective_include_product(
@@ -367,6 +372,7 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
             _critic_feedback_clause(critic_feedback) +
             _scene_elements_clause(blueprint.get("scene_elements")) +
             _semantic_split_clause(blueprint.get("semantic_split")) +
+            _illustrated_elements_clause(blueprint.get("illustrated_elements"), resolved_style) +
             # include_product here is the RAW operator toggle - identical to
             # effective_include_product since the 2026-08-07 reference usability gate
             # reversal (reference_has_product no longer forces effective_include_product
@@ -381,7 +387,7 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
                                    layout_detail=layout_detail_bp, visual=visual,
                                    retheme_colours=retheme_colours, palette=brand_palette,
                                    substance_colour=(product or {}).get("substance_colour"),
-                                   style=(realism or "").strip() or prod_style,
+                                   style=resolved_style,
                                    scene_lighting=scene_lighting,
                                    typography_zones=blueprint.get("typography_zones"),
                                    structural_zones=blueprint.get("structural_zones"),
@@ -408,6 +414,7 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
             _critic_feedback_clause(critic_feedback) +
             _scene_elements_clause(blueprint.get("scene_elements")) +
             _semantic_split_clause(blueprint.get("semantic_split")) +
+            _illustrated_elements_clause(blueprint.get("illustrated_elements"), resolved_style) +
             creative_description.strip() + " "
             + product_clause
             + _bottle_fixed_clause() + _bottle_register_clause(scene_lighting) +
@@ -422,6 +429,7 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
             _critic_feedback_clause(critic_feedback) +
             _scene_elements_clause(blueprint.get("scene_elements")) +
             _semantic_split_clause(blueprint.get("semantic_split")) +
+            _illustrated_elements_clause(blueprint.get("illustrated_elements"), resolved_style) +
             f"A premium skincare advertisement image for Besque, a natural body-oil brand for women 40+. "
             f"Composition and setting: {layout}. (If this implies a person, render them per compliance "
             f"rule C1 - a generic, non-identifiable model, never the specific individual described - "
@@ -430,7 +438,7 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
             f"Palette and mood: {palette}. Text placement: {text_placement}. "
             f"Square 1:1 aspect ratio composition. "
             + generate_image_prompt_writer.STYLE_GUIDANCE.get(
-                (realism or "").strip() or prod_style, DEFAULT_STYLE_GUIDANCE)
+                resolved_style, DEFAULT_STYLE_GUIDANCE)
             + _bottle_fixed_clause() + _bottle_register_clause(scene_lighting) +
             closing
         )
@@ -765,6 +773,57 @@ def _semantic_split_clause(semantic_split=None):
         f"concern, on the SAME subject: {after}. Rendering the same skin condition on "
         f"both sides is a failure - the contrast between them is the entire point of "
         f"this format. "
+    )
+
+
+def _illustrated_elements_clause(illustrated_elements=None, style=None):
+    """Item 2 (2026-08-12 evening): deconstruct's illustrated_elements inventory
+    (schema/blueprint.schema.json) - drawn props in an ILLUSTRATED reference that are
+    neither the product, a person, nor text (a steak, a spoon of collagen powder, a
+    hair strand - anything the reference's own artwork depicts to make its argument
+    visually). Live finding: on illustrated references, generation correctly rewrites
+    the TEXT to Besque but clones these drawn elements unchanged - the illustration
+    still visually argues the competitor's product category (a protein supplement)
+    while the words say body oil. Same reasoning as _scene_elements_clause/
+    _competitor_props_clause: a bare "match the reference" instruction has nothing
+    concrete to act on; naming each element and its position gives generation
+    something to actually substitute.
+
+    Deliberately does NOT name a specific replacement ingredient/visual per element -
+    inventing "a drop of vitamin E" or similar with no basis in the product's real
+    ingredients would itself be a fabricated product fact (compliance C3). Instead
+    names the CATEGORY of acceptable substitute (a generic natural/botanical/
+    oil-adjacent visual) and requires it be drawn NATIVELY in the reference's own
+    illustrated style at the same position - never the literal off-brand item redrawn
+    unchanged, and never a photographic/photorealistic insert into a drawing.
+
+    Illustrated-register only (style == "illustrated") - a photographic reference's
+    off-brand props are already covered by _competitor_props_clause (PROP_KEYWORDS)
+    and the general product-substitution instructions; this field only exists for
+    drawn scenes where those don't apply. Fixed position, same reasoning as
+    _scene_elements_clause: called identically in all three build_image_prompt
+    branches. Returns "" when style isn't illustrated or the list is empty, so a
+    non-illustrated blueprint, or one from before this field existed, produces
+    byte-for-byte the same prompt as before this existed."""
+    if style != "illustrated" or not illustrated_elements:
+        return ""
+    bullets = " ".join(
+        f"({i}) \"{e.get('depicts', '')}\" at {e.get('position') or 'its shown position'}"
+        for i, e in enumerate(illustrated_elements, start=1)
+    )
+    return (
+        f"ILLUSTRATED ELEMENTS TO SUBSTITUTE (STRICT): the reference's own artwork "
+        f"includes these drawn elements, none of which are Besque's - {bullets}. Each "
+        f"one visually argues the COMPETITOR's product category (an ingredient, prop, "
+        f"or symbol specific to what they sell), not a body oil - keeping any of them "
+        f"unchanged leaves the illustration arguing a different product even after the "
+        f"text is rewritten to Besque. Replace EACH with a generic, on-brand natural/"
+        f"botanical/oil-adjacent visual (e.g. a leaf, a flower, an oil droplet, a "
+        f"citrus slice) - never a specific named ingredient not in this product's real "
+        f"ingredient list, and never the reference's own item redrawn unchanged. Draw "
+        f"the replacement NATIVELY in this scene's own illustrated style - same line "
+        f"weight, shading, and position as the original - never a photograph or "
+        f"photorealistic element composited into the drawing. "
     )
 
 
@@ -1121,6 +1180,16 @@ def _structural_zones_clause(structural_zones, zone_copy_text=None, cta_text=Non
     remove_lines = []
     disclaimer_lines = []
     social_proof_remove_lines = []
+    # testimonial_placed (2026-08-12, double-rendering regression): the loop below had
+    # no cap on how many social_proof/single_quote zones it would substitute the SAME
+    # real review into - a reference with TWO such zones (e.g. a speech-bubble quote
+    # AND a caption block reiterating it) got the identical quote+attribution rendered
+    # twice. There is exactly ONE real review per run (select_testimonial_review picks
+    # a single one) - it renders in the FIRST qualifying zone only; any further
+    # social_proof/single_quote zone falls to REMOVE, same as "no real review at all",
+    # since there is genuinely nothing left to put there without inventing a second,
+    # different review (which the existing REMOVE wording already forbids).
+    testimonial_placed = False
     for z in structural_zones:
         zt = z.get("zone_type")
         pos = z.get("position") or "its shown position"
@@ -1235,7 +1304,7 @@ def _structural_zones_clause(structural_zones, zone_copy_text=None, cta_text=Non
             disclaimer_lines.append(f"- disclaimer at {pos} (container: {container})")
         elif zt == "social_proof":
             kind = z.get("social_proof_kind")
-            if kind == "single_quote" and testimonial and testimonial.get("quote"):
+            if kind == "single_quote" and testimonial and testimonial.get("quote") and not testimonial_placed:
                 attribution = testimonial.get("attribution") or "a verified customer"
                 # testimonial_zones supplies PLACEMENT/STYLING only (see this function's
                 # own docstring) - matched by ordinal position among social_proof/
@@ -1263,6 +1332,7 @@ def _structural_zones_clause(structural_zones, zone_copy_text=None, cta_text=Non
                     + styling_instruction
                 )
                 substituted_zone_types.add(zt)
+                testimonial_placed = True
             else:
                 social_proof_remove_lines.append(
                     f"- social_proof ({kind or 'unspecified kind'}) at {pos} (container: {container})"

@@ -2212,6 +2212,43 @@ def test_structural_zones_clause_testimonial_zones_matched_ordinally_not_by_stri
     assert substituted == set()
 
 
+# ---- 2026-08-12 evening: TESTIMONIAL RENDERING TWICE regression - a reference with
+# TWO social_proof/single_quote zones (e.g. a speech-bubble quote AND a caption block
+# reiterating it) got the SAME real review substituted into BOTH, with no cap on how
+# many qualifying zones the loop would fill. Only ONE real review exists per run -
+# it renders in the FIRST zone; any further zone falls to REMOVE, same as "no real
+# review at all", rather than repeating the identical quote+attribution a second time. ----
+
+def test_structural_zones_clause_testimonial_renders_exactly_once_across_two_zones():
+    zones = [
+        _szone("social_proof", social_proof_kind="single_quote", position="mid-frame"),
+        _szone("social_proof", social_proof_kind="single_quote", position="lower-third"),
+    ]
+    clause, substituted = generate_image_prompt._structural_zones_clause(
+        zones, testimonial={"quote": "This oil changed my skin.", "attribution": "sally p."},
+    )
+    assert clause.count("This oil changed my skin.") == 1
+    assert clause.count("sally p.") == 1
+    assert "STRUCTURAL ZONES - SUBSTITUTE" in clause
+    assert "STRUCTURAL ZONES - REMOVE, SOCIAL PROOF" in clause
+    assert substituted == {"social_proof"}
+
+
+def test_structural_zones_clause_testimonial_placement_respects_styling_only_for_first_zone():
+    """The styling/placement detail from testimonial_zones must still attach only to
+    the ONE zone that actually gets the real review - not to the removed duplicate."""
+    zones = [
+        _szone("social_proof", social_proof_kind="single_quote", position="mid-frame"),
+        _szone("social_proof", social_proof_kind="single_quote", position="lower-third"),
+    ]
+    clause, substituted = generate_image_prompt._structural_zones_clause(
+        zones, testimonial={"quote": "This oil changed my skin.", "attribution": "sally p."},
+        testimonial_zones=[{"styling": "Avatar top-left", "placement": "mid-frame card"}],
+    )
+    assert clause.count("Avatar top-left") == 1
+    assert substituted == {"social_proof"}
+
+
 def test_structural_zones_clause_handles_several_of_the_same_type():
     clause, substituted = generate_image_prompt._structural_zones_clause(
         [_szone("badge", position="top-left"), _szone("badge", position="top-right")]
