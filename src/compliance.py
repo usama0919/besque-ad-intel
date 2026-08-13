@@ -1,7 +1,8 @@
 """Compliance check: verifies generated Besque output contains no competitor
-brand name, no verbatim competitor copy, and no fabricated testimonial or
-unsubstantiated numeric claim (compliance rule C2 - see src/compliance_rules.py).
-Acceptance criterion enforcement.
+brand name, no verbatim competitor copy, no fabricated testimonial or
+unsubstantiated numeric claim (compliance rule C2), and no borrowed personal
+name/attribution carried over from a reference ad (rule C9) - see
+src/compliance_rules.py. Acceptance criterion enforcement.
 
 The testimonial/claim checks are a MECHANICAL BACKSTOP, not the primary defense -
 prompt instructions (COMPLIANCE_RULES, sent to the model) are the primary defense.
@@ -340,8 +341,55 @@ def check_unapproved_ingredient_claim(generated_copy, approved_claims=""):
     return issues
 
 
+# Rule C9 mechanical check (2026-08-13, item 2 sharpened): a personal-name-shaped
+# construct - "Firstname L." review-attribution shorthand, an explicit "attributed to
+# X", or an em-dash signature line - matched by SHAPE (a capitalised word followed by a
+# capitalised initial), never a name list. Live evidence: a draft correctly substituted
+# the competitor's brand and product throughout, but the competitor's own testimonial
+# attribution ("Sean R.") survived verbatim into the Besque draft - publishing a real
+# individual's name as though they endorsed Besque, without their consent, which is a
+# legal exposure independent of whether the surrounding copy read well. Shared with
+# generate_copy.py's own reference-text redaction (_redact_personal_attribution) so the
+# INPUT side (strip it out of what a reference supplies before it can be paraphrased
+# into copy) and the OUTPUT side (flag it if it still shows up in what Claude actually
+# wrote) recognise the identical shape - one definition, not two that could drift apart.
+PERSONAL_NAME_ATTRIBUTION_PATTERN = re.compile(
+    r"\battributed\s+to\s+[A-Z][\w'-]*(?:\s+[A-Z][\w'.-]*)?\.?"
+    r"|[—–-]\s*[A-Z][a-z]+\s+[A-Z]\.(?=[\s).,!?\"']|$)"
+    r"|\b[A-Z][a-z]+\s+[A-Z]\.(?=[\s).,!?\"']|$)"
+)
+
+
+def check_borrowed_personal_attribution(generated_copy, authorized_attribution=""):
+    """Rule C9 mechanical check: any personal-name-shaped hit in generated copy that
+    does not match the ONE authorized attribution (select_testimonial_review's own
+    pick, a real Besque customer, threaded in by pipeline.py). Always on, same
+    reasoning as check_unauthorized_efficacy_claim/check_unapproved_ingredient_claim -
+    a borrowed real person's name should never be allowed through unsubstantiated
+    regardless of any run-level toggle. Remove-by-default, not carry-by-default (the
+    same principle C7 already applies to an ungoverned zone): an unrecognised name is
+    flagged, never assumed harmless just because it reads like ordinary ad copy."""
+    issues = []
+    gen = " ".join(str(v) for v in generated_copy.values())
+    authorized_norm = _normalize(authorized_attribution)
+    for match in PERSONAL_NAME_ATTRIBUTION_PATTERN.finditer(gen):
+        name = match.group(0).strip(" -—–.")
+        if not name:
+            continue
+        if authorized_norm and _normalize(name) in authorized_norm:
+            continue
+        issues.append(
+            f"Personal name/attribution '{name}' found in generated copy but does not "
+            f"match the authorized testimonial's own attribution "
+            f"({authorized_attribution or 'none supplied'}) - a real person's name "
+            f"from elsewhere must never be carried into Besque's output."
+        )
+    return issues
+
+
 def check_compliance(generated_copy, competitor_page_name, competitor_text="",
-                      approved_claims="", approved_testimonials="", offer_text=_UNSET):
+                      approved_claims="", approved_testimonials="", offer_text=_UNSET,
+                      testimonial_attribution=""):
     """Return (ok: bool, issues: list[str]).
 
     Flags:
@@ -358,6 +406,11 @@ def check_compliance(generated_copy, competitor_page_name, competitor_text="",
         passed (even as "" or None) - see check_unauthorized_offer and the _UNSET sentinel
         above. pipeline.py always passes it; every pre-existing caller that doesn't know
         about offer_text keeps its exact old behaviour.
+      - a borrowed personal name/attribution not matching testimonial_attribution (rule
+        C9) - always on, same reasoning as 4b/4c (see check_borrowed_personal_attribution).
+        testimonial_attribution defaults to "" (nothing authorized), so every pre-existing
+        caller that doesn't pass it flags ANY name-shaped hit - strictly safer than before
+        calling this check existed, never a regression.
     """
     issues = []
     gen = " ".join(str(v) for v in generated_copy.values())
@@ -397,5 +450,8 @@ def check_compliance(generated_copy, competitor_page_name, competitor_text="",
     # see check_compliance's docstring.
     if offer_text is not _UNSET:
         issues.extend(check_unauthorized_offer(generated_copy, offer_text))
+
+    # 6. Borrowed personal name/attribution (rule C9) - always on, same reasoning as 4b/4c.
+    issues.extend(check_borrowed_personal_attribution(generated_copy, testimonial_attribution))
 
     return (len(issues) == 0, issues)

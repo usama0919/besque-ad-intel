@@ -497,6 +497,44 @@ def test_ugc_style_guidance_reaches_edit_mode_register_clause():
     assert "NO colour grading" in instruction
 
 
+# ---- Item 3 (2026-08-13): UGC in-image caption/quote text must read as typed on a
+# phone, not as marketing copy - formal quote marks, an em-dash attribution line,
+# decorative ellipsis, and rhetorical ad questions all read as ad copy, not a real
+# person's own caption. Governs rendering only - sourcing (a real testimonial is still
+# required, C2) is untouched. ----
+
+def test_ugc_style_guidance_bans_formal_quote_and_em_dash_attribution():
+    ugc = writer.STYLE_GUIDANCE["ugc"]
+    assert "No formal quotation marks" in ugc
+    assert "No" in ugc and "em-dash attribution line" in ugc
+
+
+def test_ugc_style_guidance_requires_casual_capitalisation_and_plain_punctuation():
+    ugc = writer.STYLE_GUIDANCE["ugc"]
+    assert "Capitalisation is casual and inconsistent" in ugc
+    assert "never a stylised ellipsis used as decorative" in ugc
+
+
+def test_ugc_style_guidance_bans_rhetorical_marketing_question():
+    ugc = writer.STYLE_GUIDANCE["ugc"]
+    assert "rhetorical marketing question" in ugc
+    assert "Sound familiar?" in ugc
+
+
+def test_ugc_style_guidance_caption_voice_governs_rendering_not_sourcing():
+    ugc = writer.STYLE_GUIDANCE["ugc"]
+    assert "never what text is sourced or says" in ugc
+    assert "a real testimonial is still required" in ugc
+    assert "its actual words are never altered" in ugc
+
+
+def test_ugc_style_guidance_caption_voice_reaches_edit_mode_register_clause():
+    from src import generate_image_prompt
+    instruction = generate_image_prompt._edit_mode_instruction(style="ugc")
+    assert "No formal quotation marks" in instruction
+    assert "rhetorical marketing question" in instruction
+
+
 # ---- 2026-08-13 evening: high_spec reworded to drop "editorial beauty-campaign"/
 # "premium beauty-brand"/"luxury brand campaign" framing - words that carry an implicit
 # youth-skewing fashion-editorial association independent of rule 10's own text, without
@@ -526,3 +564,33 @@ def test_high_spec_style_guidance_points_to_rule_10_not_a_casting_cue():
     assert "never a model-age or fashion-editorial styling cue" in high_spec
     assert "rule 10" in high_spec
     assert "not a casting direction" in high_spec
+
+
+# ---- 2026-08-13 evening: STYLE_GUIDANCE["illustrated"]'s label-fidelity note and
+# generate_image_prompt._bottle_identity_clause were two competing voices - identity
+# exempted only "fine print", the register note exempted "sub-lines, certification
+# icons, fine print" too. Reconciled: identity owns CONTENT, this note owns LEGIBILITY
+# at scale, and neither may license a different bottle. ----
+
+def test_illustrated_style_guidance_defers_content_to_bottle_identity():
+    illustrated = writer.STYLE_GUIDANCE["illustrated"]
+    assert "the BOTTLE IDENTITY rule stated earlier in this prompt is what the label actually CONTAINS" in illustrated
+    assert "this register note governs only what renders LEGIBLY at this scale/style, never different content" in illustrated
+
+
+def test_illustrated_style_guidance_still_exempts_secondary_content_only():
+    illustrated = writer.STYLE_GUIDANCE["illustrated"]
+    assert "Secondary label content ONLY - sub-lines, certification icons, fine print - " \
+           "does NOT need to stay legible" in illustrated
+
+
+def test_illustrated_style_guidance_never_licenses_a_different_bottle():
+    illustrated = writer.STYLE_GUIDANCE["illustrated"]
+    assert "this is a legibility exception only, never a licence to render a different " \
+           "bottle, wordmark, or colour scheme" in illustrated
+
+
+def test_illustrated_style_guidance_reaches_edit_mode_register_clause():
+    from src import generate_image_prompt
+    instruction = generate_image_prompt._edit_mode_instruction(style="illustrated")
+    assert "the BOTTLE IDENTITY rule stated earlier in this prompt is what the label actually CONTAINS" in instruction

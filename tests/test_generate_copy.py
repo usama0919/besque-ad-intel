@@ -538,6 +538,165 @@ def test_build_copy_prompt_lists_every_text_purpose_entry():
     assert prompt.count("served as:") == 2
 
 
+# ---- Item 2 (2026-08-13, sharpened): purpose not wording - both _text_purpose_clause
+# and _text_zone_copy_clause must prohibit reusing the reference's own sentence
+# structure/phrasing/nouns, and must never let a personal name/attribution reach
+# generated copy. ----
+
+def test_text_purpose_clause_prohibits_reusing_reference_wording():
+    prompt = generate_copy._text_purpose_clause(
+        {"text_purpose": [{"text_verbatim": "Tired of crepey skin?", "purpose": "problem_hook",
+                            "placement": "headline"}]}
+    )
+    assert "entirely new sentences" in prompt.lower()
+    assert "never reuse the reference's own sentence structure" in prompt
+
+
+def test_text_purpose_clause_prohibits_personal_name_in_output():
+    prompt = generate_copy._text_purpose_clause(
+        {"text_purpose": [{"text_verbatim": "Loving this. Sean R.", "purpose": "testimonial",
+                            "placement": "bottom card"}]}
+    )
+    assert "must never appear in your output" in prompt
+    assert "APPROVED TESTIMONIALS" in prompt
+
+
+def test_text_zone_copy_clause_prohibits_reusing_reference_wording():
+    zones = [{"zone_type": "body_copy", "position": "bottom", "detail": "a closing line"}]
+    prompt = generate_copy._text_zone_copy_clause(zones)
+    assert "ENTIRELY NEW sentences" in prompt
+    assert "never reuse the reference's own sentence structure" in prompt
+
+
+def test_text_zone_copy_clause_prohibits_personal_name_in_panel_copy():
+    zones = [{"zone_type": "body_copy", "position": "bottom", "detail": "a closing line"}]
+    prompt = generate_copy._text_zone_copy_clause(zones)
+    assert "never written into panel_copy" in prompt
+
+
+# ---- Item 2 (2026-08-13, sharpened): personal-name-shaped attribution ("Sean R.", an
+# "attributed to X" construction, or an em-dash signature) must never reach a copy
+# prompt from ANY reference-derived field - testimonial_zones.attribution (via the raw
+# blueprint dump), text_purpose.text_verbatim, or a structural_zones.detail. ----
+
+def test_redact_personal_attribution_strips_initial_surname():
+    assert "Sean R." not in generate_copy._redact_personal_attribution(
+        "This is my go-to for vacation. Sean R."
+    )
+
+
+def test_redact_personal_attribution_strips_attributed_to_construction():
+    redacted = generate_copy._redact_personal_attribution("attributed to Teresa C.")
+    assert "Teresa" not in redacted
+
+
+def test_redact_personal_attribution_strips_em_dash_signature():
+    redacted = generate_copy._redact_personal_attribution('"My new staple." — Sandy O.')
+    assert "Sandy O" not in redacted
+
+
+def test_redact_personal_attribution_strips_json_attribution_key():
+    redacted = generate_copy._redact_personal_attribution('{"attribution": "Sean R."}')
+    assert "Sean R" not in redacted
+    assert '"attribution": ""' in redacted
+
+
+def test_redact_personal_attribution_leaves_ordinary_text_untouched():
+    text = "Tired of crepey skin? Try Besque today."
+    assert generate_copy._redact_personal_attribution(text) == text
+
+
+def test_build_copy_prompt_redacts_testimonial_zones_attribution_from_raw_blueprint():
+    # A different name from the "Sean R." example already baked into the prohibition
+    # wording itself (see PERSONAL_NAME_ATTRIBUTION_PATTERN's own docstring) - using the
+    # same name here would trivially match the instructional prose, not prove redaction.
+    bp = {"angle": "x", "testimonial_zones": [
+        {"text_verbatim": "This is my go-to for vacation.", "attribution": "Wendy P.",
+         "placement": "bottom-left card", "styling": "quote marks"},
+    ]}
+    prompt = generate_copy.build_copy_prompt(bp)
+    assert "Wendy P" not in prompt
+
+
+def test_text_zone_copy_clause_redacts_personal_name_from_detail():
+    zones = [{"zone_type": "body_copy", "position": "bottom",
+              "detail": "a closing testimonial line attributed to Wendy P."}]
+    prompt = generate_copy._text_zone_copy_clause(zones)
+    assert "Wendy P" not in prompt
+
+
+def test_text_purpose_clause_redacts_personal_name_from_text_verbatim():
+    bp = {"text_purpose": [{"text_verbatim": "So glad I tried this. Wendy P.",
+                             "purpose": "testimonial", "placement": "bottom card"}]}
+    prompt = generate_copy._text_purpose_clause(bp)
+    assert "Wendy P" not in prompt
+
+
+# ---- Item 1 (2026-08-13): _text_purpose_clause and _text_zone_copy_clause must not
+# independently commission copy for the SAME underlying reference text block - a
+# matching placement/position is a mechanical signal they describe the same block,
+# and the zone-copy clause (more specific) wins. ----
+
+def test_dedupe_text_purpose_against_zones_drops_matching_placement():
+    entries = [{"text_verbatim": "A go-to for vacation", "purpose": "testimonial", "placement": "bottom-left card"}]
+    zones = [{"zone_type": "body_copy", "position": "bottom-left card", "detail": "x"}]
+    assert generate_copy._dedupe_text_purpose_against_zones(entries, zones) == []
+
+
+def test_dedupe_text_purpose_against_zones_is_case_and_whitespace_insensitive():
+    entries = [{"text_verbatim": "x", "purpose": "other", "placement": "Bottom - Left  Card"}]
+    zones = [{"zone_type": "body_copy", "position": "bottom-left card", "detail": "x"}]
+    assert generate_copy._dedupe_text_purpose_against_zones(entries, zones) == []
+
+
+def test_dedupe_text_purpose_against_zones_keeps_entry_with_no_matching_zone():
+    entries = [{"text_verbatim": "Tired of dry skin?", "purpose": "problem_hook", "placement": "headline"}]
+    zones = [{"zone_type": "body_copy", "position": "bottom-left card", "detail": "x"}]
+    result = generate_copy._dedupe_text_purpose_against_zones(entries, zones)
+    assert result == entries
+
+
+def test_dedupe_text_purpose_against_zones_untouched_when_no_zones():
+    entries = [{"text_verbatim": "x", "purpose": "other", "placement": "anywhere"}]
+    assert generate_copy._dedupe_text_purpose_against_zones(entries, None) == entries
+    assert generate_copy._dedupe_text_purpose_against_zones(entries, []) == entries
+
+
+def test_build_copy_prompt_does_not_double_commission_same_block():
+    """The live incident this fixes: a reference's closing statement described by BOTH
+    a text_purpose entry (purpose: testimonial) and a body_copy structural zone at the
+    SAME placement/position must be commissioned ONCE (via TEXT ZONE COPY), never
+    independently a second time via COMMUNICATIVE PURPOSE."""
+    bp = {
+        "structural_zones": [
+            {"zone_type": "body_copy", "position": "bottom-left card",
+             "detail": "a personal recommendation about not feeling like garbage on vacation"},
+        ],
+        "text_purpose": [
+            {"text_verbatim": "This is my go-to for not feeling like garbage on vacation",
+             "purpose": "testimonial", "placement": "bottom-left card"},
+        ],
+    }
+    prompt = generate_copy.build_copy_prompt(bp)
+    assert "TEXT ZONE COPY" in prompt
+    assert "COMMUNICATIVE PURPOSE" not in prompt
+
+
+def test_build_copy_prompt_keeps_text_purpose_entry_with_no_matching_zone():
+    bp = {
+        "structural_zones": [
+            {"zone_type": "body_copy", "position": "bottom-left card", "detail": "x"},
+        ],
+        "text_purpose": [
+            {"text_verbatim": "Tired of dry skin?", "purpose": "problem_hook", "placement": "headline"},
+        ],
+    }
+    prompt = generate_copy.build_copy_prompt(bp)
+    assert "TEXT ZONE COPY" in prompt
+    assert "COMMUNICATIVE PURPOSE" in prompt
+    assert "Tired of dry skin?" in prompt
+
+
 # ---- validate_copy mechanical backstop (2026-08-11) - a prompt instruction alone is the
 # pattern that has repeatedly failed on this codebase; an empty cta/image_subtext against
 # a real zone must fail validation, not pass silently. ----

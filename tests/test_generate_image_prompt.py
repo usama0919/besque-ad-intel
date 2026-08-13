@@ -765,6 +765,33 @@ def test_visual_description_absent_produces_no_fixed_appearance_clause():
     assert "Its fixed visual appearance:" not in prompt
 
 
+def test_product_desc_no_longer_duplicates_visual_description():
+    """2026-08-13 evening: removed from product_desc entirely, now that
+    _bottle_identity_clause states it earlier with STRICT weight - the literal phrase
+    "Its fixed visual appearance:" must never appear anywhere, even WITH a
+    visual_description supplied (distinct from the test above, which only proves it
+    with none supplied)."""
+    product = {"name": "Magic Body Oil", "description": "seven cold-pressed oils",
+               "visual_description": "amber glass bottle, gold pump top"}
+    prompt = generate_image_prompt.build_image_prompt(_blueprint(), product=product)
+    assert "Its fixed visual appearance:" not in prompt
+    # the fact itself still reaches the prompt - via _bottle_identity_clause instead
+    assert "amber glass bottle, gold pump top" in prompt
+
+
+def test_product_desc_suppresses_key_claim_line_when_empty():
+    product = {"name": "Magic Body Oil", "description": "seven cold-pressed oils", "hero_claim": ""}
+    prompt = generate_image_prompt.build_image_prompt(_blueprint(), product=product)
+    assert "Key claim:" not in prompt
+
+
+def test_product_desc_includes_key_claim_line_when_present():
+    product = {"name": "Magic Body Oil", "description": "seven cold-pressed oils",
+               "hero_claim": "Visibly firms skin"}
+    prompt = generate_image_prompt.build_image_prompt(_blueprint(), product=product)
+    assert "Key claim: Visibly firms skin." in prompt
+
+
 def test_creative_description_does_not_remove_guardrails():
     """brand_rules()/compliance and the product's factual visual_description must always
     be present regardless of what the writer returns - the writer only supplies the
@@ -848,6 +875,89 @@ def test_register_lighting_only_clause_states_lighting_adapts_not_geometry():
     assert "lighting, grading, and finish adapt" in clause
     assert "same bottle, same shape, same label" in clause
     assert "hand-drawn bottle" in clause
+
+
+# ---- Item 3 (2026-08-13): resolve the lighting contradiction - _bottle_register_clause
+# anchored the bottle's shadow/grounding to the reference's own observed facts and
+# demanded an exact match, while _bottle_integration_clause mandates a contact/grip
+# shadow the reference may never have shown (a floating packshot has no contact point
+# to observe a shadow from at all). Fixed by REWORDING, not stacking a new clause: the
+# reference's facts inform the scene's CHARACTER (direction/hardness/colour temp/
+# grain); the bottle's own contact/grip shadow and grounding defer explicitly to
+# BOTTLE INTEGRATION's actual composition. Also: an illustrated register must never
+# read scene_lighting at all (deconstruct.py's photographic-only fields produced a
+# live "Not applicable - no photographic lighting" value for an illustrated reference,
+# which _scene_lighting_facts read as a real fact and asserted verbatim) - the drawing
+# treatment for "illustrated" always follows _register_lighting_only_clause()'s own
+# style-driven wording instead, unconditionally. ----
+
+_REAL_SCENE_LIGHTING = {
+    "light_direction": "upper-left, slightly behind camera",
+    "hardness": "soft",
+    "shadow_behaviour": "long, soft shadows falling right",
+    "colour_temperature": "warm/golden",
+    "grain": "visible phone-camera noise/grain",
+    "depth_of_field": "shallow, background softly blurred",
+}
+
+
+def test_bottle_register_clause_falls_back_to_generic_when_no_facts():
+    clause = generate_image_prompt._bottle_register_clause({})
+    assert clause == generate_image_prompt._register_lighting_only_clause()
+
+
+def test_bottle_register_clause_states_scene_character_not_exact_bottle_match():
+    clause = generate_image_prompt._bottle_register_clause(_REAL_SCENE_LIGHTING)
+    assert "light falls from upper-left" in clause
+    assert "SCENE's overall lighting character" in clause
+    assert "must match these observed facts about THIS scene EXACTLY" not in clause
+
+
+def test_bottle_register_clause_defers_contact_shadow_to_bottle_integration():
+    clause = generate_image_prompt._bottle_register_clause(_REAL_SCENE_LIGHTING)
+    assert "does NOT govern the bottle's own contact or grip shadow" in clause
+    assert "BOTTLE INTEGRATION" in clause
+    assert "floating product with no" in clause
+
+
+def test_bottle_register_clause_keeps_reference_photo_lighting_exclusion():
+    clause = generate_image_prompt._bottle_register_clause(_REAL_SCENE_LIGHTING)
+    assert "separate, unrelated studio lighting the product's own reference photo" in clause
+
+
+def test_bottle_register_clause_keeps_geometry_fixed_regardless():
+    clause = generate_image_prompt._bottle_register_clause(_REAL_SCENE_LIGHTING)
+    assert "Geometry, proportions, and label stay exactly as stated above regardless" in clause
+
+
+def test_bottle_register_clause_illustrated_never_reads_scene_lighting_facts():
+    """The live bug: an illustrated reference's own scene_lighting can carry a
+    "Not applicable" value (deconstruct.py trying to fill photographic-only fields for
+    a drawing) - style=="illustrated" must skip _scene_lighting_facts entirely, not
+    just fall back when the dict happens to be empty."""
+    garbage_lighting = {"light_direction": "Not applicable - no photographic lighting"}
+    clause = generate_image_prompt._bottle_register_clause(garbage_lighting, style="illustrated")
+    assert clause == generate_image_prompt._register_lighting_only_clause()
+    assert "Not applicable" not in clause
+
+
+def test_bottle_register_clause_illustrated_ignores_even_real_facts():
+    clause = generate_image_prompt._bottle_register_clause(_REAL_SCENE_LIGHTING, style="illustrated")
+    assert clause == generate_image_prompt._register_lighting_only_clause()
+    assert "upper-left" not in clause
+
+
+def test_bottle_register_clause_photographic_style_still_uses_real_facts():
+    clause = generate_image_prompt._bottle_register_clause(_REAL_SCENE_LIGHTING, style="ugc")
+    assert "light falls from upper-left" in clause
+
+
+def test_bottle_register_clause_no_style_given_keeps_old_behaviour():
+    """Callers that predate the style param (style=None) must see the same photographic
+    treatment as before this fix - only an explicit style=="illustrated" changes
+    anything."""
+    clause = generate_image_prompt._bottle_register_clause(_REAL_SCENE_LIGHTING, style=None)
+    assert "light falls from upper-left" in clause
 
 
 class _CapturingGenaiClientForEdit:
@@ -1042,9 +1152,21 @@ def test_bottle_identity_and_integration_absent_when_productless():
 
 
 def test_bottle_identity_clause_allows_faithful_simplification_never_invented_bottle():
+    """2026-08-13 evening: reconciled with STYLE_GUIDANCE["illustrated"] - identity
+    states what the label CONTAINS, defers what renders LEGIBLY to the register-
+    specific guidance, and only widens the droppable category to SECONDARY content
+    (matching that guidance's own list) rather than "fine print only"."""
     clause = generate_image_prompt._bottle_identity_clause(_REAL_SHAPED_PRODUCT)
-    assert "simplify FAITHFULLY" in clause
-    assert "never invent a different, generic, or simplified-beyond-recognition bottle" in clause
+    assert "This clause states what the label CONTAINS" in clause
+    assert "SECONDARY content only" in clause
+    assert "wordmark, product name, and colours are NEVER simplified away" in clause
+    assert "never a licence to invent a different, generic, or simplified-beyond-recognition bottle" in clause
+
+
+def test_bottle_identity_clause_defers_legibility_to_register_guidance():
+    clause = generate_image_prompt._bottle_identity_clause(_REAL_SHAPED_PRODUCT)
+    assert "governed separately" in clause
+    assert "register-specific guidance and the small-scale simplification note" in clause
 
 
 def test_bottle_integration_clause_requires_participating_object():

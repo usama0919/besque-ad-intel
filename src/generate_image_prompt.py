@@ -294,18 +294,26 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
 
     if effective_include_product:
         if product:
-            visual_desc = product.get("visual_description", "")
+            # visual_description is deliberately NOT restated here (2026-08-13) -
+            # _bottle_identity_clause already states it, earlier, with STRICT/rule-level
+            # weight; repeating it here was the exact "identity described exactly once,
+            # generically" gap that clause was built to fix, not a second, redundant
+            # confirmation worth keeping.
+            hero_claim = (product.get("hero_claim") or "").strip()
             product_desc = (
                 f"The featured product is {product.get('name', 'a Besque product')}: {product.get('description', '')} "
-                + (f"Its fixed visual appearance: {visual_desc}. " if visual_desc else "")
-                + f"These are the ONLY real ingredients allowed to appear if the product's OWN "
+                f"These are the ONLY real ingredients allowed to appear if the product's OWN "
                 f"printed label is legible in the shot: {product.get('ingredients', '')}. This "
                 f"ingredient list exists SOLELY to constrain what the product's own label may "
                 f"say - it is not a list of scene elements. NEVER render any ingredient name as "
                 f"a separate floating callout, badge, sticker, or piece of scene text anywhere "
                 f"else in the image, even if the reference ad's own layout used ingredient "
-                f"callouts. Key claim: {product.get('hero_claim', '')}. Never invent ingredients "
-                f"or label text not listed here. "
+                f"callouts. "
+                # Key claim omitted entirely when unset (2026-08-13) - hero_claim is
+                # currently blank pending Harry's real approved_claims; rendering "Key
+                # claim: . " asserted an empty statement rather than saying nothing.
+                + (f"Key claim: {hero_claim}. " if hero_claim else "")
+                + f"Never invent ingredients or label text not listed here. "
             )
         else:
             product_desc = "(a natural botanical body oil in an elegant bottle). "
@@ -435,7 +443,7 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
             _illustrated_elements_clause(blueprint.get("scene_elements"), resolved_style) +
             creative_description.strip() + " "
             + product_clause
-            + _bottle_fixed_clause() + _bottle_register_clause(scene_lighting) +
+            + _bottle_fixed_clause() + _bottle_register_clause(scene_lighting, resolved_style) +
             f"Square 1:1 aspect ratio composition. " +
             closing
         )
@@ -459,7 +467,7 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
             f"Square 1:1 aspect ratio composition. "
             + generate_image_prompt_writer.STYLE_GUIDANCE.get(
                 resolved_style, DEFAULT_STYLE_GUIDANCE)
-            + _bottle_fixed_clause() + _bottle_register_clause(scene_lighting) +
+            + _bottle_fixed_clause() + _bottle_register_clause(scene_lighting, resolved_style) +
             closing
         )
     return prompt
@@ -1601,13 +1609,19 @@ def _bottle_identity_clause(product):
         f"Besque bottle IS, not merely that it is fixed - {fact_text} These are the "
         "ONLY colours, materials, proportions, and label facts this bottle may show, "
         "in EVERY register this prompt might otherwise describe - photographic, "
-        "3D-rendered, comic-panel, or flat-vector alike. Where a drawing style "
-        "genuinely cannot carry photographic-level detail, simplify FAITHFULLY: keep "
-        "the correct wordmark and colours, and drop only fine print that would be "
-        "illegible at that scale - never invent a different, generic, or simplified-"
-        "beyond-recognition bottle to fit the style. Same proportions, same label "
-        "artwork, same colours, same text, every single generation, regardless of "
-        "what the reference ad's own product looks like or what stylisation guidance "
+        "3D-rendered, comic-panel, or flat-vector alike. This clause states what the "
+        "label CONTAINS - what actually renders legibly at a given size or drawing "
+        "style is governed separately (see the register-specific guidance and the "
+        "small-scale simplification note elsewhere in this prompt), never by "
+        "inventing different content here. Wherever a register or render size cannot "
+        "carry full label detail, that guidance may simplify or drop SECONDARY "
+        "content only (sub-lines, certification icons, fine print, border/rule "
+        "detail) - the wordmark, product name, and colours are NEVER simplified away "
+        "or altered, at any size or in any register. Simplification is about what is "
+        "LEGIBLE, never a licence to invent a different, generic, or simplified-"
+        "beyond-recognition bottle. Same proportions, same label artwork, same "
+        "colours, same text, every single generation, regardless of what the "
+        "reference ad's own product looks like or what stylisation guidance "
         "elsewhere in this prompt otherwise permits. "
     )
 
@@ -1719,23 +1733,63 @@ def _scene_composition_facts(layout_detail=None, visual=None):
             "never a fixed position): " + "; ".join(facts) + ". ")
 
 
-def _bottle_register_clause(scene_lighting):
+def _bottle_register_clause(scene_lighting, style=None):
     """Replaces the generic 'match the rendering register' instruction with concrete
     observed facts about THIS reference's own lighting, whenever deconstruct.py extracted
     them - a wording-only "match the style" instruction has already failed three times on
     this exact bottle-register bug (see CLAUDE.md's guardrails note), so this states what
-    the scene's lighting actually IS rather than asking the model to infer it. Falls back
-    to _register_lighting_only_clause()'s original generic wording only when scene_lighting
-    is entirely empty (nothing to state facts about) - never a silent guess."""
+    the scene's lighting actually IS rather than asking the model to infer it.
+
+    style gates whether scene_lighting is used AT ALL (item 3 fix, 2026-08-13):
+    deconstruct.py's six scene_lighting fields (light_direction/hardness/shadow_
+    behaviour/colour_temperature/grain/depth_of_field) describe PHOTOGRAPHIC lighting -
+    meaningless for a hand-drawn illustration, and live evidence shows the model doesn't
+    leave them blank for one; it writes a value like "Not applicable - no photographic
+    lighting", which _scene_lighting_facts then reads as a real OBSERVED fact (a
+    non-empty string, however it reads) and asserts verbatim, which then risks
+    rendering as literal on-image text (rule 8's own failure shape). Gating on
+    style=="illustrated" BEFORE ever calling _scene_lighting_facts fixes this
+    structurally, the same way _illustrated_elements_clause already gates on style
+    elsewhere in this file - an illustrated register's drawing treatment always follows
+    _register_lighting_only_clause()'s own style-driven wording ("rendered in that
+    illustration's own style"), never the reference's photographic facts, regardless of
+    what deconstruct.py happened to write into those fields this run.
+
+    For a photographic register (or style not given - callers that predate this param
+    keep their old behaviour), falls back to _register_lighting_only_clause() only when
+    scene_lighting is entirely empty (nothing to state facts about) - never a silent
+    guess. When facts ARE present, they describe the SCENE's character (direction,
+    hardness, colour temperature, grain) that the bottle's own surface rendering should
+    read consistent with - but the bottle's own CONTACT or GRIP shadow, and how it is
+    grounded in the frame, are explicitly carved OUT of "match exactly" and deferred to
+    BOTTLE INTEGRATION's own composition instead (the contradiction this fixes): the
+    reference's facts describe a scene that may have shown a floating, ungrounded
+    product with no contact point at all, and BOTTLE INTEGRATION can require a
+    materially different composition (held, applied, resting) than the reference did -
+    a contact/grip shadow that composition requires is never something these facts
+    could have observed, so "match exactly" must not be read to forbid it. Geometry,
+    proportions, and label stay exactly as stated above regardless (bottle identity is
+    untouched by this function, unchanged) - see the material realism clause elsewhere
+    for the liquid/glass physical-realism requirement, also untouched."""
+    if style == "illustrated":
+        return _register_lighting_only_clause()
     facts = _scene_lighting_facts(scene_lighting)
     if not facts:
         return _register_lighting_only_clause()
     return (
         facts +
-        "The bottle's lighting, shadow, grain, and depth of field must match these "
-        "observed facts about THIS scene EXACTLY - never the separate, unrelated studio "
-        "lighting the product's own reference photo(s) happen to have been shot under. "
-        "Geometry, proportions, and label stay exactly as stated above regardless. "
+        "These are facts about THIS SCENE's overall lighting character - direction, "
+        "hardness, colour temperature, and grain - which the bottle's own surface, "
+        "highlights, and colour cast must read consistent with, never the separate, "
+        "unrelated studio lighting the product's own reference photo(s) happen to have "
+        "been shot under. This does NOT govern the bottle's own contact or grip shadow, "
+        "or how it is grounded in the frame - those follow entirely from the composition "
+        "BOTTLE INTEGRATION above actually describes (held, applied, resting), never from "
+        "these observed facts: the reference may have shown a floating product with no "
+        "contact point to observe a shadow from at all, and integration's own "
+        "requirement for a grounded bottle wins wherever the two would otherwise "
+        "disagree. Geometry, proportions, and label stay exactly as stated above "
+        "regardless. "
     )
 
 
@@ -1765,7 +1819,7 @@ def _register_clause(style, scene_lighting=None):
         f"if this vocabulary ever conflicts with what the reference actually shows, "
         f"faithful reproduction wins. {guidance} "
         + _bottle_fixed_clause()
-        + _bottle_register_clause(scene_lighting)
+        + _bottle_register_clause(scene_lighting, style)
     )
 
 

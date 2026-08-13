@@ -329,3 +329,62 @@ def test_clean_copy_with_no_ingredient_claim_still_passes():
     ok, issues = compliance.check_compliance(copy, "Brand", "")
     assert ok is True
     assert issues == []
+
+
+# ---- C9 (2026-08-13, item 2 sharpened): borrowed personal attribution - a real
+# person's name/handle carried over from a reference ad's own testimonial into
+# generated copy, even when brand/product substitution worked correctly elsewhere on
+# the same draft. Live evidence: "Sean R." (the competitor's own testimonial
+# attribution) survived verbatim. Matched by SHAPE (capitalised word + initial), never
+# a name list. ----
+
+def test_initial_surname_attribution_flagged():
+    copy = {"headline": "x", "primary_text": "So glad I tried this. Sean R.", "cta": "y"}
+    issues = compliance.check_borrowed_personal_attribution(copy)
+    assert any("Sean R" in i for i in issues)
+
+
+def test_attributed_to_construction_flagged():
+    copy = {"headline": "x", "primary_text": "A go-to for vacation, attributed to Teresa C.", "cta": "y"}
+    issues = compliance.check_borrowed_personal_attribution(copy)
+    assert any("Teresa C" in i for i in issues)
+
+
+def test_em_dash_signature_flagged():
+    copy = {"headline": "x", "primary_text": '"My new staple." — Sandy O.', "cta": "y"}
+    issues = compliance.check_borrowed_personal_attribution(copy)
+    assert any("Sandy O" in i for i in issues)
+
+
+def test_authorized_attribution_not_flagged():
+    """The ONE personal attribution rule C9 permits: select_testimonial_review's own
+    pick, a real Besque customer - passed through as authorized_attribution."""
+    copy = {"headline": "x", "primary_text": "Loving my results. Maria K.", "cta": "y"}
+    issues = compliance.check_borrowed_personal_attribution(copy, authorized_attribution="Maria K.")
+    assert issues == []
+
+
+def test_unauthorized_name_still_flagged_when_a_different_name_is_authorized():
+    copy = {"headline": "x", "primary_text": "So glad I tried this. Sean R.", "cta": "y"}
+    issues = compliance.check_borrowed_personal_attribution(copy, authorized_attribution="Maria K.")
+    assert any("Sean R" in i for i in issues)
+
+
+def test_no_personal_name_passes():
+    copy = {"headline": "Firmer skin at any age", "primary_text": "Deeply hydrating, lightweight feel", "cta": "Shop"}
+    issues = compliance.check_borrowed_personal_attribution(copy)
+    assert issues == []
+
+
+def test_borrowed_personal_attribution_check_is_always_on_in_check_compliance():
+    copy = {"headline": "x", "primary_text": "So glad I tried this. Sean R.", "cta": "y"}
+    ok, issues = compliance.check_compliance(copy, "Brand", "")  # no offer_text, no attribution passed
+    assert ok is False
+    assert any("Sean R" in i for i in issues)
+
+
+def test_borrowed_personal_attribution_passes_in_check_compliance_when_authorized():
+    copy = {"headline": "x", "primary_text": "Loving my results. Maria K.", "cta": "y"}
+    ok, issues = compliance.check_compliance(copy, "Brand", "", testimonial_attribution="Maria K.")
+    assert ok is True
+    assert issues == []

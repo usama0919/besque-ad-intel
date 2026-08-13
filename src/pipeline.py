@@ -1302,6 +1302,17 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
             # offer_text=offer_text (not omitted) activates check_unauthorized_offer - a
             # real incident produced "50% off - ONLY while stock lasts" in generated copy
             # with offer_text empty, sourced from the competitor's own blueprint.offer.
+            # testimonial_attribution is deliberately left at its default ("" - nothing
+            # authorized): select_testimonial_review's real review is never passed into
+            # generate_copy_live at all (image-path-only, substituted directly into the
+            # image prompt's social_proof zone - see select_testimonial_review's own
+            # docstring), so generated copy has no legitimate reason to contain ANY
+            # personal name, real or borrowed - "" here doesn't relax the check, it's
+            # simply always correct. Computing the real testimonial here just to pass its
+            # attribution through would call select_testimonial_review (a DB read) before
+            # this loop unconditionally, on every ad, even ones this loop already fails
+            # before reaching image generation at all - a real regression, caught by
+            # test_pipeline.py, when tried during this same fix.
             ok, issues = compliance.check_compliance(copy, ad.get("page_name", ""), ad.get("text", ""),
                                                       offer_text=offer_text)
             if ok:

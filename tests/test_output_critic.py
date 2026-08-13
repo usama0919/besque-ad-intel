@@ -178,6 +178,25 @@ def test_critic_system_ingredient_formulation_not_forced_high_confidence():
     assert "unsubstantiated ingredient or formulation claim" not in critic.HIGH_CONFIDENCE_BY_DEFAULT
 
 
+# ---- C9 (2026-08-13, item 2 sharpened): borrowed personal attribution checklist
+# entry - a real person's name/handle carried over from the reference ad, distinct
+# from the existing testimonial (fabricated content) category. Deliberately NOT added
+# to HIGH_CONFIDENCE_BY_DEFAULT, same reasoning as C8: the live evidence ("Sean R.")
+# was confirmed in GENERATED COPY, now mechanically blocked there
+# (compliance.check_borrowed_personal_attribution), not confirmed as a real IMAGE-
+# rendering-only escape. ----
+
+def test_critic_system_has_borrowed_personal_attribution_category():
+    assert "BORROWED PERSONAL ATTRIBUTION (C9)" in critic.CRITIC_SYSTEM
+    assert "Sean R." in critic.CRITIC_SYSTEM
+    assert "DIFFERENT category from the testimonial check above" in critic.CRITIC_SYSTEM
+
+
+def test_critic_system_borrowed_personal_attribution_not_forced_high_confidence():
+    """Deliberate: see this test's module-level comment above."""
+    assert "borrowed personal attribution" not in critic.HIGH_CONFIDENCE_BY_DEFAULT
+
+
 # ---- 2026-08-12 15:13 sweep (oil/bottle item): PRODUCT REGISTER MISMATCH already
 # existed for a studio-lit bottle composited into an ambient scene - extended with a
 # THIRD shape (flat/synthetic oil, glass, pump, label) rather than a new competing

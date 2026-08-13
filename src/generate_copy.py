@@ -5,6 +5,7 @@ import re
 
 from src import json_response
 from src.compliance_rules import COMPLIANCE_RULES
+from src.compliance import PERSONAL_NAME_ATTRIBUTION_PATTERN
 
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
 
@@ -206,6 +207,39 @@ def _angle_language_clause(angle_language):
     )
 
 
+# Item 2 (2026-08-13, sharpened): a personal-name-shaped construct in a reference-
+# derived field (testimonial_zones.attribution, or an "attributed to X"/em-dash
+# signature sitting inside text_purpose.text_verbatim or a structural_zones.detail)
+# must never reach a copy prompt at all - live evidence, "Sean R." (the COMPETITOR's
+# own testimonial attribution) survived into generated Besque copy verbatim even
+# though brand/product substitution worked correctly elsewhere on the same draft.
+# Filtered here at CONSUMPTION (the point where reference text is inserted into a
+# prompt), not requested at deconstruct time: this codebase's own guardrails note
+# (CLAUDE.md) already proved a vision model does not reliably obey a "don't extract X"
+# instruction, especially for content already sitting in the pixels/source text - a
+# deterministic strip of what deconstruct.py already extracted is not subject to that
+# failure mode, since nothing here asks a model to comply with anything.
+#
+# _JSON_ATTRIBUTION_KEY_PATTERN handles blueprint's own "attribution": "..." JSON key
+# (testimonial_zones' dedicated field) when the WHOLE blueprint is dumped verbatim into
+# the prompt (see build_copy_prompt's blueprint=... kwarg below) - replaced with an
+# empty value rather than deleted outright, so the dumped JSON stays well-formed.
+# PERSONAL_NAME_ATTRIBUTION_PATTERN (imported from src.compliance, not redefined here)
+# catches the same shape wherever it appears in ordinary prose (text_verbatim/detail) -
+# ONE definition shared with compliance.check_borrowed_personal_attribution (rule C9),
+# so the INPUT-side filter here and the OUTPUT-side mechanical backstop there can never
+# recognise the shape differently from each other.
+_JSON_ATTRIBUTION_KEY_PATTERN = re.compile(r'"attribution"\s*:\s*"[^"]*"')
+
+
+def _redact_personal_attribution(text):
+    """Strip any personal-name-shaped construct from reference-derived text before it
+    reaches a copy prompt - see the module comment above. Returns "" for falsy input,
+    same contract as _normalize elsewhere in this codebase."""
+    text = _JSON_ATTRIBUTION_KEY_PATTERN.sub('"attribution": ""', text or "")
+    return PERSONAL_NAME_ATTRIBUTION_PATTERN.sub("", text)
+
+
 # zone_types that carry per-zone copy via the panel_copy output field (structural_zones,
 # 2026-08-06 schema addition) - cta is deliberately excluded here: it's a single output
 # field, not a list, so it gets its own detector/clause below (_cta_zone/_cta_zone_clause).
@@ -265,10 +299,15 @@ def _text_zone_copy_clause(zones):
     callout's job is to say what makes the product worth choosing, and the product's
     own identity is already established elsewhere (rule 1/rule 4, the brand_wordmark
     substitution). Stated once, only when at least one product_callout zone is present,
-    not duplicated per zone."""
+    not duplicated per zone.
+
+    detail is redacted via _redact_personal_attribution (2026-08-13, item 2 sharpened)
+    before it is ever printed here - a zone's own detail can otherwise carry a
+    personal-name-shaped construct straight from the reference (see that function's
+    own docstring)."""
     zone_lines = "\n".join(
         f'  - position "{z.get("position", "")}" ({z.get("zone_type", "")}): the '
-        f'reference shows - {z.get("detail", "")}'
+        f'reference shows - {_redact_personal_attribution(z.get("detail", ""))}'
         for z in zones
     )
     repeat_rule = (
@@ -288,6 +327,14 @@ def _text_zone_copy_clause(zones):
         f"{len(zones)} distinct sub_line/body_copy/product_callout zone(s) that need "
         f"matching Besque copy, not the reference's own words, per the zone-specific "
         f"detail below:\n{zone_lines}\n"
+        "Write ENTIRELY NEW sentences for every zone above: never reuse the reference's "
+        "own sentence structure, phrasing, or specific nouns/subjects it named - only "
+        "the JOB each zone is doing carries over, never its words. Any personal name, "
+        "initial-surname construction (e.g. \"Sean R.\"), handle, or signature is never "
+        "written into panel_copy under any circumstances, even if one appeared in the "
+        "detail above - the only personal attribution this copy may ever carry is the "
+        "one supplied in APPROVED TESTIMONIALS, and that never flows through this "
+        "field. "
         "Also return an ADDITIONAL field, panel_copy: a list of EXACTLY "
         f"{len(zones)} objects, one per zone above, each "
         '{"position": "<the exact position string from the list above, verbatim>", '
@@ -358,7 +405,47 @@ def _used_copy_clause(used_headlines):
     )
 
 
-def _text_purpose_clause(blueprint):
+def _normalize_position(position):
+    """Lowercase/whitespace-collapse a position/placement string for comparison -
+    text_purpose[].placement and structural_zones[].position are both free-text phrases
+    describing WHERE the same underlying text sits, extracted independently by
+    deconstruct.py, and _text_zone_copy_clause's own docstring already establishes that
+    position strings are meant to match verbatim across fields sharing one blueprint.
+    Used by _dedupe_text_purpose_against_zones (item 1, 2026-08-13) - a normalized
+    match, not fuzzy similarity, since these two fields are meant to describe the SAME
+    positional vocabulary, not merely similar-sounding ones."""
+    return re.sub(r"[\s\-_]+", " ", (position or "").strip().lower())
+
+
+def _dedupe_text_purpose_against_zones(entries, zones):
+    """Drop any text_purpose entry whose placement matches a structural_zones position
+    already covered by _text_zone_copy_clause (item 1, 2026-08-13): text_purpose and
+    structural_zones are two INDEPENDENT blueprint fields (see deconstruct.py's own
+    schema) that can both describe the same underlying reference text block from a
+    different angle - one by FUNCTION (text_purpose), one by ZONE (structural_zones).
+    With no coordination between them, both clauses could independently commission new
+    Besque copy for the same underlying idea, landing in two different output fields
+    (primary_text/image_subtext vs panel_copy) that both get baked into the final
+    image - a live draft rendered the same closing statement twice, in different
+    wording, this way. A matching position is a strong MECHANICAL signal (not a guess
+    at semantic similarity) that the two entries are the SAME text block: when one
+    exists, text_zone_targets's own per-zone instruction is more specific (it names an
+    exact position and container), so the zone-copy clause wins and the overlapping
+    text_purpose entry is dropped here rather than separately re-commissioned. An entry
+    whose placement doesn't match any zone position is untouched - text_purpose is the
+    ONLY signal for content with no dedicated structural zone at all (e.g. a
+    problem_hook in body copy with no sub_line/body_copy/product_callout zone drawn
+    around it), and dropping those would silently lose the one clause that names them."""
+    if not zones:
+        return entries
+    zone_positions = {_normalize_position(z.get("position", "")) for z in zones}
+    zone_positions.discard("")
+    if not zone_positions:
+        return entries
+    return [e for e in entries if _normalize_position(e.get("placement", "")) not in zone_positions]
+
+
+def _text_purpose_clause(blueprint, zones=None):
     """text_purpose consumption (2026-08-11 schema addition, Item 11): each reference
     text block's FUNCTION (offer/testimonial/efficacy_claim/problem_hook/
     product_description/cta/other), not its wording - read straight from the blueprint
@@ -373,13 +460,25 @@ def _text_purpose_clause(blueprint):
     testimonial-purposed block tells the model the JOB a real testimonial would do here,
     never license to fabricate one. Returns "" when text_purpose is empty or absent, so a
     blueprint from before this field existed produces byte-for-byte the same prompt as
-    before this existed."""
+    before this existed.
+
+    zones (2026-08-13, item 1) is build_copy_prompt's own text_zone_targets(blueprint)
+    result, passed in so this clause can drop any entry _dedupe_text_purpose_against_
+    zones identifies as the SAME underlying text block _text_zone_copy_clause already
+    covers - see that function's own docstring for why. None/[] (no zones, or a caller
+    that predates this) leaves every text_purpose entry exactly as before.
+
+    text_verbatim is redacted via _redact_personal_attribution (item 2, sharpened) -
+    the reference's own wording can carry a personal-name-shaped construct (an
+    "attributed to X"/em-dash signature) inline, independent of testimonial_zones'
+    dedicated attribution field."""
     entries = (blueprint or {}).get("text_purpose") or []
+    entries = _dedupe_text_purpose_against_zones(entries, zones)
     if not entries:
         return ""
     lines = "\n".join(
-        f'  - "{e.get("text_verbatim", "")}" (placement: {e.get("placement", "")}) served '
-        f'as: {e.get("purpose", "other")}'
+        f'  - "{_redact_personal_attribution(e.get("text_verbatim", ""))}" '
+        f'(placement: {e.get("placement", "")}) served as: {e.get("purpose", "other")}'
         for e in entries
     )
     return (
@@ -393,7 +492,14 @@ def _text_purpose_clause(blueprint):
         "only, never permission beyond what APPROVED CLAIMS/APPROVED TESTIMONIALS above "
         "allow - a testimonial-purposed block is never fabricated here just because the "
         "reference had one in that role. Never flatten every reference into generic "
-        "product description regardless of what job its original text was doing."
+        "product description regardless of what job its original text was doing. Inherit "
+        "the JOB only, never the WORDING: write entirely new sentences for every job "
+        "above - never reuse the reference's own sentence structure, phrasing, or the "
+        "specific nouns/subjects it named, even when the job itself carries over exactly. "
+        "Any personal name, initial-surname construction (e.g. \"Sean R.\"), handle, or "
+        "signature appearing anywhere above must never appear in your output - the only "
+        "personal attribution this copy may ever carry is the one supplied in APPROVED "
+        "TESTIMONIALS, and nothing above is that."
     )
 
 
@@ -432,7 +538,16 @@ def build_copy_prompt(blueprint, brand_voice="", approved_claims="", product=Non
     whether this reference has a zone that needs filling. A cta zone (see _cta_zone) gets
     its own separate clause the same way - it's a single output field, not a list, so it
     doesn't fit the panel_copy shape. Every ordinary reference with neither kind of zone
-    sees byte-for-byte the same prompt as before any of this existed."""
+    sees byte-for-byte the same prompt as before any of this existed.
+
+    blueprint=... below is passed through _redact_personal_attribution (item 2,
+    sharpened, 2026-08-13) - the raw blueprint dump is where testimonial_zones'
+    dedicated "attribution" field (the competitor's own testimonial name/handle,
+    verbatim) would otherwise reach Claude with no clause governing it at all, since
+    neither _text_zone_copy_clause nor _text_purpose_clause reads that field. One
+    redaction pass over the whole dumped JSON covers testimonial_zones.attribution and
+    any other current or future field with the same shape, rather than a per-field
+    filter that could miss one."""
     zones = text_zone_targets(blueprint)
     cta_zone = _cta_zone(blueprint)
     prompt = COPY_PROMPT.format(
@@ -441,7 +556,7 @@ def build_copy_prompt(blueprint, brand_voice="", approved_claims="", product=Non
         approved_claims=approved_claims or NO_APPROVED_CLAIMS,
         approved_testimonials=approved_testimonials or NO_APPROVED_TESTIMONIALS,
         compliance_rules=COMPLIANCE_RULES,
-        blueprint=json.dumps(blueprint, indent=2),
+        blueprint=_redact_personal_attribution(json.dumps(blueprint, indent=2)),
         product_info=_product_facts(product),
         offer_clause=_offer_clause(offer_text),
         angle_language_clause=_angle_language_clause(angle_language),
@@ -450,7 +565,7 @@ def build_copy_prompt(blueprint, brand_voice="", approved_claims="", product=Non
         prompt += _text_zone_copy_clause(zones)
     if cta_zone:
         prompt += _cta_zone_clause(cta_zone)
-    prompt += _text_purpose_clause(blueprint)
+    prompt += _text_purpose_clause(blueprint, zones)
     if used_headlines:
         prompt += _used_copy_clause(used_headlines)
     if compliance_feedback:
