@@ -137,6 +137,37 @@ def test_build_prompt_instructs_omitting_absent_zones_never_describing_absence()
     assert "do not add an entry for it just to say it is absent" in prompt
 
 
+# ---- depicts_competitor_category classifier sharpened (2026-08-13 evening): live
+# evidence it was wrong in both directions. Under-flagged: a chain-and-padlock graphic
+# whose own recorded role was "visual metaphor for 'locked' fat... central symbolic
+# element of the ad" was marked false - the old criterion ("is this the competitor's
+# product category") missed metaphor/symbol props that carry the argument without
+# being the product itself. Over-flagged: a distressed 3D human character was marked
+# true - substituting a person with a botanical form is never correct; a person is the
+# separate PERSON path's job, never this field's. ----
+
+def test_build_prompt_depicts_competitor_category_judges_by_argument_function():
+    prompt = deconstruct.build_prompt("AD1", "PageX", "2026-01-01")
+    assert "EXISTS TO MAKE THE COMPETITOR'S ARGUMENT" in prompt
+    assert "chain-and-padlock" in prompt
+    assert "metaphor or symbolic prop is not exempt just because it is not literally the product category" in prompt
+
+
+def test_build_prompt_depicts_competitor_category_excludes_human_figures_always():
+    prompt = deconstruct.build_prompt("AD1", "PageX", "2026-01-01")
+    assert "EXCLUDED, ALWAYS false regardless of role: any human figure, face, or body part" in prompt
+    assert "even one that is central to the ad's argument or is itself the metaphor" in prompt
+    assert "never by this field, with no exception" in prompt
+
+
+def test_build_prompt_depicts_competitor_category_applies_in_every_register():
+    """2026-08-13: no longer framed as an illustrated-only concern - a photographic or
+    3D-rendered competitor-argument prop needs this flag exactly as much as a drawn
+    one, now that generate_image_prompt's substitution clause fires on any register."""
+    prompt = deconstruct.build_prompt("AD1", "PageX", "2026-01-01")
+    assert "Applies in EVERY register, not only illustrated/drawn scenes" in prompt
+
+
 def test_deconstruct_image_scraped_ad_copy_with_braces_does_not_raise(monkeypatch):
     """ad_text/cta are passed to Claude as a SEPARATE content block, never through
     .format() - confirmed end to end: literal { and } in scraped ad copy must not raise

@@ -33,7 +33,18 @@ def _competitor_props_clause(blueprint):
 
     Edit-mode only: this reads signals about what the ATTACHED reference image literally
     shows, and only edit mode attaches that image to Gemini at all - generate mode's
-    writer/template text has no equivalent literal-pixel-copy risk to guard against here."""
+    writer/template text has no equivalent literal-pixel-copy risk to guard against here.
+
+    Precedence sentence (2026-08-13, checked while ungating _illustrated_elements_clause
+    from style=="illustrated"): that clause substitutes a competitor-argument element
+    with a replacement; this clause removes a PROP_KEYWORDS-matched prop outright, with
+    no replacement. The two inputs (a keyword hit in free text here, a structured
+    scene_elements.depicts_competitor_category flag there) have no shared identity key,
+    so the SAME physical object could in principle match both (e.g. an "eye-diagram"
+    contains "diagram") - concrete objects checked for this fix (chain, padlock, donut,
+    weight-loss label) don't match any PROP_KEYWORD, so no overlap exists today, but the
+    precedence is stated explicitly below so a future overlap resolves to substitution,
+    not a contradiction between "remove, never redraw" and "replace with X.\""""
     blueprint = blueprint or {}
     candidates = list((blueprint.get("product_category") or {}).get("signals") or [])
     subject = (blueprint.get("visual") or {}).get("subject")
@@ -48,7 +59,10 @@ def _competitor_props_clause(blueprint):
         f"COMPETITOR's product category, not Besque's - {quoted}. Remove it WITH the "
         f"competitor's product; it is not part of the composition to preserve, and must "
         f"never be redrawn, kept as a background element, or left standing next to the "
-        f"substituted Besque product. "
+        f"substituted Besque product - UNLESS this same element is also named in the "
+        f"COMPETITOR ELEMENTS TO SUBSTITUTE instruction elsewhere in this prompt, in "
+        f"which case that instruction governs instead: substitute it per that "
+        f"instruction rather than simply removing it. "
     )
 
 
@@ -831,17 +845,37 @@ def _illustrated_elements_clause(scene_elements=None, style=None):
     illustrated style at the same position - never the literal off-brand item redrawn
     unchanged, and never a photographic/photorealistic insert into a drawing.
 
-    Illustrated-register only (style == "illustrated") - a photographic reference's
-    off-brand props are already covered by _competitor_props_clause (PROP_KEYWORDS)
-    and the general product-substitution instructions; this only exists for drawn
-    scenes where those don't apply. Fixed position, same reasoning as
-    _scene_elements_clause: called identically in all three build_image_prompt
-    branches. Returns "" when style isn't illustrated or nothing is flagged
-    depicts_competitor_category, so a non-illustrated blueprint, or one from before
-    this field existed, produces byte-for-byte the same prompt as before this
-    existed."""
-    if style != "illustrated":
-        return ""
+    UNGATED from style == "illustrated" (2026-08-13, live audit): what an object
+    DEPICTS is independent of HOW it is drawn - a chain-and-padlock metaphor prop
+    argues the same competitor claim whether it's a flat illustration, a photograph of
+    a real physical prop, or a 3D render. The old style=="illustrated" gate meant a
+    photographic or 3D-rendered reference had NO clause covering these objects at all:
+    _competitor_props_clause's PROP_KEYWORDS matches none of chain/padlock/donut/
+    weight-label, and the general product-substitution instructions only ever address
+    the PRODUCT itself, never a symbolic prop beside it. Now fires on ANY register
+    whenever a depicts_competitor_category entry exists; only the DRAWING instruction
+    for the replacement stays register-conditional - native illustrated style when
+    style=="illustrated", photorealistic integration into the scene otherwise (the
+    same photographic-vs-illustrated distinction _bottle_register_clause/
+    _register_lighting_only_clause already draw for the product itself, applied here
+    to a prop instead).
+
+    Checked for contradiction with _competitor_props_clause (PROP_KEYWORDS, matched
+    against product_category.signals/visual.subject free text) before finalising this
+    ungating: that clause says REMOVE, never redraw; this one says SUBSTITUTE with a
+    replacement. For the concrete objects this fix was written for (chain, padlock,
+    donut, weight-loss label) there is no overlap - none match PROP_KEYWORDS - but a
+    future object could match both (e.g. an "eye-diagram", which contains "diagram").
+    Rather than try to deduplicate two inputs with no shared identity key (a keyword
+    hit in free text vs. a structured scene_elements entry), _competitor_props_clause
+    now states an explicit precedence: if the same element is also named in THIS
+    clause's own SUBSTITUTE list, that instruction governs instead of plain removal -
+    see its own docstring/text for the added sentence.
+
+    Fixed position, same reasoning as _scene_elements_clause: called identically in
+    all three build_image_prompt branches. Returns "" when nothing is flagged
+    depicts_competitor_category, so a blueprint from before this field existed
+    produces byte-for-byte the same prompt as before this existed."""
     competitor_elements = [e for e in (scene_elements or []) if e.get("depicts_competitor_category")]
     if not competitor_elements:
         return ""
@@ -849,20 +883,30 @@ def _illustrated_elements_clause(scene_elements=None, style=None):
         f"({i}) \"{e.get('element', '')}\" ({e.get('role', '')})"
         for i, e in enumerate(competitor_elements, start=1)
     )
+    if style == "illustrated":
+        drawing_instruction = (
+            "Draw the replacement NATIVELY in this scene's own illustrated style - "
+            "same line weight, shading, and position as the original - never a "
+            "photograph or photorealistic element composited into the drawing. "
+        )
+    else:
+        drawing_instruction = (
+            "Render the replacement photorealistically, integrated into this scene "
+            "exactly as the object it replaces was - same position, scale, and "
+            "lighting as the original - never a flat illustration or drawn element "
+            "composited into a photographic or 3D-rendered scene. "
+        )
     return (
-        f"ILLUSTRATED ELEMENTS TO SUBSTITUTE (STRICT): the reference's own artwork "
-        f"includes these drawn elements, none of which are Besque's - {bullets}. Each "
-        f"one visually argues the COMPETITOR's product category (an ingredient, prop, "
-        f"or symbol specific to what they sell), not a body oil - keeping any of them "
-        f"unchanged leaves the illustration arguing a different product even after the "
-        f"text is rewritten to Besque. Replace EACH with a generic, on-brand oil-"
-        f"adjacent visual - an oil droplet, or an abstract botanical form (a plain "
-        f"leaf or petal shape, never a specific, identifiable, nameable flower or "
-        f"fruit) - never a specific named ingredient not in this product's real "
-        f"ingredient list, and never the reference's own item redrawn unchanged. Draw "
-        f"the replacement NATIVELY in this scene's own illustrated style - same line "
-        f"weight, shading, and position as the original - never a photograph or "
-        f"photorealistic element composited into the drawing. "
+        f"COMPETITOR ELEMENTS TO SUBSTITUTE (STRICT): the reference's own scene includes these "
+        f"elements, none of which are Besque's - {bullets}. Each one exists to make "
+        f"the COMPETITOR's argument (an ingredient, prop, symbol, or metaphor specific "
+        f"to what they sell), not a body oil - keeping any of them unchanged leaves "
+        f"the scene arguing a different product even after the text is rewritten to "
+        f"Besque. Replace EACH with a generic, on-brand oil-adjacent visual - an oil "
+        f"droplet, or an abstract botanical form (a plain leaf or petal shape, never a "
+        f"specific, identifiable, nameable flower or fruit) - never a specific named "
+        f"ingredient not in this product's real ingredient list, and never the "
+        f"reference's own item redrawn or re-photographed unchanged. " + drawing_instruction
     )
 
 
@@ -1644,7 +1688,7 @@ def _non_carryover_exceptions_clause():
         "the scale of any prop, holder, float, or opening sized for the reference's own "
         "product - that adapts to fit the substituted Besque bottle's real, fixed "
         "proportions instead, never the reverse (see the product instruction above), "
-        "and EXCEPT any drawn element named in the ILLUSTRATED ELEMENTS TO SUBSTITUTE "
+        "and EXCEPT any element named in the COMPETITOR ELEMENTS TO SUBSTITUTE "
         "instruction above, where one applies - those are substituted per that "
         "instruction, never carried over unchanged just because they are otherwise "
         "part of the scene"
@@ -1846,7 +1890,7 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             "product the reference shows - see rule 9 above, which governs those and "
             "overrides this carry-over instruction entirely, regardless of how broadly "
             "\"which non-person elements appear\" might otherwise be read - NOR to any "
-            "drawn element named in the ILLUSTRATED ELEMENTS TO SUBSTITUTE instruction "
+            "element named in the COMPETITOR ELEMENTS TO SUBSTITUTE instruction "
             "above, where one applies, which is substituted per that instruction rather "
             "than carried over unchanged. "
             + exception_clause +
@@ -1872,7 +1916,7 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             "line) or the competitor's own product/packaging anywhere in frame, "
             "including a SECOND product the reference shows - see rule 9 above, which "
             "governs those and overrides this reproduce instruction entirely - NOR to "
-            "any drawn element named in the ILLUSTRATED ELEMENTS TO SUBSTITUTE "
+            "any element named in the COMPETITOR ELEMENTS TO SUBSTITUTE "
             "instruction above, where one applies, which is substituted per that "
             "instruction rather than reproduced unchanged. "
             + exception_clause

@@ -353,22 +353,52 @@ def test_scene_elements_clause_missing_depicts_key_defaults_to_kept():
 
 
 # ---- _illustrated_elements_clause (redesigned 2026-08-13 to read scene_elements
-# filtered to depicts_competitor_category, not a separate illustrated_elements list) ----
+# filtered to depicts_competitor_category, not a separate illustrated_elements list;
+# UNGATED from style=="illustrated" the same evening - what an object depicts is
+# independent of how it's drawn, so a photographic/3D-rendered competitor-argument
+# prop now gets a substitution instruction too, not just a drawn one. Header renamed
+# ILLUSTRATED ELEMENTS TO SUBSTITUTE -> COMPETITOR ELEMENTS TO SUBSTITUTE, since
+# calling a photographed prop "illustrated" would itself be inaccurate. Only the
+# DRAWING instruction for the replacement stays register-conditional. ----
 
-def test_illustrated_elements_clause_empty_when_not_illustrated():
-    elements = [{"element": "a grilled steak", "role": "centrepiece",
+def test_illustrated_elements_clause_fires_on_any_register_now():
+    """The old style=="illustrated" gate is gone - a photographic or 3D-rendered
+    reference with a competitor-argument prop (chain, padlock, donut, weight-loss
+    label) previously had NO clause covering it at all."""
+    elements = [{"element": "a chain and padlock", "role": "visual metaphor for locked fat",
                  "essential": True, "depicts_competitor_category": True}]
-    assert generate_image_prompt._illustrated_elements_clause(elements, "ugc") == ""
-    assert generate_image_prompt._illustrated_elements_clause(elements, "high_spec") == ""
-    assert generate_image_prompt._illustrated_elements_clause(elements, None) == ""
+    for style in ("ugc", "high_spec", "illustrated", None, ""):
+        clause = generate_image_prompt._illustrated_elements_clause(elements, style)
+        assert "COMPETITOR ELEMENTS TO SUBSTITUTE" in clause
+        assert "a chain and padlock" in clause
 
 
 def test_illustrated_elements_clause_empty_when_nothing_flagged():
     elements = [{"element": "a folded towel", "role": "background",
                  "essential": True, "depicts_competitor_category": False}]
     assert generate_image_prompt._illustrated_elements_clause(elements, "illustrated") == ""
+    assert generate_image_prompt._illustrated_elements_clause(elements, "ugc") == ""
     assert generate_image_prompt._illustrated_elements_clause(None, "illustrated") == ""
     assert generate_image_prompt._illustrated_elements_clause([], "illustrated") == ""
+
+
+def test_illustrated_elements_clause_drawing_instruction_native_when_illustrated():
+    elements = [{"element": "a grilled steak", "role": "centrepiece", "essential": True,
+                 "depicts_competitor_category": True}]
+    clause = generate_image_prompt._illustrated_elements_clause(elements, "illustrated")
+    assert "Draw the replacement NATIVELY in this scene's own illustrated style" in clause
+    assert "never a photograph or photorealistic element composited into the drawing" in clause
+    assert "photorealistically, integrated into this scene" not in clause
+
+
+def test_illustrated_elements_clause_drawing_instruction_photorealistic_otherwise():
+    elements = [{"element": "a chain and padlock", "role": "visual metaphor for locked fat",
+                 "essential": True, "depicts_competitor_category": True}]
+    for style in ("ugc", "high_spec", None):
+        clause = generate_image_prompt._illustrated_elements_clause(elements, style)
+        assert "Render the replacement photorealistically, integrated into this scene" in clause
+        assert "never a flat illustration or drawn element composited into a photographic or 3D-rendered scene" in clause
+        assert "Draw the replacement NATIVELY in this scene's own illustrated style" not in clause
 
 
 def test_illustrated_elements_clause_fires_on_competitor_category_regardless_of_essential():
@@ -377,19 +407,18 @@ def test_illustrated_elements_clause_fires_on_competitor_category_regardless_of_
     elements = [{"element": "a grilled steak", "role": "centrepiece of the illustration",
                  "essential": False, "depicts_competitor_category": True}]
     clause = generate_image_prompt._illustrated_elements_clause(elements, "illustrated")
-    assert "ILLUSTRATED ELEMENTS TO SUBSTITUTE" in clause
+    assert "COMPETITOR ELEMENTS TO SUBSTITUTE" in clause
     assert "a grilled steak" in clause
     assert "centrepiece of the illustration" in clause
 
 
 def test_illustrated_elements_clause_never_suggests_identifiable_produce():
-    """Removed 2026-08-13: a drawn, nameable ingredient (a citrus slice, a flower) is
-    itself an implied ingredient claim - the same class of fabrication compliance C3
-    already forbids. Only an oil droplet or an abstract botanical FORM survive as
-    SUGGESTED example substitutes - "flower" may still appear as something explicitly
-    FORBIDDEN (a stronger ban, not a suggestion), so this checks the old suggested-
-    example phrasing is gone and the new one is present, not a blanket absence of the
-    word."""
+    """A drawn/depicted, nameable ingredient (a citrus slice, a flower) is itself an
+    implied ingredient claim - the same class of fabrication compliance C3 already
+    forbids. Only an oil droplet or an abstract botanical FORM survive as SUGGESTED
+    example substitutes - "flower" may still appear as something explicitly FORBIDDEN
+    (a stronger ban, not a suggestion), so this checks the old suggested-example
+    phrasing is gone and the new one is present, not a blanket absence of the word."""
     elements = [{"element": "a spoon of collagen powder", "role": "hero prop",
                  "essential": True, "depicts_competitor_category": True}]
     clause = generate_image_prompt._illustrated_elements_clause(elements, "illustrated")
@@ -398,7 +427,6 @@ def test_illustrated_elements_clause_never_suggests_identifiable_produce():
     assert "oil droplet" in clause
     assert "abstract botanical form" in clause
     assert "never a specific, identifiable, nameable flower or fruit" in clause
-    assert "abstract botanical form" in clause
 
 
 def test_illustrated_elements_clause_never_names_a_specific_replacement_ingredient():
@@ -434,18 +462,38 @@ def test_no_scene_element_named_in_both_clauses_end_to_end():
     ]
     prompt = generate_image_prompt.build_image_prompt(bp, edit_mode=True)
     assert "SCENE ELEMENTS TO INCLUDE" in prompt
-    assert "ILLUSTRATED ELEMENTS TO SUBSTITUTE" in prompt
+    assert "COMPETITOR ELEMENTS TO SUBSTITUTE" in prompt
 
     # build_image_prompt calls _scene_elements_clause before _illustrated_elements_clause
-    # in every branch, so SCENE ELEMENTS TO INCLUDE always precedes ILLUSTRATED ELEMENTS
+    # in every branch, so SCENE ELEMENTS TO INCLUDE always precedes COMPETITOR ELEMENTS
     # TO SUBSTITUTE in the assembled text - asserted here, not just assumed.
-    assert prompt.index("SCENE ELEMENTS TO INCLUDE") < prompt.index("ILLUSTRATED ELEMENTS TO SUBSTITUTE")
-    include_section = prompt.split("SCENE ELEMENTS TO INCLUDE")[1].split("ILLUSTRATED ELEMENTS TO SUBSTITUTE")[0]
-    substitute_section = "ILLUSTRATED ELEMENTS TO SUBSTITUTE" + prompt.split("ILLUSTRATED ELEMENTS TO SUBSTITUTE")[1]
+    assert prompt.index("SCENE ELEMENTS TO INCLUDE") < prompt.index("COMPETITOR ELEMENTS TO SUBSTITUTE")
+    include_section = prompt.split("SCENE ELEMENTS TO INCLUDE")[1].split("COMPETITOR ELEMENTS TO SUBSTITUTE")[0]
+    substitute_section = "COMPETITOR ELEMENTS TO SUBSTITUTE" + prompt.split("COMPETITOR ELEMENTS TO SUBSTITUTE")[1]
 
     assert "wooden bathroom shelf" in include_section
     assert "a grilled steak" not in include_section
     assert "a grilled steak" in substitute_section
+    assert "wooden bathroom shelf" not in substitute_section
+
+
+def test_no_scene_element_named_in_both_clauses_non_illustrated_register():
+    """The same partition holds now that the substitute clause fires on every
+    register, not only illustrated."""
+    bp = _blueprint()
+    bp["production_style"] = {"style": "high_spec"}
+    bp["scene_elements"] = [
+        {"element": "wooden bathroom shelf", "role": "product rests on it",
+         "essential": True, "depicts_competitor_category": False},
+        {"element": "a chain and padlock", "role": "visual metaphor for locked fat",
+         "essential": True, "depicts_competitor_category": True},
+    ]
+    prompt = generate_image_prompt.build_image_prompt(bp, edit_mode=True)
+    include_section = prompt.split("SCENE ELEMENTS TO INCLUDE")[1].split("COMPETITOR ELEMENTS TO SUBSTITUTE")[0]
+    substitute_section = "COMPETITOR ELEMENTS TO SUBSTITUTE" + prompt.split("COMPETITOR ELEMENTS TO SUBSTITUTE")[1]
+    assert "wooden bathroom shelf" in include_section
+    assert "a chain and padlock" not in include_section
+    assert "a chain and padlock" in substitute_section
     assert "wooden bathroom shelf" not in substitute_section
 
 
@@ -456,7 +504,7 @@ def test_illustrated_elements_clause_reaches_edit_mode_branch_via_build_image_pr
                               "essential": True, "depicts_competitor_category": True}]
     prompt = generate_image_prompt.build_image_prompt(bp, edit_mode=True)
     assert "a spoon of collagen powder" in prompt
-    assert "ILLUSTRATED ELEMENTS TO SUBSTITUTE" in prompt
+    assert "COMPETITOR ELEMENTS TO SUBSTITUTE" in prompt
 
 
 def test_illustrated_elements_clause_reaches_flat_template_branch():
@@ -468,20 +516,49 @@ def test_illustrated_elements_clause_reaches_flat_template_branch():
     assert "a spoon of collagen powder" in prompt
 
 
+def test_illustrated_elements_clause_reaches_photographic_reference_via_build_image_prompt():
+    """The concrete case this ungating fixes: a photographic (non-illustrated)
+    reference with a competitor-argument prop."""
+    bp = _blueprint()
+    bp["production_style"] = {"style": "ugc"}
+    bp["scene_elements"] = [{"element": "a donut", "role": "argues a sugary treat",
+                              "essential": True, "depicts_competitor_category": True}]
+    prompt = generate_image_prompt.build_image_prompt(bp, edit_mode=True)
+    assert "a donut" in prompt
+    assert "COMPETITOR ELEMENTS TO SUBSTITUTE" in prompt
+    assert "Render the replacement photorealistically" in prompt
+
+
 # ---- The catch-all "everything else carries over exactly" language must except a
-# substituted illustrated element too, or the substitution instruction gets
+# substituted competitor element too, or the substitution instruction gets
 # contradicted by the reproduce-faithfully language later in the same prompt (the same
 # failure shape already fixed for PERSON/competitor-branding/prop-scale) ----
 
-def test_non_carryover_exceptions_clause_excepts_illustrated_elements():
-    assert "ILLUSTRATED ELEMENTS TO SUBSTITUTE" in generate_image_prompt._non_carryover_exceptions_clause()
+def test_non_carryover_exceptions_clause_excepts_competitor_elements():
+    assert "COMPETITOR ELEMENTS TO SUBSTITUTE" in generate_image_prompt._non_carryover_exceptions_clause()
 
 
-def test_edit_mode_opening_excepts_illustrated_elements_both_retheme_branches():
+def test_edit_mode_opening_excepts_competitor_elements_both_retheme_branches():
     on = generate_image_prompt._edit_mode_instruction(retheme_colours=True)
     off = generate_image_prompt._edit_mode_instruction(retheme_colours=False)
-    assert "ILLUSTRATED ELEMENTS TO SUBSTITUTE" in on
-    assert "ILLUSTRATED ELEMENTS TO SUBSTITUTE" in off
+    assert "COMPETITOR ELEMENTS TO SUBSTITUTE" in on
+    assert "COMPETITOR ELEMENTS TO SUBSTITUTE" in off
+
+
+# ---- Contradiction check vs _competitor_props_clause (2026-08-13): the two clauses
+# have different actions (remove-only vs substitute) and no shared identity key, so a
+# same-named object could in principle trigger both - _competitor_props_clause now
+# states an explicit precedence for that case. ----
+
+def test_competitor_props_clause_defers_to_illustrated_elements_substitution():
+    bp = {
+        "product_category": {"signals": ["an anatomical diagram of the digestive tract"]},
+        "visual": {},
+    }
+    clause = generate_image_prompt._competitor_props_clause(bp)
+    assert "PROPS (STRICT)" in clause
+    assert "UNLESS this same element is also named in the COMPETITOR ELEMENTS TO SUBSTITUTE" in clause
+    assert "that instruction governs instead" in clause
 
 
 def test_build_image_prompt_default_closing_text_unchanged():
