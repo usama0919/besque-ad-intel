@@ -1307,3 +1307,211 @@ also touches the same drawn elements; and whether its own example substitutes (a
 citrus slice, a flower) are themselves an implied ingredient claim - the same class of
 compliance risk (C3, unsubstantiated product facts) the clause's own docstring says it
 was written to avoid. Do not consider this feature done until these are checked.
+**Superseded 2026-08-13** - see `depicts_competitor_category` below, which replaced this
+field entirely rather than answering its open questions.
+
+## 2026-08-13
+
+**SESSION 13 AUG 2026 - pushed: `426601b`, `754bf17`, `747706d`, `ede39ad`, `53501bd`,
+`0417b93` (plus `d57134c` from 12 Aug, landed in this same push). ALL NOT VERIFIED LIVE**
+- every commit message says so explicitly; no Generate run confirmed any of this against
+a real ad this session. First action next session is that verification run, per the
+standing rule below.
+
+### Landed
+
+**Transient Anthropic retry** (`754bf17`) - the "Transient Anthropic timeouts cost real
+ads" gap from 12 Aug is built: `_call_claude_with_transient_retry` wraps ONLY the raw
+`client.messages.create` call (never the parse/validation retry loop, a different
+failure class) with exponential backoff (2/4/8s), up to 4 attempts, gated by
+`_is_transient_anthropic_error` (connection/timeout/429/5xx - never a 4xx, which is a
+different request, not a retry). `client(max_retries=0)` so this is the ONE mechanism
+that owns retries, and every retry is logged with the exception's own class name.
+
+**Small-scale label legibility** (`754bf17`) - a real gap in `a228539`'s wrap-fidelity
+sentence ("legible, without warping") covered geometry but not information density: a
+label rendered small (a thumbnail-scale product shot) still tried to fit the full
+wordmark + certifications + fine print, none of it actually legible at that pixel count.
+New instruction: at small scale, simplify to the BESQUE wordmark and product name
+MINIMUM, dropping what won't render legibly - reconciled against `_bottle_fixed_clause`
+so the two don't disagree about what's allowed to change.
+
+**`depicts_competitor_category` replaces `illustrated_elements`** (`754bf17` schema
+change, `747706d` classifier fix) - closes the INERT gap noted at the end of the 12 Aug
+section above, but as a different field on `scene_elements`, not a fix to the old one.
+Required per-entry (`schema/blueprint.schema.json`), tolerant on read (a pre-migration
+row without it degrades to old behaviour, never a validation failure). `747706d` then
+corrected the classification CRITERION itself, same day: was "is this the competitor's
+own product category" (steak/spoon/hair-strand - literal category props only); now "does
+this exist to make the competitor's argument" - a metaphor or diagram prop counts too
+(a chain-and-padlock illustrating "locked fat" the product claims to unlock). Live
+evidence for both directions of the old criterion being wrong: a chain-and-padlock
+under-flagged, a distressed 3D character over-flagged. Human figures/faces/body parts
+are EXCLUDED unconditionally, even when central to the argument or the metaphor itself -
+that's the person-substitution path's job (`face_present`/PERSON), never this field's,
+with no exception. The substitution clause is now ungated from `style=="illustrated"` -
+fires in ANY register (a photographic chain-and-padlock needs substituting exactly as
+much as a drawn one); only the DRAWING instruction (native-style vs. photorealistic)
+stays register-conditional. Renamed to "COMPETITOR ELEMENTS TO SUBSTITUTE." Reconciled
+against `_edit_mode_instruction`'s own carry-over language via a 4th exception in
+`_non_carryover_exceptions_clause` - that catch-all was overriding the substitution the
+same way it already had to be fixed for PERSON/competitor-brand-marks/product-count.
+**Coverage gap, not yet closed**: this only affects blueprints DECONSTRUCTED after
+`754bf17` - the field is populated at deconstruct time, never backfilled, so the ~77
+existing artifact rows deconstructed before this commit still have no
+`depicts_competitor_category` on their `scene_elements` entries at all, and will keep
+cloning the competitor's own argument-props on every Regenerate until re-deconstructed.
+
+**Rule 10 (subject age) rewritten** (`ede39ad`) - grey/silver hair, visible facial lines,
+and mature skin texture are now each individually REQUIRED as a primary spec, with the
+45-60 age bracket demoted to a secondary anchor rather than the sole criterion; states
+explicitly that this is independent of hair COLOUR or texture specifically (a young-
+reading subject with grey-dyed hair was passing the old wording). `high_spec`
+`STYLE_GUIDANCE` reworded to drop youth-skewing editorial-campaign framing that was
+fighting this rule from a different angle. A hardcoded `ad_id` found embedded in rule
+10's own prompt text was removed - the exact class of leak "No `ad_id`... in `src/`"
+already bans, just not caught until today.
+
+**Bottle identity and integration clauses** (`ede39ad`) - new `_bottle_identity_clause`,
+fed structurally from `product.visual_description`/`substance_colour`/`certifications`
+(verified by a swapped-product test - change the product, the clause's stated facts
+change with it, never a hardcoded description), STRICT-weighted immediately after
+`brand_rules()` in all three `build_image_prompt` branches. New
+`_bottle_integration_clause` requires the bottle read as a participating object (held/
+applied/resting, hand-scale, contact shadow, grip mechanics), with an explicit override
+for a reference that shows a floating packshot - this is the SAME clause my own later
+work this session (see Item 3 below) found in contradiction with `_bottle_register_clause`
+and reworded, not a separate finding.
+
+**Colour-neutral scene elements** (`ede39ad`) - fixed at deconstruct: `scene_elements`
+noun phrases must not encode colour (e.g. "wooden shelf," never "dark walnut shelf"), so
+the retheme-colours instruction downstream has nothing left to contradict. Same shape as
+every other "fix the contradiction, don't add a rule to arbitrate it" finding this
+codebase keeps hitting.
+
+**C8 - unsubstantiated ingredient/formulation claims** (`ede39ad`) - scoped explicitly
+against C3's own "improves skin texture"/"deeply hydrating" exception so the two
+categories cannot overlap by construction; mechanical backstop in `compliance.py`;
+deliberately NOT added to `HIGH_CONFIDENCE_BY_DEFAULT` in the critic (the live evidence
+was confirmed in generated COPY, now mechanically blocked there - not a confirmed
+IMAGE-only escape). This is the precedent Item 2 below explicitly followed for C9.
+
+**Copy duplication, borrowed attribution, and the lighting/integration contradiction**
+(`53501bd`) - three items, one session, root-caused and fixed together:
+- Item 1: `_text_purpose_clause` and `_text_zone_copy_clause` were two independent
+  blueprint-derived clauses that could each independently commission NEW Besque copy for
+  the SAME underlying reference text block (one by FUNCTION via `text_purpose`, one by
+  ZONE via `structural_zones`) - live evidence, a draft rendered the same closing
+  statement twice, in different wording. Fixed via `_dedupe_text_purpose_against_zones`:
+  a `text_purpose` entry whose `placement` matches a `structural_zones.position` already
+  covered by the zone-copy clause is dropped - a MECHANICAL position-string match, the
+  same "position string, verbatim" contract `_text_zone_copy_clause` already relied on,
+  never a guess at semantic similarity.
+- Item 2: neither clause banned reusing the reference's own sentence structure/phrasing/
+  nouns - both now do. Separately and more importantly: `_redact_personal_attribution`
+  (regex, shape-based - "Firstname L.", "attributed to X", an em-dash signature, or
+  `testimonial_zones`'s own `"attribution"` JSON key) strips a personal name from
+  reference-derived text BEFORE it reaches a copy prompt at all, applied to the raw
+  blueprint dump and to `text_verbatim`/`detail` individually. New rule **C9 (borrowed
+  personal attribution)** plus a mechanical backstop
+  (`compliance.check_borrowed_personal_attribution`, always-on) catches anything that
+  slips through on the output side. Moving `select_testimonial_review` earlier in
+  `process_ad` to thread its attribution into the compliance check was TRIED and
+  REVERTED - it made a DB read reachable from paths that previously returned "failed"
+  before ever needing it, breaking 72 `test_pipeline.py` tests; the default `""`
+  (nothing authorized) turned out to be correct anyway, since the real testimonial never
+  flows into copy generation to begin with.
+- Item 3: `_bottle_register_clause` anchored the bottle's shadow/grounding to the
+  reference's own observed `scene_lighting` facts and demanded an EXACT match, while
+  `_bottle_integration_clause` (`ede39ad`, same day) mandates a contact/grip shadow the
+  reference may never have shown (a floating packshot has no contact point to observe a
+  shadow from at all) - a genuine contradiction, not model unreliability. Reworded, not
+  stacked: the reference's facts now inform the SCENE's character (direction/hardness/
+  colour-temp/grain); contact/grip shadow and grounding are explicitly deferred to
+  `_bottle_integration_clause`'s actual composition. Also gated on `style` -
+  `style=="illustrated"` now skips `scene_lighting` entirely, fixing a live "Not
+  applicable - no photographic lighting" leak (deconstruct.py doesn't leave photographic-
+  only fields blank for an illustrated reference; it writes a value like that, which the
+  old code read as a real observed fact and asserted verbatim). Explicitly did NOT touch
+  bottle identity or the material realism clause. Handles and avatars NOT yet covered as
+  of this commit - see the next one.
+
+**Borrowed account identity in UGC chrome** (`0417b93`) - same day, later, extending C9
+rather than adding a C10 per explicit instruction: live evidence, a competitor's real
+Instagram handle (`@fitness_ty`) survived verbatim, with no surname-initial, em-dash, or
+attribution verb, so none of C9's existing shape-patterns caught it.
+`PERSONAL_NAME_ATTRIBUTION_PATTERN` extended to `@handle`-shaped tokens (shared between
+`compliance.py`'s mechanical check and `generate_copy.py`'s input-side redaction, so both
+recognise the identical shape). **Documented, tested residual gap**: a BARE handle with
+no `@` is shape-indistinguishable from an ordinary compound word - not matched, on
+purpose, to avoid constant false-positives; the account-chrome fix below covers the case
+this regex structurally cannot (a handle rendered as UI chrome, never as copy text). The
+actual leak vector was `_structural_zones_clause`'s testimonial-card styling instruction
+("match this reference's own styling for the card") - it said nothing about WHOSE account
+the card belongs to, so it read as license to reproduce the avatar and handle as
+"styling." Carve-out added at that exact point of use (the "closer wins" lesson from 12
+Aug, applied again): chrome LAYOUT may be reproduced, chrome CONTENT (avatar, handle,
+display name) must be Besque's own or removed. Separately answered a standing question:
+does a face inside reproduced account chrome get C1/rule 10? Textually yes (both already
+say "any person"/"any human subject"), but nothing said so EXPLICITLY, leaving room for
+the nearby, more specific card-styling instruction to win by default - the same
+competing-instruction shape as every other "prompt-only doesn't bind" finding this file
+already tracks. Fixed by naming avatar/profile-picture faces explicitly in the PERSON
+clause and in the critic's SUBJECT AGE VIOLATION and SUBJECT IDENTITY checklist entries.
+C9's account-chrome half has NO mechanical backstop, unlike its name/handle-in-text half
+- same as C1, since it's pixels, not a string a regex can scan.
+
+### Standing rules learned today
+
+- **Claude Code's own end-of-session state reports are not authoritative - verify
+  against `git log` and `git status`.** `d57134c` was reported as uncommitted at one
+  session's end when it had already been pushed. Don't trust a self-report of "this is
+  committed" or "this is still pending" without checking.
+- **Run tests as `python -m pytest`, never bare `pytest`** - reconfirmed today, see the
+  12 Aug section above for why (bare `pytest` drops the repo root from `sys.path`).
+- **A PowerShell window started with `uvicorn ... *>` (redirecting all streams) shows
+  nothing on screen, and closing that window kills the server** - it looks idle/dead
+  from the terminal alone either way. Verify the server is actually up via
+  `Get-NetTCPConnection -LocalPort 8000 -State Listen`, and verify it's running code from
+  AFTER your last commit by checking the log file's `LastWriteTime` against the commit
+  timestamp - the same "confirm a restart happened" discipline the 12 Aug section already
+  established, now with the actual PowerShell commands to do it.
+- **PowerShell 5.1 has no `utf8NoBOM` encoding** - `Out-File -Encoding utf8` in 5.1 still
+  writes a BOM (see this file's own PowerShell tool notes on this); anything reading the
+  file downstream as strict UTF-8 without BOM tolerance will choke on it. No workaround
+  recorded yet beyond knowing to check for it.
+- **Where things actually live, restated because it was asked today**: a blueprint is
+  `artifacts.blueprint` (`dedupe.save_artifact`'s own column), not anything on `seen_ads`
+  - `seen_ads` is ONLY a dedupe ledger (see "Two dedup gates" above), it carries no
+  blueprint content at all. The DB connection helper is `get_conn()` in `src/dedupe.py`
+  (`dedupe.py:94`), the one thing every DB-backed module and test ultimately calls
+  through.
+
+### Open, not built
+
+- **The unadaptable-reference gate, and the staged-progression detector that should
+  feed it.** Not built this session - recommended shape, for whoever picks this up: a
+  deconstruct-time `argument_adaptable` boolean plus `unadaptable_reason` (same pattern
+  as `content_safety.hard_block_reason` - a stated reason, never a bare flag), and
+  `mark_seen` on a gated-out ad so a future run doesn't burn a fresh (paid) deconstruct
+  on the same unadaptable reference every time it's re-scraped.
+- **Production safety audit still outstanding, and the count has grown again.** Prod is
+  still on revision `00041` from 4 Aug. The 12 Aug section already flagged seven newly-
+  required blueprint fields plus the `production_style` enum rename as breaking changes
+  against pre-existing rows; `747706d`'s `depicts_competitor_category` adds an EIGHTH
+  required field today, on the same schema, with the same problem - do not deploy without
+  auditing what a fresh validation pass does to every row written before whichever of
+  these commits actually shipped.
+- **Vertex quota raise still not done.** Same ask as the 12 Aug section (a real quota
+  increase from Usama, not a code workaround) - still open, still blocking nothing today
+  only because nothing ran live against it this session.
+
+### Also recorded today
+
+- **`angle_id` was NULL on artifacts 1240-1245**, which is why their copy read as stock
+  filler instead of angle-specific language (`generate_copy`'s `angle_language` clause
+  has nothing to write from when no angle was selected for the run - see the 2026-08-10
+  section above). This is OPERATOR BEHAVIOUR, not a bug - the run that produced these
+  ads simply didn't have an angle selected. Action item, not a code fix: `/pool` should
+  surface an unset angle to the operator BEFORE generating, so this is a deliberate
+  choice rather than a silent default.
