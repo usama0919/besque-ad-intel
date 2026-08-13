@@ -156,6 +156,28 @@ def test_build_prompt_depicts_competitor_category_judges_by_argument_function():
 def test_build_prompt_depicts_competitor_category_excludes_human_figures_always():
     prompt = deconstruct.build_prompt("AD1", "PageX", "2026-01-01")
     assert "EXCLUDED, ALWAYS false regardless of role: any human figure, face, or body part" in prompt
+
+
+# ---- Item 5 (2026-08-13 build): competitor palette inherited - a live blueprint had
+# "lavender-purple to salmon-pink gradient background" recorded as essential:true, so
+# _scene_elements_clause's "MUST appear in the output" demanded the colour survive,
+# directly contradicting retheme_colours' "every hue... re-maps to Besque's palette".
+# Fixed at deconstruct (the element phrase must never encode colour), not by editing
+# _scene_elements_clause or string-stripping colour words from what comes back. ----
+
+def test_build_prompt_scene_element_forbids_colour_in_the_noun_phrase():
+    prompt = deconstruct.build_prompt("AD1", "PageX", "2026-01-01")
+    assert "NEVER its colour" in prompt
+    assert '"background gradient", NOT "lavender-purple to salmon-pink gradient background"' in prompt
+    assert "palette substitution governs colour separately downstream" in prompt
+
+
+def test_build_prompt_scene_element_example_no_longer_bakes_in_a_colour():
+    """The pre-existing "a folded white towel" example itself encoded a colour - fixed
+    to a colour-neutral equivalent, not just banned in the abstract."""
+    prompt = deconstruct.build_prompt("AD1", "PageX", "2026-01-01")
+    assert '"a folded white towel" is WRONG for this reason' in prompt
+    assert 'write "a folded towel" instead' in prompt
     assert "even one that is central to the ad's argument or is itself the metaphor" in prompt
     assert "never by this field, with no exception" in prompt
 

@@ -495,3 +495,34 @@ def test_ugc_style_guidance_reaches_edit_mode_register_clause():
     instruction = generate_image_prompt._edit_mode_instruction(style="ugc")
     assert "NO retouching" in instruction
     assert "NO colour grading" in instruction
+
+
+# ---- 2026-08-13 evening: high_spec reworded to drop "editorial beauty-campaign"/
+# "premium beauty-brand"/"luxury brand campaign" framing - words that carry an implicit
+# youth-skewing fashion-editorial association independent of rule 10's own text, without
+# actually contradicting rule 10 (nothing here names an age). Production-value signal
+# (polished, premium, studio-quality, sharp, luxurious lighting) is kept; only the
+# beauty-campaign/model-casting framing is removed, and an explicit pointer to rule 10
+# is added so the register can never be read as a casting cue. ----
+
+def test_high_spec_style_guidance_drops_editorial_beauty_campaign_framing():
+    high_spec = writer.STYLE_GUIDANCE["high_spec"]
+    assert "editorial beauty-campaign" not in high_spec
+    assert "premium beauty-brand" not in high_spec
+    assert "luxury brand campaign" not in high_spec
+
+
+def test_high_spec_style_guidance_keeps_production_value_signal():
+    high_spec = writer.STYLE_GUIDANCE["high_spec"]
+    assert "polished" in high_spec
+    assert "ultra-high production value" in high_spec
+    assert "sophisticated and luxurious" in high_spec
+    assert "shallow depth of field" in high_spec
+    assert "sharp studio lighting with a clean reflection on the glass" in high_spec
+
+
+def test_high_spec_style_guidance_points_to_rule_10_not_a_casting_cue():
+    high_spec = writer.STYLE_GUIDANCE["high_spec"]
+    assert "never a model-age or fashion-editorial styling cue" in high_spec
+    assert "rule 10" in high_spec
+    assert "not a casting direction" in high_spec

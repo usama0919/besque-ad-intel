@@ -6,12 +6,15 @@ team's own pre-flight checklist - not style preferences, legal/compliance
 requirements.
 
 IMPORTANT - enforcement is uneven and that is a known, accepted gap, not an
-oversight: C1 (real people), C4 (shaming body framing), and C6 (sexualized
-framing) are prompt-only on the image side. There is no mechanical check that
-verifies a generated image actually honours them - only C2 (fabricated
-testimonials/claims), on the copy side, has a mechanical backstop (see
-src/compliance.py). If the image model ignores these instructions, nothing
-here catches it.
+oversight: C1 (real people), C4 (shaming body framing), C6 (sexualized
+framing), and C7 (weight/treatment text in-image) are prompt-only on the image
+side. There is no mechanical check that verifies a generated image actually
+honours them - only C2 (fabricated testimonials/claims), C3/C8 (numeric,
+efficacy, and ingredient/formulation claims), on the copy side, have a
+mechanical backstop (see src/compliance.py). If the image model ignores
+these instructions, nothing here catches it - output_critic.py's checklist is
+the only post-hoc backstop for this category (see its own WEIGHT/TREATMENT
+TEXT entry, and its ingredient/formulation entry for C8).
 """
 
 COMPLIANCE_RULES = (
@@ -47,5 +50,28 @@ COMPLIANCE_RULES = (
     "application), regardless of how the competitor's source ad is styled. Depicting bare skin or "
     "body areas relevant to the product's use (e.g. legs, torso, underarms) is expected for a "
     "body-oil application context and is NOT itself a violation - this rule targets sexualization of "
-    "pose/framing/narrative intent, not depiction of skin or body areas."
+    "pose/framing/narrative intent, not depiction of skin or body areas. "
+    "C7. NO WEIGHT OR TREATMENT TEXT IN-IMAGE: never render, as in-image text (a headline, caption, "
+    "label box, callout, or any other on-image typography, in ANY zone or container), a numeric "
+    "weight value with its unit (e.g. \"170 lbs\", \"82kg\"), weight-change or before/after-weight "
+    "language (e.g. a \"Start\"/\"Finished\"/\"Rebound\" figure, \"lost 40lbs\"), or a named "
+    "pharmaceutical/treatment term (GLP-1, Ozempic, Wegovy, semaglutide, tirzepatide, injection, "
+    "shot) - even when the competitor's reference ad shows this text, and even on an approved "
+    "GLP-1-context messaging angle (see C5: the angle may be referenced in writing, but a specific "
+    "weight figure or drug/treatment brand name rendered as in-image text is never permitted, on "
+    "any ad). This applies regardless of which zone the text sits in, including a zone with no "
+    "Besque replacement wording assigned to it: such a zone is REMOVED, never left showing the "
+    "reference's original weight or treatment text by default. "
+    "C8. NO UNSUBSTANTIATED INGREDIENT OR FORMULATION CLAIMS: do not state or imply what the "
+    "product is made of, contains, or is formulated with (e.g. \"formulated with natural "
+    "ingredients\", \"made with organic ingredients\", \"natural formula\", \"contains active "
+    "ingredients\") unless that specific ingredient fact is explicitly supplied as an approved "
+    "claim. This is a DIFFERENT category from C3's own exception for descriptive, non-comparative "
+    "claims about what the product FEELS like or DOES (\"improves skin texture\", \"deeply "
+    "hydrating\" remain acceptable under C3, unchanged) - C3's exception was never meant to cover, "
+    "and does not cover, a claim about what the product is COMPOSED of. Applies identically while "
+    "products.hero_claim is blank and once it is populated: with no ingredient fact supplied, no "
+    "ingredient or formulation claim may be asserted from any source - a generic industry-standard "
+    "phrase, the competitor reference ad's own ingredient claims, or an invented one. In BOTH copy "
+    "and in-image text."
 )

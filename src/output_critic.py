@@ -61,7 +61,7 @@ HIGH_CONFIDENCE_BY_DEFAULT = (
     "unauthorised offer", "scarcity claim", "promo code", "efficacy claim", "testimonial",
     "product category mismatch", "regulatory text carried over from the reference",
     "product register mismatch", "nudity or sexualised content", "subject age violation",
-    "subject identity", "competitor brand mark or product",
+    "subject identity", "competitor brand mark or product", "weight or treatment text in-image",
 )
 
 CRITIC_SYSTEM = (
@@ -148,6 +148,25 @@ CRITIC_SYSTEM = (
     "the disclaimer plainly doesn't apply to (the disclaimer-removal instruction). Also "
     "flag a dangling asterisk or footnote marker left with no referent after disclaimer "
     "text was removed - that's its own defect, just as bad as the disclaimer surviving\n"
+    "- WEIGHT OR TREATMENT TEXT IN-IMAGE (C7): a numeric weight value with its unit (e.g. "
+    "\"170 lbs\", \"82kg\"), weight-change or before/after-weight language (a "
+    "\"Start\"/\"Finished\"/\"Rebound\" figure, \"lost 40lbs\"), or a named pharmaceutical/"
+    "treatment term (GLP-1, Ozempic, Wegovy, semaglutide, tirzepatide, injection, shot) "
+    "rendered anywhere as in-image text - a label box, caption, callout, or any other "
+    "on-image typography - even when the reference ad showed this exact text and even on "
+    "a GLP-1-context angle (the angle may be referenced in writing; a rendered weight "
+    "figure or drug/treatment brand name in the image itself is never permitted, on any "
+    "ad). This includes a progression/stage-caption box (e.g. a before/after weight "
+    "sequence) reproduced with its original numbers intact even though other wording "
+    "nearby was rewritten to Besque\n"
+    "- UNSUBSTANTIATED INGREDIENT OR FORMULATION CLAIM (C8): text stating or implying "
+    "what the product is made of, contains, or is formulated with (e.g. \"formulated "
+    "with natural ingredients\", \"made with organic ingredients\", \"natural formula\", "
+    "\"contains active ingredients\") when no specific ingredient fact was supplied as an "
+    "approved claim. Judge this separately from ordinary sensory/effect claims like "
+    "\"deeply hydrating\" or \"improves skin texture\", which are NOT a violation of this "
+    "category (they never mention a specific ingredient or a formula) - this category is "
+    "about COMPOSITION claims specifically, not effect/feel claims\n"
     "- SUBJECT AGE VIOLATION (rule 10): any human subject in the GENERATED image reading "
     "younger than 45, or reading as youthful/smooth-skinned rather than visibly midlife "
     "(45-60) - this is its OWN dedicated category, checked explicitly, not something to "
@@ -214,8 +233,9 @@ CRITIC_SYSTEM = (
     "sure it's a false read: unauthorised offer, scarcity claim, promo code, efficacy "
     "claim, testimonial, product category mismatch, regulatory text carried over from the "
     "reference, product register mismatch, nudity or sexualised content, subject age "
-    "violation, subject identity, competitor brand mark or product. These are the exact "
-    "categories that have shipped in real drafts before this check existed."
+    "violation, subject identity, competitor brand mark or product, weight or treatment "
+    "text in-image. These are the exact categories that have shipped in real drafts "
+    "before this check existed."
 )
 
 # CRITIC_SYSTEM is an INDEPENDENTLY hand-written checklist, not generated from

@@ -292,6 +292,54 @@ def check_unauthorized_efficacy_claim(generated_copy, approved_claims=""):
     return issues
 
 
+# Rule C8 mechanical check (2026-08-13 evening): a DIFFERENT category from C3's own
+# checks above - RATIO_CLAIM_PATTERN/TIMESCALE_CLAIM_PATTERN/NUMERIC_CLAIM_PATTERN all
+# catch EFFICACY claims (a quantified outcome/result). This catches COMPOSITION claims
+# instead - what the product is made of, contains, or is formulated with - a live
+# draft's body copy read "formulated with natural ingredients" with products.hero_claim
+# blank and nothing supplied to substantiate it. Deliberately does NOT match C3's own
+# stated exception ("improves skin texture", "deeply hydrating" - sensory/effect
+# language, never mentioning an ingredient/formula at all) - the pattern only fires on
+# "formulated/made/crafted WITH/FROM/USING ... ingredient(s)", "CONTAINS ... ingredients",
+# or a "natural/organic/clean/pure FORMULA" - phrasing that asserts composition, not effect.
+INGREDIENT_FORMULATION_CLAIM_PATTERN = re.compile(
+    r"\b(?:formulated|made|crafted)\s+(?:with|from|using)\s+[\w\s-]{0,30}?\bingredients?\b"
+    r"|\bcontains?\s+[\w\s-]{0,30}?\bingredients?\b"
+    r"|\b(?:natural|organic|clean|pure)\s+formula\b",
+    re.IGNORECASE,
+)
+
+
+def check_unapproved_ingredient_claim(generated_copy, approved_claims=""):
+    """Rule C8 mechanical check: an unsubstantiated INGREDIENT OR FORMULATION claim (what
+    the product is made of/contains/formulated with) is a separate category from C3's own
+    efficacy checks above and from C3's own "formulated to do" exception - a sensory/effect
+    description like "deeply hydrating" or "improves skin texture" never mentions an
+    ingredient or a formula, so INGREDIENT_FORMULATION_CLAIM_PATTERN never matches it; this
+    function and C3's exception cannot overlap or contradict by construction, not by
+    convention. Same substantiation rule as every other mechanical check here: a hit must
+    be explicitly present in APPROVED CLAIMS or it's flagged. approved_claims is empty in
+    current real usage (products.hero_claim is deliberately blank, pending Harry's real
+    approved_claims), so today this flags every hit - this function never reads hero_claim
+    directly; hero_claim being blank is WHY approved_claims is empty in practice, not a
+    separate condition tested here."""
+    issues = []
+    gen = " ".join(str(v) for v in generated_copy.values())
+    approved_norm = _normalize(approved_claims)
+    for match in INGREDIENT_FORMULATION_CLAIM_PATTERN.finditer(gen):
+        claim = match.group(0)
+        if approved_norm and _normalize(claim) in approved_norm:
+            continue
+        reason = ("no APPROVED CLAIMS were supplied to substantiate it (approved_claims is empty)"
+                  if not approved_norm else
+                  "it does not appear in the supplied APPROVED CLAIMS")
+        issues.append(
+            f"Ingredient/formulation claim '{claim}' found in generated copy but {reason} - "
+            f"flagged as likely unsubstantiated, not a false positive."
+        )
+    return issues
+
+
 def check_compliance(generated_copy, competitor_page_name, competitor_text="",
                       approved_claims="", approved_testimonials="", offer_text=_UNSET):
     """Return (ok: bool, issues: list[str]).
@@ -303,6 +351,9 @@ def check_compliance(generated_copy, competitor_page_name, competitor_text="",
       - unapproved numeric/quantified claims (rule C2/C3), including ratio/timescale
         phrasing with no percentage sign (always on, never gated by a toggle - see
         check_unauthorized_efficacy_claim)
+      - unapproved ingredient/formulation claims (rule C8) - a DIFFERENT category from
+        the efficacy claims above: what the product is made of/contains, not what it
+        DOES (always on, same reasoning - see check_unapproved_ingredient_claim)
       - unauthorized discount/price/urgency mechanic, ONLY when offer_text is explicitly
         passed (even as "" or None) - see check_unauthorized_offer and the _UNSET sentinel
         above. pipeline.py always passes it; every pre-existing caller that doesn't know
@@ -336,6 +387,11 @@ def check_compliance(generated_copy, competitor_page_name, competitor_text="",
     # below: an efficacy claim should never be allowed through unsubstantiated regardless
     # of any run-level toggle, so this isn't gated behind a sentinel.
     issues.extend(check_unauthorized_efficacy_claim(generated_copy, approved_claims))
+
+    # 4c. Ingredient/formulation claims (rule C8) - always on, same reasoning as 4b: a
+    # composition claim should never be allowed through unsubstantiated regardless of
+    # any run-level toggle.
+    issues.extend(check_unapproved_ingredient_claim(generated_copy, approved_claims))
 
     # 5. Unauthorized offer/discount/urgency mechanic - opt-in via the _UNSET sentinel,
     # see check_compliance's docstring.

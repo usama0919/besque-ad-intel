@@ -266,3 +266,66 @@ def test_clean_copy_with_no_efficacy_claim_still_passes():
     ok, issues = compliance.check_compliance(copy, "Brand", "")
     assert ok is True
     assert issues == []
+
+
+# ---- Rule C8 mechanical check (2026-08-13 evening): a live draft's body copy read
+# "formulated with natural ingredients" while products.hero_claim was blank and
+# nothing was supplied to substantiate it - a DIFFERENT category from the ratio/
+# timescale/percentage EFFICACY claims above (what the product is made of, not what it
+# does). Checked against C3's existing "formulated to do" exception so the two never
+# overlap or contradict - by construction, since the pattern only matches composition
+# phrasing, never sensory/effect phrasing. ----
+
+def test_formulated_with_natural_ingredients_flagged():
+    copy = {"headline": "Formulated with natural ingredients", "primary_text": "x", "cta": "y"}
+    issues = compliance.check_unapproved_ingredient_claim(copy)
+    assert any("formulated with natural ingredients" in i.lower() for i in issues)
+
+
+def test_made_with_organic_ingredients_flagged():
+    copy = {"headline": "x", "primary_text": "Made with organic ingredients you can trust", "cta": "y"}
+    issues = compliance.check_unapproved_ingredient_claim(copy)
+    assert any("made with organic ingredients" in i.lower() for i in issues)
+
+
+def test_natural_formula_flagged():
+    copy = {"headline": "x", "primary_text": "A natural formula for everyday glow", "cta": "y"}
+    issues = compliance.check_unapproved_ingredient_claim(copy)
+    assert any("natural formula" in i.lower() for i in issues)
+
+
+def test_contains_active_ingredients_flagged():
+    copy = {"headline": "x", "primary_text": "Contains active ingredients that work", "cta": "y"}
+    issues = compliance.check_unapproved_ingredient_claim(copy)
+    assert any("contains active ingredients" in i.lower() for i in issues)
+
+
+def test_ingredient_claim_passes_when_present_in_approved_claims():
+    copy = {"headline": "Formulated with natural ingredients", "primary_text": "x", "cta": "y"}
+    issues = compliance.check_unapproved_ingredient_claim(
+        copy, approved_claims="Formulated with natural ingredients, per the supplier's own spec sheet"
+    )
+    assert issues == []
+
+
+def test_sensory_effect_claim_never_flagged_by_ingredient_check():
+    """C3's own exception ("improves skin texture", "deeply hydrating") must never be
+    caught by C8's check - the two categories cannot overlap, since neither phrase
+    mentions an ingredient or a formula at all."""
+    copy = {"headline": "Deeply hydrating and improves skin texture", "primary_text": "x", "cta": "y"}
+    issues = compliance.check_unapproved_ingredient_claim(copy)
+    assert issues == []
+
+
+def test_ingredient_claim_check_is_always_on_in_check_compliance():
+    copy = {"headline": "Formulated with natural ingredients", "primary_text": "x", "cta": "y"}
+    ok, issues = compliance.check_compliance(copy, "Brand", "")  # no offer_text passed at all
+    assert ok is False
+    assert any("Ingredient/formulation" in i for i in issues)
+
+
+def test_clean_copy_with_no_ingredient_claim_still_passes():
+    copy = {"headline": "Firmer skin at any age", "primary_text": "Deeply hydrating, lightweight feel", "cta": "Shop"}
+    ok, issues = compliance.check_compliance(copy, "Brand", "")
+    assert ok is True
+    assert issues == []

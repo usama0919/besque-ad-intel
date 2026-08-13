@@ -85,6 +85,71 @@ def test_prompt_includes_compliance_rules():
     assert "PRODUCT POLICY (STRICT)" in prompt
 
 
+# ---- C7 (2026-08-13 evening): a live draft reproduced "170 lbs Start", "130 lbs on
+# GLP-1 (Finished)", "180 lbs Rebound", "Still 130 lbs, healthier skin" verbatim, with
+# the Besque bottle at the endpoint - asserting a body oil maintained a 40lb loss. The
+# text survived through typography_zones, which only ever governs STYLING and
+# explicitly defers content to "elsewhere" - when no structural_zones entry exists for
+# a caption shape that doesn't fit any of the 9 known zone types, nothing ever assigns
+# it a fate, so it falls through to the default reproduce-faithfully language
+# unchanged. C7 closes this by naming the categories directly and stating the default
+# for an ungoverned zone is REMOVE, not reproduce - regardless of which path (typography
+# or structural) the content came through. ----
+
+def test_prompt_includes_c7_weight_and_treatment_rule():
+    prompt = generate_image_prompt.build_image_prompt(_blueprint())
+    assert "C7. NO WEIGHT OR TREATMENT TEXT IN-IMAGE" in prompt
+    assert "170 lbs" in prompt  # the example, not a hardcoded live value
+    assert "GLP-1" in prompt and "Ozempic" in prompt and "semaglutide" in prompt
+    assert "regardless of which zone the text sits in" in prompt
+    assert "is REMOVED, never left showing the" in prompt
+
+
+def test_c7_does_not_contradict_c5_glp1_angle_permission():
+    """C5 explicitly permits referencing GLP-1 AS CONTEXT for a skin concern - C7 must
+    state it governs literal in-image TEXT/brand-name rendering specifically, never
+    read as banning the angle itself, or the two rules would contradict."""
+    prompt = generate_image_prompt.build_image_prompt(_blueprint())
+    assert "even on an approved GLP-1-context messaging angle" in prompt
+    assert "the angle may be referenced in writing" in prompt
+
+
+def test_c7_reaches_edit_mode_and_writer_paths_too():
+    edit_mode_prompt = generate_image_prompt.build_image_prompt(_blueprint(), edit_mode=True)
+    writer_prompt = generate_image_prompt.build_image_prompt(
+        _blueprint(), creative_description="A scene."
+    )
+    assert "C7. NO WEIGHT OR TREATMENT TEXT IN-IMAGE" in edit_mode_prompt
+    assert "C7. NO WEIGHT OR TREATMENT TEXT IN-IMAGE" in writer_prompt
+
+
+# ---- C8 (2026-08-13 evening, item 6 narrow): "formulated with natural ingredients"
+# in copy/in-image text with products.hero_claim blank and nothing supplied to
+# substantiate it. Checked against C3's own wording so the two don't overlap. ----
+
+def test_prompt_includes_c8_ingredient_formulation_rule():
+    prompt = generate_image_prompt.build_image_prompt(_blueprint())
+    assert "C8. NO UNSUBSTANTIATED INGREDIENT OR FORMULATION CLAIMS" in prompt
+    assert "formulated with natural ingredients" in prompt
+
+
+def test_c8_explicitly_distinguishes_itself_from_c3s_exception():
+    """Must state the boundary explicitly - "deeply hydrating"/"improves skin texture"
+    stay acceptable under C3, unchanged - or C8 would read as silently narrowing C3."""
+    prompt = generate_image_prompt.build_image_prompt(_blueprint())
+    assert "remain acceptable under C3, unchanged" in prompt
+    assert "does not cover, a claim about what the product is COMPOSED of" in prompt
+
+
+def test_c8_reaches_edit_mode_and_writer_paths_too():
+    edit_mode_prompt = generate_image_prompt.build_image_prompt(_blueprint(), edit_mode=True)
+    writer_prompt = generate_image_prompt.build_image_prompt(
+        _blueprint(), creative_description="A scene."
+    )
+    assert "C8. NO UNSUBSTANTIATED INGREDIENT OR FORMULATION CLAIMS" in edit_mode_prompt
+    assert "C8. NO UNSUBSTANTIATED INGREDIENT OR FORMULATION CLAIMS" in writer_prompt
+
+
 def test_prompt_never_leaks_visual_subject():
     """Regression guard for the Rule C1 tension: visual.subject is where the vision step
     puts identity-carrying descriptions of the competitor's model (see deconstruct.py real
@@ -263,6 +328,43 @@ def test_rule10_subject_age_reaches_edit_mode_branch():
     assert "45-60" in prompt
 
 
+# ---- 2026-08-13 evening: rule 10 rewritten so the visible FEATURES are the primary,
+# mandatory instruction (a number alone was reading as youthful-40s) - grey/silver hair
+# is now REQUIRED, not "may show natural greying". The numeric bracket survives only as
+# a secondary anchor. Also drops the hardcoded ad_id that was previously embedded
+# directly in the rule text sent to the model on every generation (CLAUDE.md: "No
+# ad_id... in src/"). ----
+
+def test_rule10_requires_grey_or_silver_hair_not_optional():
+    result = generate_image_prompt.brand_rules()
+    assert "GREY OR SILVER HAIR" in result
+    assert "hair that may show natural greying" not in result
+    assert "never a uniform, fully-pigmented youthful" in result
+
+
+def test_rule10_requires_visible_lines_and_mature_texture_as_primary():
+    result = generate_image_prompt.brand_rules()
+    assert "VISIBLE FACIAL LINES" in result
+    assert "MATURE SKIN TEXTURE" in result
+    assert "PRIMARY, MANDATORY specification of age" in result
+    # the numeric bracket is explicitly demoted to secondary, not removed
+    assert "SECONDARY anchor, not the headline of this rule" in result
+    assert "45-60" in result
+
+
+def test_rule10_independence_from_reference_covers_hair_and_texture_specifically():
+    """Not just the numeric bracket - the reference's own model's actual hair colour
+    and skin smoothness must never excuse rendering less grey hair or fewer lines."""
+    result = generate_image_prompt.brand_rules()
+    assert "applies SPECIFICALLY to hair colour and skin texture, not only to the numeric bracket" in result
+    assert "is never a reason to render less grey hair, fewer lines, or smoother skin" in result
+
+
+def test_rule10_no_longer_hardcodes_an_ad_id():
+    result = generate_image_prompt.brand_rules()
+    assert "1986367985280315" not in result
+
+
 # ---- scene_elements consumption (2026-08-11 schema addition, Item 9): a positive
 # inclusion list, only entries flagged essential=true, phrased as MUST-include rather
 # than a prohibition. ----
@@ -289,6 +391,40 @@ def test_scene_elements_clause_includes_essential_entries_by_name_and_role():
     assert "MUST appear" in clause
     # non-essential entry must not be forced into the inclusion list
     assert "a folded towel" not in clause
+
+
+# ---- Item 5 (2026-08-13 build): the actual fix lives in deconstruct.py's own prompt
+# (element phrases must never encode colour) - _scene_elements_clause itself is
+# UNCHANGED. These confirm that once the element phrase is colour-neutral (as
+# deconstruct now produces), the resulting "MUST appear" instruction no longer demands
+# any competitor colour survive the retheme - no code change here, just verification. ----
+
+def test_scene_elements_clause_colour_neutral_element_does_not_demand_a_colour():
+    """A "background gradient" element (deconstruct's now-correct output shape) forces
+    the STRUCTURE (a gradient) but names no colour at all - nothing here for the
+    retheme instruction elsewhere in the prompt to contradict."""
+    elements = [{"element": "background gradient", "role": "fills the frame behind the subject",
+                 "essential": True}]
+    clause = generate_image_prompt._scene_elements_clause(elements)
+    assert "background gradient" in clause
+    assert "MUST appear" in clause
+    for hue in ("lavender", "purple", "salmon", "pink"):
+        assert hue not in clause.lower()
+
+
+def test_scene_elements_clause_colour_neutral_element_coexists_with_retheme():
+    """End to end: a colour-neutral background-gradient element (SCENE ELEMENTS TO
+    INCLUDE) alongside retheme_colours=True's palette remap (inside
+    _edit_mode_instruction) - both present, neither contradicting the other, since the
+    element instruction never names a colour for the remap to override."""
+    bp = _blueprint()
+    bp["scene_elements"] = [{"element": "background gradient", "role": "fills the frame",
+                              "essential": True, "depicts_competitor_category": False}]
+    prompt = generate_image_prompt.build_image_prompt(bp, edit_mode=True, retheme_colours=True)
+    assert "background gradient" in prompt
+    assert "re-maps to Besque's palette" in prompt
+    for hue in ("lavender", "purple", "salmon", "pink"):
+        assert hue not in prompt.lower()
 
 
 def test_scene_elements_clause_reaches_flat_template_branch():
@@ -743,9 +879,16 @@ def test_edit_image_prompt_contains_compliance_bottle_fixed_and_instruction(monk
 
 
 def test_edit_image_prompt_excludes_body_copy_and_layout_bloat(monkeypatch, tmp_path):
+    """"ingredient" dropped from this exclusion list 2026-08-13: C8 (compliance_rules.py)
+    legitimately mentions it now ("NO UNSUBSTANTIATED INGREDIENT OR FORMULATION
+    CLAIMS"), and edit_image's prompt always includes the full COMPLIANCE_RULES
+    constant - this was never actually guarding against product_desc's own ingredient-
+    list text (which edit_image never builds at all, since it doesn't call
+    build_image_prompt), so the check was defensive against the wrong risk. "PRODUCT
+    POLICY" below still guards the real concern (rule 7's own bloat leaking in)."""
     prompt = _run_edit_image(monkeypatch, tmp_path)
     for excluded in ("TEXT POLICY", "PRODUCT POLICY", "LAYOUT DESCRIPTORS",
-                     "STRICT RULES - NEVER VIOLATE", "ingredient", "OFFER:", "REGISTER:"):
+                     "STRICT RULES - NEVER VIOLATE", "OFFER:", "REGISTER:"):
         assert excluded not in prompt
 
 
@@ -801,3 +944,146 @@ def test_generate_image_calls_writer_only_when_angle_given(monkeypatch, tmp_path
     assert calls[0]["headline"] == "Firmer Skin By Friday"
     assert calls[0]["subtext"] == "7 cold-pressed oils"
     assert "Writer-provided scene." in generate_image_prompt.generate_image.last_prompt
+
+# ---- Item 2 (2026-08-13 build): bottle identity promoted to a dedicated STRICT
+# clause, fed structurally from product.visual_description/substance_colour/
+# certifications - never a hardcoded string. Plus a separate integration clause
+# (participating object, not a pasted packshot). _bottle_register_clause and the
+# material realism clause are untouched - lighting/finish still adapt. ----
+
+_REAL_SHAPED_PRODUCT = {
+    "name": "Besque Magic Body Oil",
+    "visual_description": (
+        "Clear cylindrical bottle filled with bright golden-amber oil. Black pump head "
+        "with a chrome top face, mounted on a tall polished gold collar. Terracotta "
+        "rust-red label with a gold geometric border band at both top and bottom."
+    ),
+    "substance_colour": "bright golden-amber oil",
+    "certifications": ["Vegan", "Cruelty Free", "100% Natural"],
+}
+
+
+def test_bottle_identity_clause_fires_identically_for_every_production_style():
+    """The identity clause does not take a style parameter at all - it's structurally
+    invariant by construction. Verified end to end: the SAME identity text appears in
+    the assembled prompt regardless of production_style.style."""
+    identity_texts = []
+    for style in ("ugc", "high_spec", "illustrated"):
+        bp = _blueprint()
+        bp["production_style"] = {"style": style}
+        prompt = generate_image_prompt.build_image_prompt(
+            bp, product=_REAL_SHAPED_PRODUCT, edit_mode=True,
+        )
+        assert "BOTTLE IDENTITY (STRICT" in prompt
+        identity_section = prompt.split("BOTTLE IDENTITY (STRICT")[1].split("BOTTLE INTEGRATION")[0]
+        identity_texts.append(identity_section)
+    assert identity_texts[0] == identity_texts[1] == identity_texts[2]
+
+
+def test_bottle_identity_clause_fires_identically_across_all_three_branches():
+    """Edit mode, writer, and flat-template branches must all carry the identical
+    identity clause - it's inserted right after brand_rules() in all three."""
+    bp_edit = _blueprint()
+    bp_writer = _blueprint()
+    bp_flat = _blueprint()
+    edit_prompt = generate_image_prompt.build_image_prompt(
+        bp_edit, product=_REAL_SHAPED_PRODUCT, edit_mode=True,
+    )
+    writer_prompt = generate_image_prompt.build_image_prompt(
+        bp_writer, product=_REAL_SHAPED_PRODUCT, creative_description="A scene.",
+    )
+    flat_prompt = generate_image_prompt.build_image_prompt(
+        bp_flat, product=_REAL_SHAPED_PRODUCT,
+    )
+    for prompt in (edit_prompt, writer_prompt, flat_prompt):
+        assert "BOTTLE IDENTITY (STRICT" in prompt
+        assert "Clear cylindrical bottle filled with bright golden-amber oil" in prompt
+
+
+def test_bottle_identity_clause_is_fed_structurally_not_hardcoded():
+    """Change the product data, the clause's content changes with it - proves this
+    isn't a fixed string with the real product's facts baked in."""
+    other_product = {
+        "name": "Something Else",
+        "visual_description": "A short square amber jar with a black screw lid.",
+        "substance_colour": "deep amber balm",
+        "certifications": ["Organic"],
+    }
+    prompt = generate_image_prompt.build_image_prompt(
+        _blueprint(), product=other_product, edit_mode=True,
+    )
+    assert "A short square amber jar with a black screw lid." in prompt
+    assert "deep amber balm" in prompt
+    assert "Organic" in prompt
+    assert "Clear cylindrical bottle" not in prompt
+
+
+def test_bottle_identity_clause_names_substance_colour_and_certifications_explicitly():
+    clause = generate_image_prompt._bottle_identity_clause(_REAL_SHAPED_PRODUCT)
+    assert "The oil itself is bright golden-amber oil." in clause
+    assert "Certification icons present on the label: Vegan, Cruelty Free, 100% Natural." in clause
+
+
+def test_bottle_identity_clause_falls_back_without_inventing_when_no_product():
+    clause = generate_image_prompt._bottle_identity_clause(None)
+    assert "must not be invented" in clause
+    assert "BOTTLE IDENTITY (STRICT" in clause
+    # no specific colour/material fact invented
+    assert "golden" not in clause and "terracotta" not in clause.lower()
+
+
+def test_bottle_identity_and_integration_absent_when_productless():
+    bp = _blueprint()
+    prompt = generate_image_prompt.build_image_prompt(
+        bp, product=_REAL_SHAPED_PRODUCT, edit_mode=True, include_product=False,
+    )
+    assert "BOTTLE IDENTITY (STRICT" not in prompt
+    assert "BOTTLE INTEGRATION (STRICT" not in prompt
+
+
+def test_bottle_identity_clause_allows_faithful_simplification_never_invented_bottle():
+    clause = generate_image_prompt._bottle_identity_clause(_REAL_SHAPED_PRODUCT)
+    assert "simplify FAITHFULLY" in clause
+    assert "never invent a different, generic, or simplified-beyond-recognition bottle" in clause
+
+
+def test_bottle_integration_clause_requires_participating_object():
+    clause = generate_image_prompt._bottle_integration_clause()
+    assert "PARTICIPATING OBJECT" in clause
+    assert "never a flat packshot pasted on top of it" in clause
+    assert "contact shadow" in clause
+    assert "fingers wrap convincingly around the bottle's body" in clause
+    assert "natural angle for that grip" in clause
+    assert "show the oil visibly on the skin" in clause
+    assert "must NEVER overlap a text block or caption" in clause
+
+
+def test_bottle_integration_clause_overrides_reference_floating_packshot():
+    """Contradiction check requested before finalising: edit mode's photographic-
+    substitute branch says to match the reference's composition "faithfully" - if the
+    reference itself shows a floating packshot, that must not be reproduced."""
+    clause = generate_image_prompt._bottle_integration_clause()
+    assert "even when the reference ad itself shows the competitor's product as a " \
+           "floating, ungrounded packshot" in clause
+    assert "OVERRIDES ANY COMPOSITION-MATCHING INSTRUCTION" in clause
+
+
+def test_bottle_integration_clause_reaches_all_three_branches():
+    bp_edit, bp_writer, bp_flat = _blueprint(), _blueprint(), _blueprint()
+    edit_prompt = generate_image_prompt.build_image_prompt(
+        bp_edit, product=_REAL_SHAPED_PRODUCT, edit_mode=True,
+    )
+    writer_prompt = generate_image_prompt.build_image_prompt(
+        bp_writer, product=_REAL_SHAPED_PRODUCT, creative_description="A scene.",
+    )
+    flat_prompt = generate_image_prompt.build_image_prompt(bp_flat, product=_REAL_SHAPED_PRODUCT)
+    for prompt in (edit_prompt, writer_prompt, flat_prompt):
+        assert "BOTTLE INTEGRATION (STRICT" in prompt
+
+
+def test_bottle_register_and_material_realism_clauses_unchanged_by_item_2():
+    """Explicit instruction: keep _bottle_register_clause and the material realism
+    clause as they are - lighting/finish should still adapt, untouched by identity."""
+    prompt = generate_image_prompt.build_image_prompt(_blueprint(), product=_REAL_SHAPED_PRODUCT)
+    assert generate_image_prompt._BOTTLE_MATERIAL_REALISM_CLAUSE in prompt
+    assert "Only the bottle's lighting, grading, and finish adapt to match the rendering register" in prompt

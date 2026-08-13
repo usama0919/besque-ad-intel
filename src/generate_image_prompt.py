@@ -382,6 +382,8 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
         prompt = (
             brand_rules(include_product=effective_include_product, text_in_image=text_in_image,
                         headline=headline, subtext=subtext, edit_mode=True) +
+            (_bottle_identity_clause(product) + _bottle_integration_clause()
+             if effective_include_product else "") +
             _operator_instruction_clause(operator_instruction) +
             _critic_feedback_clause(critic_feedback) +
             _scene_elements_clause(blueprint.get("scene_elements")) +
@@ -424,6 +426,8 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
         prompt = (
             brand_rules(include_product=include_product, text_in_image=text_in_image,
                         headline=headline, subtext=subtext) +
+            (_bottle_identity_clause(product) + _bottle_integration_clause()
+             if effective_include_product else "") +
             _operator_instruction_clause(operator_instruction) +
             _critic_feedback_clause(critic_feedback) +
             _scene_elements_clause(blueprint.get("scene_elements")) +
@@ -439,6 +443,8 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
         prompt = (
             brand_rules(include_product=include_product, text_in_image=text_in_image,
                         headline=headline, subtext=subtext) +
+            (_bottle_identity_clause(product) + _bottle_integration_clause()
+             if effective_include_product else "") +
             _operator_instruction_clause(operator_instruction) +
             _critic_feedback_clause(critic_feedback) +
             _scene_elements_clause(blueprint.get("scene_elements")) +
@@ -611,20 +617,31 @@ _RULE_9_SOURCE_IMAGE_IS_THE_COMPETITORS_AD = (
 
 _RULE_10_SUBJECT_AGE = (
     "10) SUBJECT AGE (STRICT, BRAND-LEVEL, EVERY GENERATION PATH, OVERRIDES ANY OTHER "
-    "AGE/APPEARANCE INSTRUCTION ANYWHERE IN THIS PROMPT): Besque's audience is women 40+. "
-    "Any human subject appearing anywhere in the output image must read as 45-60 years "
-    "old - visibly midlife, never youthful. Concretely: visible fine lines around the eyes "
-    "and mouth, some natural skin laxity at the jawline/neck, real tone and texture "
-    "variation across the skin, hair that may show natural greying or a mature styling - "
-    "never smooth, poreless, airbrushed, or a visibly younger face with 'mature' framing "
-    "bolted on. Competitor reference ads typically show a model in their 20s-30s: "
-    "rendering that age, or anything read as under 45, is the exact failure this rule "
-    "exists to catch, confirmed live (ad 1986367985280315 shipped a ~30-year-old subject "
-    "unflagged). This rule wins over ANY other instruction in this prompt that describes "
+    "AGE/APPEARANCE INSTRUCTION ANYWHERE IN THIS PROMPT): any human subject appearing "
+    "anywhere in the output image MUST show ALL three of the following - these visible "
+    "features are the PRIMARY, MANDATORY specification of age, not optional styling cues: "
+    "(1) GREY OR SILVER HAIR, or hair with visible natural greying through it - never a "
+    "uniform, fully-pigmented youthful brown, black, red, or blonde with no grey present "
+    "at all; (2) VISIBLE FACIAL LINES around the eyes, mouth, and forehead - not smoothed "
+    "away; (3) MATURE SKIN TEXTURE - some natural laxity at the jawline/neck, real tone "
+    "and texture variation across the skin - never smooth, poreless, or airbrushed. A "
+    "numeric age alone does not reliably produce these in the output pixels, so they are "
+    "specified directly and are each individually required, not satisfied by hitting only "
+    "one or two. As a SECONDARY anchor, not the headline of this rule: the subject should "
+    "additionally read as 45-60 years old. Besque's audience is women 40+; anything read "
+    "as under 45 - OR a subject with fully-pigmented, ungreyed hair and smooth, unlined "
+    "skin regardless of the stated numeric age - is the exact failure this rule exists to "
+    "catch. This rule wins over ANY other instruction in this prompt that describes "
     "matching, reproducing, or preserving the reference subject's age or appearance - "
     "including a REPRODUCE/SUBSTITUTE partition elsewhere that covers pose, framing, or "
     "skin-condition presentation: age is never one of the reproduced/matched attributes, "
-    "on any path, with no exception. "
+    "on any path, with no exception. This independence applies SPECIFICALLY to hair "
+    "colour and skin texture, not only to the numeric bracket: competitor reference ads "
+    "typically show a model in their 20s-30s with full, ungreyed hair and smooth skin - "
+    "even when the reference's own model has that appearance, the substituted subject's "
+    "hair and skin must still show the three required features above; the reference "
+    "model's own hair colour or skin smoothness is never a reason to render less grey "
+    "hair, fewer lines, or smoother skin than this rule requires. "
 )
 
 _RULE_11_SKIN_TEXTURE_REALISM = (
@@ -1527,6 +1544,112 @@ def _bottle_fixed_clause():
         "The Besque bottle's geometry, proportions, and label text/layout are FIXED - "
         "never subject to re-theming, style adaptation, or creative variation, and never "
         "changed unless the operator's instruction explicitly names the bottle. "
+    )
+
+
+def _bottle_identity_clause(product):
+    """Item 2 (2026-08-13 build): promotes bottle identity to a dedicated STRICT clause
+    with the same weight/position as the numbered brand rules - appended immediately
+    after brand_rules() in all three build_image_prompt branches (gated on
+    effective_include_product, so it never fires on a deliberately productless run),
+    rather than living solely inside product_desc's one generic paragraph.
+
+    Root cause this addresses (2026-08-13 audit): the bottle's actual identity facts
+    were previously stated exactly ONCE, as one prose sentence inside product_desc
+    ("Its fixed visual appearance: {visual_desc}."), with no STRICT/numbered status -
+    while HOW to stylize the bottle (STYLE_GUIDANCE prose, _bottle_register_clause) is
+    comparatively extensive and carries rule-level prominence. This clause does not
+    replace product_desc's own statement (still useful there, next to the ingredient/
+    label-text rules) - it gives identity a SECOND, earlier, STRICT-weighted statement,
+    the same redundancy-for-emphasis every numbered rule already gets relative to a
+    single generic instruction.
+
+    Fed STRUCTURALLY from product.visual_description/substance_colour/certifications -
+    contains no colour, material, or design fact of its own; every specific fact in the
+    returned text comes from the product dict passed in, never a literal invented here.
+    product=None or a record with none of these three fields populated falls back to a
+    generic "identity is fixed, once known, never invented" statement - the same
+    never-guess contract product_desc's own NO_PRODUCT-shaped fallback already uses."""
+    if not product:
+        return (
+            "BOTTLE IDENTITY (STRICT, BRAND-LEVEL, EVERY GENERATION PATH, EVERY "
+            "PRODUCTION STYLE INCLUDING ILLUSTRATED/COMIC/FLAT-VECTOR): no product "
+            "record was supplied for this run, so this bottle's exact colours, label "
+            "design, and hardware are not stated here and must not be invented. "
+            "Whatever generic product description appears elsewhere in this prompt is "
+            "what governs. Once known, identity is fixed and must never vary by "
+            "rendering register - see the material-realism and bottle-register clauses "
+            "elsewhere for how it is LIT, never what it IS. "
+        )
+    facts = []
+    visual_desc = (product.get("visual_description") or "").strip()
+    if visual_desc:
+        facts.append(visual_desc)
+    substance_colour = (product.get("substance_colour") or "").strip()
+    if substance_colour:
+        facts.append(f"The oil itself is {substance_colour}.")
+    certifications = [str(c).strip() for c in (product.get("certifications") or []) if str(c).strip()]
+    if certifications:
+        facts.append("Certification icons present on the label: " + ", ".join(certifications) + ".")
+    fact_text = " ".join(facts) if facts else (
+        "No further visual detail is on record for this product - do not invent one."
+    )
+    return (
+        "BOTTLE IDENTITY (STRICT, BRAND-LEVEL, EVERY GENERATION PATH, EVERY PRODUCTION "
+        "STYLE INCLUDING ILLUSTRATED/COMIC/FLAT-VECTOR - OVERRIDES ANY STYLISATION "
+        "INSTRUCTION ELSEWHERE IN THIS PROMPT THAT WOULD CHANGE IT): this is what the "
+        f"Besque bottle IS, not merely that it is fixed - {fact_text} These are the "
+        "ONLY colours, materials, proportions, and label facts this bottle may show, "
+        "in EVERY register this prompt might otherwise describe - photographic, "
+        "3D-rendered, comic-panel, or flat-vector alike. Where a drawing style "
+        "genuinely cannot carry photographic-level detail, simplify FAITHFULLY: keep "
+        "the correct wordmark and colours, and drop only fine print that would be "
+        "illegible at that scale - never invent a different, generic, or simplified-"
+        "beyond-recognition bottle to fit the style. Same proportions, same label "
+        "artwork, same colours, same text, every single generation, regardless of "
+        "what the reference ad's own product looks like or what stylisation guidance "
+        "elsewhere in this prompt otherwise permits. "
+    )
+
+
+def _bottle_integration_clause():
+    """Item 2 (2026-08-13 build): nothing in this prompt stated, before now, that the
+    bottle must read as a participating object in the scene rather than a flat packshot
+    pasted on top of it. Deliberately unconditional/generic - a behavioural requirement
+    about HOW the (already identity-fixed) bottle sits in the composition, independent
+    of what it looks like, so no product data is needed here.
+
+    Contradiction check: edit mode's own photographic-substitute branch says to place
+    the Besque product "matching the original shot's composition as faithfully as
+    possible" - if the reference itself shows a floating, ungrounded packshot (a common
+    competitor ad style), that instruction and this one would disagree about whether
+    the SAME bottle floats or participates. Resolved by the explicit override sentence
+    below, the same "this rule wins regardless of what the reference shows" pattern
+    rule 10 already uses for age - "faithfully" governs POSITION/scale/framing within
+    the composition, never whether the product is grounded vs. floating."""
+    return (
+        "BOTTLE INTEGRATION (STRICT, EVERY GENERATION PATH, OVERRIDES ANY COMPOSITION-"
+        "MATCHING INSTRUCTION ELSEWHERE THAT WOULD REPRODUCE A FLOATING PRODUCT SHOT): "
+        "the bottle is a PARTICIPATING OBJECT in this scene, never a flat packshot "
+        "pasted on top of it. It must be held, in the process of being applied, or "
+        "resting on a real surface within the scene - never floating, never centred on "
+        "an empty background unrelated to the composition around it - even when the "
+        "reference ad itself shows the competitor's product as a floating, ungrounded "
+        "packshot: that presentation is never reproduced for Besque's own bottle, "
+        "regardless of how faithfully the surrounding composition is otherwise matched. "
+        "Scale it consistently with whatever is nearest it - a hand, a shelf, a "
+        "counter, a towel - never larger or smaller than that context would allow. A "
+        "contact shadow (or, where held, a grip shadow) must be visible wherever the "
+        "bottle meets a hand or surface - its absence is what makes a packshot read as "
+        "pasted in. WHEN HELD: fingers wrap convincingly around the bottle's body, the "
+        "wrist sits at a natural angle for that grip, and the bottle is scaled "
+        "correctly to the hand holding it - never a hand posed around a bottle-shaped "
+        "gap, and never a hand too large or small for the bottle it holds. WHEN THE "
+        "PRODUCT IS BEING APPLIED: show the oil visibly on the skin, not only the "
+        "bottle in frame. The bottle must NEVER overlap a text block or caption - if "
+        "the composition would otherwise place one over the other, move or resize the "
+        "bottle within the scene's own logic (per its stated scale) rather than let it "
+        "cross behind or in front of rendered text. "
     )
 
 

@@ -144,6 +144,40 @@ def test_critic_system_rule_9_names_wordmark_endorsement_and_competitor_product(
     assert "SECOND competitor product" in critic.CRITIC_SYSTEM
 
 
+# ---- C7 (2026-08-13 evening): weight/treatment text in-image - a live draft
+# reproduced a 4-stage weight-loss progression's captions verbatim ("170 lbs Start"
+# etc.) with the Besque bottle at the endpoint. ----
+
+def test_critic_system_has_weight_and_treatment_category():
+    assert "WEIGHT OR TREATMENT TEXT IN-IMAGE (C7)" in critic.CRITIC_SYSTEM
+    assert "170 lbs" in critic.CRITIC_SYSTEM
+    assert "GLP-1" in critic.CRITIC_SYSTEM and "Ozempic" in critic.CRITIC_SYSTEM
+    assert "progression/stage-caption box" in critic.CRITIC_SYSTEM
+
+
+def test_critic_system_weight_and_treatment_default_high_confidence():
+    assert "weight or treatment text in-image" in critic.HIGH_CONFIDENCE_BY_DEFAULT
+    assert "weight or treatment text in-image" in critic.CRITIC_SYSTEM.lower().split("treat a hit")[1]
+
+
+# ---- C8 (2026-08-13 evening, item 6 narrow): ingredient/formulation claim checklist
+# entry - deliberately NOT added to HIGH_CONFIDENCE_BY_DEFAULT (unlike C7): the live
+# evidence for this category was confirmed in GENERATED COPY, now mechanically blocked
+# there (compliance.py), not confirmed as a real IMAGE-rendering escape the way C7's
+# weight-text-in-image finding was. This entry is a backstop, not a confirmed-shipped
+# category. ----
+
+def test_critic_system_has_ingredient_formulation_category():
+    assert "UNSUBSTANTIATED INGREDIENT OR FORMULATION CLAIM (C8)" in critic.CRITIC_SYSTEM
+    assert "formulated with natural ingredients" in critic.CRITIC_SYSTEM
+    assert "NOT a violation of this category" in critic.CRITIC_SYSTEM
+
+
+def test_critic_system_ingredient_formulation_not_forced_high_confidence():
+    """Deliberate: see this test's module-level comment above."""
+    assert "unsubstantiated ingredient or formulation claim" not in critic.HIGH_CONFIDENCE_BY_DEFAULT
+
+
 # ---- 2026-08-12 15:13 sweep (oil/bottle item): PRODUCT REGISTER MISMATCH already
 # existed for a studio-lit bottle composited into an ambient scene - extended with a
 # THIRD shape (flat/synthetic oil, glass, pump, label) rather than a new competing
