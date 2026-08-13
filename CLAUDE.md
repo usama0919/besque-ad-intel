@@ -1245,3 +1245,65 @@ texture to Besque's terracotta/coral palette produces exactly a "coral wrinkled
 surface." Not fixed this session (item 6 was scoped as report-only) - if this recurs,
 the fix direction is a background-content clause distinct from the colour-only remap,
 not a stronger version of the 5-8% number.
+
+### End-of-day findings, 12 Aug
+
+**Verify the server was restarted before believing any draft.** Twice today a draft
+was read as a failed fix when the running uvicorn process predated the commit that was
+supposed to have fixed it - the same "restart uvicorn after any commit touching src/"
+gotcha from earlier sessions, recurring because nothing forces a check. Before treating
+any draft as evidence a fix didn't work: check the FIRST timestamp in the running
+process's own log against the commit time. If the process started before the commit,
+the draft proves nothing about that commit either way.
+
+**Vertex quota is a hard ceiling, not just bursty** - revises the earlier "bursty, not
+a fixed ceiling" note from this same day, which was true of the two runs it was based
+on but not the whole story. 12 Aug ~15:50: nine consecutive 429s ending in
+`RESOURCE_EXHAUSTED` ("check quota"), three ads lost, zero images produced. A 429 on
+the image call discards the deconstruct AND copy work already done for that ad, not
+just the image step - all of it has to be redone from scratch on any retry, and the
+critic's own retry loop doubles the image calls per ad, making the ceiling easier to
+hit, not harder. Needs, in order: a quota raise from Usama (the actual limit, not a
+code workaround); a long backoff specifically on `RESOURCE_EXHAUSTED` (distinct from
+ordinary transient-error backoff - this one means "stop entirely for a while", not
+"retry soon"); failed ads marked retryable with the blueprint kept, so a quota-caused
+failure doesn't throw away deconstruct's work; and deliberate spacing between image
+calls so a batch doesn't itself trigger the ceiling. None of this is built yet.
+
+**Every 12 Aug commit is marked NOT VERIFIED LIVE**: `085eb16`, `a0cc74d`, `d9a308e`,
+`a228539`. First action next session is a verification run - via Generate on a
+never-drafted ad, never Regenerate (see the standing rule on this) - after a CONFIRMED
+restart (see the point above).
+
+**Still untouched from Sayali's doc**: batch scalability, and crepey skin reading as
+synthetic. Not investigated this session, not forgotten either - recorded here so they
+don't silently drop off the list.
+
+**Production safety audit not done.** Prod is still on revision `00041` from 4 Aug. The
+`production_style` enum rename and the seven newly-required blueprint fields (see the
+4 Aug / 6 Aug notes) are breaking changes against rows written under the old schema.
+Do not deploy before auditing what a fresh validation pass does to existing rows.
+
+**Run tests as `python -m pytest`, never bare `pytest`.** Bare `pytest` omits the repo
+root from `sys.path` and fails collection with `ModuleNotFoundError: No module named
+'src'` - this LOOKS like a real failure (a red run, an error message naming a missing
+module) but isn't one; it's an invocation mistake. Always `./venv/Scripts/python.exe -m
+pytest ...` (or `python -m pytest` with the venv active), never a bare `pytest`
+invocation, on this codebase.
+
+**`_illustrated_elements_clause` is wired but INERT and UNVERIFIED.** Added to
+`generate_image_prompt.py` and threaded into all three `build_image_prompt` branches,
+but nothing populates `blueprint.illustrated_elements` anywhere yet - no schema field,
+no deconstruct.py extraction - so the clause reads a key that doesn't exist on any real
+blueprint today and always returns `""` in practice. Open questions to resolve before
+finishing it, not yet answered: whether the literal string `"illustrated"` this clause
+gates on still matches the CURRENT `production_style.style` enum (renamed at some
+point this session - confirm the enum's real values before trusting the string
+comparison); whether it overlaps with `_scene_elements_clause` and
+`_competitor_props_clause` on the same drawn object (three mechanisms that could all
+have an opinion about the same illustrated prop, with no stated precedence between
+them); what clause(s) run AFTER it in each of the three branches, in case one of them
+also touches the same drawn elements; and whether its own example substitutes (a
+citrus slice, a flower) are themselves an implied ingredient claim - the same class of
+compliance risk (C3, unsubstantiated product facts) the clause's own docstring says it
+was written to avoid. Do not consider this feature done until these are checked.

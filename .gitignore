@@ -47,3 +47,21 @@ part1g_*.txt
 part_b*.txt
 pinned_test_output.txt
 retry_tests_output.txt
+
+# 13 Aug scratch files - untracked root diagnostics/dumps that kept cluttering
+# git status; not deleted, just kept out of tracking.
+chk*.py
+dump_*.txt
+sweep.py
+peek.py
+conns.py
+uvicorn_*.log*
+reports/
+scripts/occlusion_probe.py
+count2h.py
+fix_hero.py
+last7.py
+maxc.py
+today.py
+fussy_*.txt
+grun_prompt_*.txt
