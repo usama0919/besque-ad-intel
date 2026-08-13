@@ -606,6 +606,29 @@ def test_redact_personal_attribution_leaves_ordinary_text_untouched():
     assert generate_copy._redact_personal_attribution(text) == text
 
 
+# ---- C9 extended (2026-08-13 evening): a social media @handle is the same
+# unconsented-endorsement exposure as a personal name - redaction must strip it from
+# reference-derived text before it ever reaches a copy prompt, same as a name. ----
+
+def test_redact_personal_attribution_strips_at_handle():
+    redacted = generate_copy._redact_personal_attribution("as seen on @fitness_ty's page")
+    assert "@fitness_ty" not in redacted
+
+
+def test_text_zone_copy_clause_redacts_handle_from_detail():
+    zones = [{"zone_type": "body_copy", "position": "bottom",
+              "detail": "a UGC post header showing the handle @fitness_ty"}]
+    prompt = generate_copy._text_zone_copy_clause(zones)
+    assert "@fitness_ty" not in prompt
+
+
+def test_text_purpose_clause_redacts_handle_from_text_verbatim():
+    bp = {"text_purpose": [{"text_verbatim": "@fitness_ty: this changed everything",
+                             "purpose": "testimonial", "placement": "top"}]}
+    prompt = generate_copy._text_purpose_clause(bp)
+    assert "@fitness_ty" not in prompt
+
+
 def test_build_copy_prompt_redacts_testimonial_zones_attribution_from_raw_blueprint():
     # A different name from the "Sean R." example already baked into the prohibition
     # wording itself (see PERSONAL_NAME_ATTRIBUTION_PATTERN's own docstring) - using the

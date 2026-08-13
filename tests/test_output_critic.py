@@ -187,7 +187,7 @@ def test_critic_system_ingredient_formulation_not_forced_high_confidence():
 # rendering-only escape. ----
 
 def test_critic_system_has_borrowed_personal_attribution_category():
-    assert "BORROWED PERSONAL ATTRIBUTION (C9)" in critic.CRITIC_SYSTEM
+    assert "BORROWED PERSONAL ATTRIBUTION OR ACCOUNT IDENTITY (C9)" in critic.CRITIC_SYSTEM
     assert "Sean R." in critic.CRITIC_SYSTEM
     assert "DIFFERENT category from the testimonial check above" in critic.CRITIC_SYSTEM
 
@@ -195,6 +195,31 @@ def test_critic_system_has_borrowed_personal_attribution_category():
 def test_critic_system_borrowed_personal_attribution_not_forced_high_confidence():
     """Deliberate: see this test's module-level comment above."""
     assert "borrowed personal attribution" not in critic.HIGH_CONFIDENCE_BY_DEFAULT
+
+
+# ---- C9 extended (2026-08-13 evening): a social media @handle/username, and account
+# chrome (avatar/handle/verified-tick/follow-button) on a UGC-style reference, are the
+# same unconsented-endorsement/identity exposure as a borrowed personal name. ----
+
+def test_critic_system_c9_covers_handles_and_account_chrome():
+    assert "@fitness_ty" in critic.CRITIC_SYSTEM
+    assert "account chrome" in critic.CRITIC_SYSTEM
+    assert "CHROME LAYOUT may be reproduced" in critic.CRITIC_SYSTEM
+
+
+def test_critic_system_subject_age_violation_covers_avatar_faces():
+    """The live gap this closes: an identifiable-looking avatar reading mid-30s shipped
+    unflagged - "any human subject" must explicitly include a face inside account
+    chrome, not rely on the model reading it that broadly on its own."""
+    section = critic.CRITIC_SYSTEM
+    assert "INCLUDES a face rendered inside a small avatar" in section
+    assert "not decorative UI furniture exempt from this rule" in section
+
+
+def test_critic_system_subject_identity_covers_avatar_faces():
+    section = critic.CRITIC_SYSTEM
+    assert "INCLUDING a small avatar/profile-picture face" in section
+    assert "any avatar's subject" in section
 
 
 # ---- 2026-08-12 15:13 sweep (oil/bottle item): PRODUCT REGISTER MISMATCH already

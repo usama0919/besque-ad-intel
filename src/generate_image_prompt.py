@@ -1453,6 +1453,29 @@ def _structural_zones_clause(structural_zones, zone_copy_text=None, cta_text=Non
                     )
                     if styling_zone.get("placement"):
                         styling_instruction += f" Position it at {styling_zone['placement']}."
+                    # Account chrome carve-out (2026-08-13 evening, rule C9 extended): a
+                    # live draft carried an identifiable-looking avatar face AND,
+                    # separately, a real Instagram handle verbatim into a Besque draft -
+                    # "match this reference's own styling for the card" said nothing about
+                    # WHOSE account the card belongs to, so it read as license to
+                    # reproduce both. Stated here, at the exact point of use, not as a
+                    # separate rule stated further away - the same "closer wins" lesson
+                    # this codebase has already learned about competing instructions.
+                    styling_instruction += (
+                        " This styling covers LAYOUT ONLY (card shape, avatar placement, "
+                        "handle text position, verified tick, follow button) - it is "
+                        "NEVER license to reproduce WHOSE account this is. If the "
+                        "reference shows an avatar, @handle, username, or display name, "
+                        "that account identity is never the reference's own: render "
+                        "Besque's own account identity if one is supplied above, or "
+                        "remove it entirely (compliance rule C9) - never the competitor's "
+                        "or any other real account's identity. Any face rendered inside "
+                        "that avatar is a depicted person like any other in this image, "
+                        "never decorative UI furniture exempt from anything: it is bound "
+                        "by compliance rule C1 (never a real individual's likeness, always "
+                        "a generic non-identifiable stand-in) and rule 10 (must read 45-60, "
+                        "never younger) exactly the same as this ad's primary subject."
+                    )
                 substitute_lines.append(
                     f"- social_proof (single_quote) at {pos} (container: {container}): "
                     f"replace with this REAL customer review, rendered EXACTLY as given, "
@@ -2280,9 +2303,12 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             # mechanics only; pose, body position, and wardrobe moved to SUBSTITUTE,
             # alongside face/hair/identity - the person is substituted, not partially
             # preserved.
-            "PERSON: if a person appears anywhere in the reference image, this is one "
-            "instruction with two parts, not two competing ones, the same shape as the "
-            "colour instruction above. REPRODUCE only the camera/scene mechanics: "
+            "PERSON: if a person appears anywhere in the reference image - including a "
+            "face inside a small avatar or profile picture within reproduced UI chrome "
+            "(a UGC-style testimonial/social-post card), not only the ad's primary, "
+            "large-in-frame subject - this is one instruction with two parts, not two "
+            "competing ones, the same shape as the colour instruction above. REPRODUCE "
+            "only the camera/scene mechanics: "
             "framing, crop, camera angle, distance, lighting on the subject, and where "
             "in the composition the person sits. SUBSTITUTE the person themselves: "
             "face, hair, pose, body position, wardrobe/clothing, and every other "

@@ -388,3 +388,52 @@ def test_borrowed_personal_attribution_passes_in_check_compliance_when_authorize
     ok, issues = compliance.check_compliance(copy, "Brand", "", testimonial_attribution="Maria K.")
     assert ok is True
     assert issues == []
+
+
+# ---- C9 extended (2026-08-13 evening): a social media @handle/username is the same
+# unconsented-endorsement exposure as a personal name - a live draft carried a
+# competitor's real Instagram handle verbatim, with no surname initial, em-dash, or
+# attribution verb, so none of the name-shaped patterns above caught it. Matched by
+# SHAPE (an "@" followed by a username-shaped token), never a handle list. ----
+
+def test_at_handle_flagged():
+    copy = {"headline": "x", "primary_text": "Follow @fitness_ty for more tips", "cta": "y"}
+    issues = compliance.check_borrowed_personal_attribution(copy)
+    assert any("@fitness_ty" in i for i in issues)
+
+
+def test_at_handle_with_dots_flagged():
+    copy = {"headline": "x", "primary_text": "as seen on @glow.daily.co", "cta": "y"}
+    issues = compliance.check_borrowed_personal_attribution(copy)
+    assert any("@glow.daily.co" in i for i in issues)
+
+
+def test_authorized_handle_not_flagged():
+    copy = {"headline": "x", "primary_text": "Follow @besque_official for more", "cta": "y"}
+    issues = compliance.check_borrowed_personal_attribution(copy, authorized_attribution="@besque_official")
+    assert issues == []
+
+
+def test_unauthorized_handle_still_flagged_when_a_different_handle_is_authorized():
+    copy = {"headline": "x", "primary_text": "Follow @fitness_ty for more tips", "cta": "y"}
+    issues = compliance.check_borrowed_personal_attribution(copy, authorized_attribution="@besque_official")
+    assert any("@fitness_ty" in i for i in issues)
+
+
+def test_bare_handle_with_no_at_sign_is_a_known_gap_not_caught():
+    """Documented residual gap (see PERSONAL_NAME_ATTRIBUTION_PATTERN's own comment):
+    a bare lowercase_underscore token with no "@" marker is indistinguishable from an
+    ordinary compound word by shape alone - not matched here by design, to avoid
+    false-positiving on ordinary copy. The account-chrome fix in
+    generate_image_prompt.py covers the case this cannot: a bare handle rendered as
+    part of reproduced UI chrome rather than as copy text."""
+    copy = {"headline": "x", "primary_text": "fitness_ty says it changed her routine", "cta": "y"}
+    issues = compliance.check_borrowed_personal_attribution(copy)
+    assert issues == []
+
+
+def test_handle_check_is_always_on_in_check_compliance():
+    copy = {"headline": "x", "primary_text": "Follow @fitness_ty for more tips", "cta": "y"}
+    ok, issues = compliance.check_compliance(copy, "Brand", "")
+    assert ok is False
+    assert any("@fitness_ty" in i for i in issues)

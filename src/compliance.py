@@ -341,34 +341,52 @@ def check_unapproved_ingredient_claim(generated_copy, approved_claims=""):
     return issues
 
 
-# Rule C9 mechanical check (2026-08-13, item 2 sharpened): a personal-name-shaped
-# construct - "Firstname L." review-attribution shorthand, an explicit "attributed to
-# X", or an em-dash signature line - matched by SHAPE (a capitalised word followed by a
-# capitalised initial), never a name list. Live evidence: a draft correctly substituted
-# the competitor's brand and product throughout, but the competitor's own testimonial
+# Rule C9 mechanical check (2026-08-13, item 2 sharpened; extended 2026-08-13 evening
+# for social handles): a personal-name-shaped OR account-identifier-shaped construct -
+# "Firstname L." review-attribution shorthand, an explicit "attributed to X", an
+# em-dash signature line, or an @handle/username - matched by SHAPE (a capitalised
+# word followed by a capitalised initial; an @ followed by a username-shaped token),
+# never a name or handle list. Live evidence: a draft correctly substituted the
+# competitor's brand and product throughout, but the competitor's own testimonial
 # attribution ("Sean R.") survived verbatim into the Besque draft - publishing a real
 # individual's name as though they endorsed Besque, without their consent, which is a
-# legal exposure independent of whether the surrounding copy read well. Shared with
-# generate_copy.py's own reference-text redaction (_redact_personal_attribution) so the
-# INPUT side (strip it out of what a reference supplies before it can be paraphrased
-# into copy) and the OUTPUT side (flag it if it still shows up in what Claude actually
-# wrote) recognise the identical shape - one definition, not two that could drift apart.
+# legal exposure independent of whether the surrounding copy read well. A SEPARATE live
+# draft carried a competitor's real Instagram handle ("@fitness_ty") verbatim - a
+# handle is directly traceable to a real account, the same unconsented-endorsement
+# exposure as a name, so it belongs in this SAME rule (C9), not a tenth one: both are
+# "an account/identity element borrowed from someone else's ad," just spelled two
+# different ways. Shared with generate_copy.py's own reference-text redaction
+# (_redact_personal_attribution) so the INPUT side (strip it out of what a reference
+# supplies before it can be paraphrased into copy) and the OUTPUT side (flag it if it
+# still shows up in what Claude actually wrote) recognise the identical shape - one
+# definition, not two that could drift apart.
+#
+# A bare (no "@") handle-shaped token - lowercase_with_underscores, no space - is
+# DELIBERATELY not matched here: without the "@" marker, that shape is indistinguishable
+# from an ordinary compound word or slug by shape alone, and matching it generically
+# would false-positive constantly. This is a real residual gap, not an oversight - see
+# this module's own docstring update and the account-chrome fix in
+# generate_image_prompt.py's _structural_zones_clause, which addresses the case this
+# regex structurally cannot: a bare handle rendered as part of reproduced UI chrome
+# (an avatar/handle card) rather than as copy text.
 PERSONAL_NAME_ATTRIBUTION_PATTERN = re.compile(
     r"\battributed\s+to\s+[A-Z][\w'-]*(?:\s+[A-Z][\w'.-]*)?\.?"
     r"|[—–-]\s*[A-Z][a-z]+\s+[A-Z]\.(?=[\s).,!?\"']|$)"
     r"|\b[A-Z][a-z]+\s+[A-Z]\.(?=[\s).,!?\"']|$)"
+    r"|@[A-Za-z0-9_.]{2,30}\b"
 )
 
 
 def check_borrowed_personal_attribution(generated_copy, authorized_attribution=""):
-    """Rule C9 mechanical check: any personal-name-shaped hit in generated copy that
-    does not match the ONE authorized attribution (select_testimonial_review's own
-    pick, a real Besque customer, threaded in by pipeline.py). Always on, same
-    reasoning as check_unauthorized_efficacy_claim/check_unapproved_ingredient_claim -
-    a borrowed real person's name should never be allowed through unsubstantiated
-    regardless of any run-level toggle. Remove-by-default, not carry-by-default (the
-    same principle C7 already applies to an ungoverned zone): an unrecognised name is
-    flagged, never assumed harmless just because it reads like ordinary ad copy."""
+    """Rule C9 mechanical check: any personal-name-shaped OR @handle-shaped hit in
+    generated copy that does not match the ONE authorized attribution
+    (select_testimonial_review's own pick, a real Besque customer, threaded in by
+    pipeline.py). Always on, same reasoning as check_unauthorized_efficacy_claim/
+    check_unapproved_ingredient_claim - a borrowed real person's name or account handle
+    should never be allowed through unsubstantiated regardless of any run-level toggle.
+    Remove-by-default, not carry-by-default (the same principle C7 already applies to
+    an ungoverned zone): an unrecognised name or handle is flagged, never assumed
+    harmless just because it reads like ordinary ad copy."""
     issues = []
     gen = " ".join(str(v) for v in generated_copy.values())
     authorized_norm = _normalize(authorized_attribution)
@@ -379,7 +397,7 @@ def check_borrowed_personal_attribution(generated_copy, authorized_attribution="
         if authorized_norm and _normalize(name) in authorized_norm:
             continue
         issues.append(
-            f"Personal name/attribution '{name}' found in generated copy but does not "
+            f"Personal name/attribution/handle '{name}' found in generated copy but does not "
             f"match the authorized testimonial's own attribution "
             f"({authorized_attribution or 'none supplied'}) - a real person's name "
             f"from elsewhere must never be carried into Besque's output."

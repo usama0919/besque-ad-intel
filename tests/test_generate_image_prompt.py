@@ -150,6 +150,90 @@ def test_c8_reaches_edit_mode_and_writer_paths_too():
     assert "C8. NO UNSUBSTANTIATED INGREDIENT OR FORMULATION CLAIMS" in writer_prompt
 
 
+# ---- C9 (2026-08-13, item 2 sharpened; extended 2026-08-13 evening for social
+# handles/account chrome): a personal name, handle, or account identity borrowed from
+# the reference must never appear in Besque's output. ----
+
+def test_prompt_includes_c9_borrowed_attribution_rule():
+    prompt = generate_image_prompt.build_image_prompt(_blueprint())
+    assert "C9. NO BORROWED PERSONAL ATTRIBUTION OR ACCOUNT IDENTITY" in prompt
+    assert "@fitness_ty" in prompt  # the example, not a hardcoded live value
+
+
+def test_c9_covers_account_chrome_and_avatar_faces():
+    prompt = generate_image_prompt.build_image_prompt(_blueprint())
+    assert "account chrome" in prompt
+    assert "avatar's face is a depicted person" in prompt
+    assert "bound by C1 and rule 10" in prompt
+
+
+def test_c9_reaches_edit_mode_and_writer_paths_too():
+    edit_mode_prompt = generate_image_prompt.build_image_prompt(_blueprint(), edit_mode=True)
+    writer_prompt = generate_image_prompt.build_image_prompt(
+        _blueprint(), creative_description="A scene."
+    )
+    assert "C9. NO BORROWED PERSONAL ATTRIBUTION OR ACCOUNT IDENTITY" in edit_mode_prompt
+    assert "C9. NO BORROWED PERSONAL ATTRIBUTION OR ACCOUNT IDENTITY" in writer_prompt
+
+
+def test_person_clause_explicitly_covers_avatar_faces_in_chrome():
+    """The general PERSON instruction (edit mode) must name avatar/profile-picture
+    faces explicitly, not rely on "any person" being read broadly enough on its own -
+    the whole point of this fix is that a nearby, more specific instruction (the
+    social_proof card-styling clause) can otherwise win by default."""
+    prompt = generate_image_prompt.build_image_prompt(_blueprint(), edit_mode=True)
+    assert "face inside a small avatar or profile picture" in prompt
+    assert "not only the ad's primary" in prompt
+
+
+# ---- Account chrome carve-out on the social_proof testimonial card itself (2026-08-13
+# evening): "match this reference's own styling for the card" must never be read as
+# license to reproduce whose account the card belongs to. ----
+
+def _blueprint_with_testimonial_card():
+    return {
+        "visual": {"layout": "x", "subject": "x", "palette_mood": "x", "text_placement": "x"},
+        "structural_zones": [
+            {"zone_type": "social_proof", "position": "bottom-left card",
+             "container": "rect", "detail": "a customer quote card",
+             "social_proof_kind": "single_quote"},
+        ],
+        "testimonial_zones": [
+            {"text_verbatim": "So glad I tried this", "attribution": "Sean R.",
+             "placement": "bottom-left card",
+             "styling": "avatar circle top-left, handle @fitness_ty beneath, white card"},
+        ],
+    }
+
+
+def test_social_proof_styling_carve_out_present_when_chrome_reproduced():
+    prompt = generate_image_prompt.build_image_prompt(
+        _blueprint_with_testimonial_card(), edit_mode=True,
+        testimonial={"quote": "Loved this after one week", "attribution": "Maria K."},
+    )
+    assert "LAYOUT ONLY" in prompt
+    assert "NEVER license to reproduce WHOSE account this is" in prompt
+    assert "bound by compliance rule C1" in prompt
+
+
+def test_social_proof_styling_carve_out_absent_when_no_styling_supplied():
+    """Byte-for-byte prior behaviour when no styling detail exists at all - the
+    carve-out is additive to styling_instruction, so it must never appear on its own
+    when there's no card-styling instruction for it to qualify."""
+    bp = {
+        "visual": {"layout": "x", "subject": "x", "palette_mood": "x", "text_placement": "x"},
+        "structural_zones": [
+            {"zone_type": "social_proof", "position": "bottom-left card",
+             "container": "rect", "detail": "a customer quote card",
+             "social_proof_kind": "single_quote"},
+        ],
+    }
+    prompt = generate_image_prompt.build_image_prompt(
+        bp, edit_mode=True, testimonial={"quote": "Loved this after one week", "attribution": "Maria K."},
+    )
+    assert "NEVER license to reproduce WHOSE account this is" not in prompt
+
+
 def test_prompt_never_leaks_visual_subject():
     """Regression guard for the Rule C1 tension: visual.subject is where the vision step
     puts identity-carrying descriptions of the competitor's model (see deconstruct.py real

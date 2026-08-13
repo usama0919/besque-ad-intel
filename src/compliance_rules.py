@@ -11,11 +11,16 @@ framing), and C7 (weight/treatment text in-image) are prompt-only on the image
 side. There is no mechanical check that verifies a generated image actually
 honours them - only C2 (fabricated testimonials/claims), C3/C8 (numeric,
 efficacy, and ingredient/formulation claims), and C9 (borrowed personal
-attribution), on the copy side, have a mechanical backstop (see
-src/compliance.py). If the image model ignores these instructions, nothing
-here catches it - output_critic.py's checklist is the only post-hoc backstop
-for this category (see its own WEIGHT/TREATMENT TEXT entry, its
-ingredient/formulation entry for C8, and its borrowed-attribution entry for C9).
+attribution/account identity - the personal-name/handle-in-TEXT half only),
+on the copy side, have a mechanical backstop (see src/compliance.py). C9's
+account-chrome half (an avatar's face, or a display name/handle rendered as
+part of reproduced UI chrome rather than as copy text) has NO mechanical
+backstop at all - same as C1 - since it is pixels, not a string a regex can
+scan; it is prompt-only plus the critic checklist, exactly like C1. If the
+image model ignores these instructions, nothing here catches it -
+output_critic.py's checklist is the only post-hoc backstop for this category
+(see its own WEIGHT/TREATMENT TEXT entry, its ingredient/formulation entry for
+C8, and its borrowed-attribution/account-identity entry for C9).
 """
 
 COMPLIANCE_RULES = (
@@ -75,16 +80,25 @@ COMPLIANCE_RULES = (
     "ingredient or formulation claim may be asserted from any source - a generic industry-standard "
     "phrase, the competitor reference ad's own ingredient claims, or an invented one. In BOTH copy "
     "and in-image text. "
-    "C9. NO BORROWED PERSONAL ATTRIBUTION: any personal name, initial-surname construction (e.g. "
-    "\"Sean R.\"), handle, or signature appearing in the reference ad's own text, testimonial "
-    "attribution, or any other reference-derived field must never appear in Besque's output, in "
-    "copy or in-image text, EVEN when the surrounding brand and product references were correctly "
-    "substituted. This is a DIFFERENT category from C2: C2 governs a FABRICATED testimonial's "
-    "content; this governs a BORROWED one's attribution - a real individual's name carried over "
-    "from someone else's ad into a Besque ad publishes an unconsented endorsement, a legal exposure "
-    "independent of whether the testimonial content itself is genuine or well-written. The ONLY "
-    "personal attribution ever permitted is the one supplied in APPROVED TESTIMONIALS below (a "
-    "real, consented Besque customer) - an unrecognised name found in reference-derived material is "
-    "REMOVED by default, never carried over on the assumption it is harmless (the same default C7 "
-    "already applies to an ungoverned zone)."
+    "C9. NO BORROWED PERSONAL ATTRIBUTION OR ACCOUNT IDENTITY: any personal name, initial-surname "
+    "construction (e.g. \"Sean R.\"), signature, social media @handle or username (e.g. "
+    "\"@fitness_ty\"), profile/display name, or other account identifier appearing in the reference "
+    "ad's own text, testimonial attribution, account chrome (an avatar/handle/name card on a "
+    "UGC-style reference), or any other reference-derived field must never appear in Besque's "
+    "output, in copy or in-image text, EVEN when the surrounding brand and product references were "
+    "correctly substituted. This is a DIFFERENT category from C2: C2 governs a FABRICATED "
+    "testimonial's content; this governs a BORROWED identity - a real individual's name, handle, or "
+    "account carried over from someone else's ad into a Besque ad publishes an unconsented "
+    "endorsement, a legal exposure independent of whether the testimonial content itself is genuine "
+    "or well-written, and a handle is directly traceable to a real account, exactly as much a real "
+    "identity as a name is. Where a UGC-style reference's layout includes account chrome (avatar, "
+    "handle, verified tick, follow button), the CHROME may be reproduced as layout, but its CONTENT "
+    "must be Besque's own account identity or REMOVED - never the competitor's or any other real "
+    "account's identity, and an avatar's face is a depicted person like any other: it is bound by C1 "
+    "and rule 10 exactly the same as the ad's primary subject, never treated as decorative UI "
+    "furniture exempt from either. The ONLY personal attribution ever permitted is the one supplied "
+    "in APPROVED TESTIMONIALS below (a real, consented Besque customer) - an unrecognised name, "
+    "handle, or account identifier found in reference-derived material is REMOVED by default, never "
+    "carried over on the assumption it is harmless (the same default C7 already applies to an "
+    "ungoverned zone)."
 )
