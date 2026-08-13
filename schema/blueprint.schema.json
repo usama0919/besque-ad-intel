@@ -162,11 +162,12 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["element", "role", "essential"],
+        "required": ["element", "role", "essential", "depicts_competitor_category"],
         "properties": {
           "element": { "type": "string" },
           "role": { "type": "string" },
-          "essential": { "type": "boolean" }
+          "essential": { "type": "boolean" },
+          "depicts_competitor_category": { "type": "boolean" }
         }
       }
     },

@@ -3,6 +3,7 @@ import os
 import json
 import base64
 import logging
+import time
 from pathlib import Path
 
 from src import json_response, validator
@@ -49,7 +50,7 @@ The JSON must have exactly these fields:
     badge = a discrete graphic badge, seal, or roundel - detail should name its actual content (e.g. "reads NEW", "star rating icon", "%-off roundel", "award/certification seal")
     social_proof = a testimonial or aggregate-review element rendered in the image - social_proof_kind distinguishes an AGGREGATE BAR (a review count + star average, e.g. "Trustpilot · Over 30,000 · ★★★★★") from a SINGLE QUOTE (one customer's words plus attribution), since these need different treatment downstream; set social_proof_kind for every social_proof entry, never leave it unset when this zone_type is used
     disclaimer = fine-print or footnote text (e.g. "*T&Cs apply", a small legal line)
-- scene_elements (array): REQUIRED - this key must ALWAYS be present, [] when there is genuinely nothing beyond the product itself to inventory. Every element in the scene OTHER THAN the product: hands, skin, props, background objects, secondary figures, surfaces the product rests on - anything visually present that a faithful reproduction of this reference would need to include. Each entry: {{ "element": short noun phrase (e.g. "wooden bathroom shelf", "a second person's hand", "a folded white towel"), "role": what it is doing in the scene (e.g. "product rests on it", "applying the product to skin", "softly blurred in the background"), "essential": true if omitting it would change what the ad is communicating, false if it is incidental set-dressing }}. An incomplete inventory here means those elements get silently dropped when this reference is cloned - list everything visible, not just the obviously important pieces.
+- scene_elements (array): REQUIRED - this key must ALWAYS be present, [] when there is genuinely nothing beyond the product itself to inventory. Every element in the scene OTHER THAN the product: hands, skin, props, background objects, secondary figures, surfaces the product rests on - anything visually present that a faithful reproduction of this reference would need to include. Each entry: {{ "element": short noun phrase (e.g. "wooden bathroom shelf", "a second person's hand", "a folded white towel"), "role": what it is doing in the scene (e.g. "product rests on it", "applying the product to skin", "softly blurred in the background"), "essential": true if omitting it would change what the ad is communicating, false if it is incidental set-dressing, "depicts_competitor_category": true if this element visually depicts something SPECIFIC to the competitor's own product category rather than something register-neutral - e.g. in a drawn/illustrated scene, a steak or a spoon of powder for a protein supplement, a strand of hair for a haircare product, an eye-diagram for an eye treatment; false for anything register-neutral that would suit any brand's ad (a hand, a towel, a shelf, a background wall, generic scenery). REQUIRED on every entry - this key must ALWAYS be present, never omitted, even when the answer is false. This is a DIFFERENT question from essential: an element can be essential AND register-neutral (keep it, unchanged), essential AND competitor-specific (keep the ROLE, substitute the content), or incidental either way. Get this right specifically for ILLUSTRATED/drawn scenes - a drawn element that visually argues the competitor's product category survives unchanged far more often than a photographed prop, since nothing else in this pipeline currently substitutes drawn content. }}. An incomplete inventory here means those elements get silently dropped when this reference is cloned - list everything visible, not just the obviously important pieces.
 - testimonial_zones (array): REQUIRED - this key must ALWAYS be present, [] when the ad carries no testimonial. Every customer-testimonial-shaped text element in the image - distinct from structural_zones' social_proof entries above, which record WHERE/HOW it is contained; this records the actual testimonial CONTENT. Each entry: {{ "text_verbatim": the exact testimonial text as it appears in the image, "attribution": the name/initial/handle it is attributed to, verbatim, or "" if unattributed, "placement": short phrase locating it (e.g. "bottom-left card"), "styling": how it is visually presented (e.g. "quote marks, no card", "5-star rating above the quote inside a white rounded card") }}.
 - text_purpose (array): REQUIRED - this key must ALWAYS be present, [] when the image carries no text at all. One entry per distinct text block in the image - this classifies EVERY text block by function, at a finer grain than the fields above. Each entry: {{ "text_verbatim": the exact text, "purpose": one of offer/testimonial/efficacy_claim/problem_hook/product_description/cta/other, "placement": short phrase locating it }}. purpose describes what the text is DOING - the job it performs in the ad's argument - never what it literally says; this is what drives what the REPLACEMENT copy must accomplish when this reference is cloned, so classify by function even when the wording itself doesn't obviously announce its purpose (e.g. a rhetorical question is still a problem_hook, not "other").
 - semantic_split (object): REQUIRED - this key must ALWAYS be present. {{ "is_split": true/false, "split_axis": "vertical" or "horizontal" or null, "left_or_before": free text describing what that side/panel depicts, "right_or_after": free text describing what the other side/panel depicts }}. is_split is true whenever the image is visually divided into two comparable panels or halves - a before/after, a side-by-side comparison, a split-screen. When is_split is false, split_axis is null and both left_or_before and right_or_after are "". For a genuine before/after ad, the two sides MUST be described as materially DIFFERENT states (e.g. left_or_before: "dry, crepey skin with visible fine lines"; right_or_after: "smooth, hydrated skin with visible firmness") - recording both sides as showing the same condition is a failure, since the contrast between them is the entire point of the format.
@@ -120,6 +121,71 @@ def deconstruct_from_response(raw_text: str) -> dict:
 import base64
 import mimetypes
 import anthropic
+
+
+# TRANSIENT API-ERROR RETRY (2026-08-13): a completely different failure class from the
+# parse/validation retry below (_MAX_DECONSTRUCT_ATTEMPTS) - that one handles a response
+# we DID get back but that fails to parse or fails schema validation; this one handles
+# never getting a response at all (a network timeout/dropped connection) or Anthropic's
+# own infrastructure being temporarily unable to serve the request (429/5xx). Two ads
+# lost live today to "Request timed out or interrupted" (anthropic.APITimeoutError's own
+# exact message) - deconstruct_image's only retry loop was for parse/validation, so a
+# timeout propagated straight out of client.messages.create() (which sits BEFORE that
+# loop's try/except even starts) and failed the ad with nothing salvaged.
+#
+# Deliberately a SEPARATE, flat retry wrapped around ONLY the raw API call, never folded
+# into the parse/validation loop's own attempt counter or system-prompt state - a
+# transient failure has nothing to do with JSON escaping or schema correction, so it
+# must never consume one of THOSE two precious attempts or trigger the escaping nudge.
+# The two budgets are independent and both individually capped (2 outer x 4 inner = 8
+# calls in the genuine worst case, a small bounded number, not an unbounded multiply) -
+# see _call_claude_with_transient_retry's own docstring for exactly where it sits.
+_MAX_TRANSIENT_ATTEMPTS = 4
+_TRANSIENT_BACKOFF_BASE_SECONDS = 2.0
+
+# 429 (RateLimitError) and every 5xx (InternalServerError/ServiceUnavailableError/
+# OverloadedError/DeadlineExceededError, or any other 5xx the SDK doesn't name
+# specifically) mean "the request itself was fine, try again" - never a reason to
+# change what we're sending. Checked via status_code, not by enumerating every named
+# subclass, so a 5xx status the SDK hasn't given its own class name to (or ever adds
+# later) is still caught correctly.
+def _is_transient_anthropic_error(exc):
+    """True for a network-layer failure (timeout, dropped connection -
+    anthropic.APIConnectionError and its subclass APITimeoutError) or a 429/5xx status
+    from the API itself. False for anything else - auth (401), malformed/oversized
+    request (400/413/422), permission (403), not found (404), conflict (409), or any
+    other 4xx (where a content-policy rejection would also surface) - those need a
+    DIFFERENT request, not a retry, and must fail fast exactly as they do today."""
+    if isinstance(exc, anthropic.APIConnectionError):
+        return True
+    if isinstance(exc, anthropic.APIStatusError):
+        return exc.status_code == 429 or exc.status_code >= 500
+    return False
+
+
+def _call_claude_with_transient_retry(client, kwargs, ad_id):
+    """Call client.messages.create(**kwargs), retrying ONLY on a transient failure
+    (see _is_transient_anthropic_error) with exponential backoff (2s, 4s, 8s, ...) up
+    to _MAX_TRANSIENT_ATTEMPTS total tries. A non-transient error raises immediately on
+    the very first attempt, byte-for-byte the behaviour before this existed. Logs the
+    attempt number and the exception's own class name on every transient failure, so
+    the run log always shows whether a retry happened and why - not just that the call
+    eventually succeeded or ultimately failed."""
+    wait = _TRANSIENT_BACKOFF_BASE_SECONDS
+    for attempt in range(1, _MAX_TRANSIENT_ATTEMPTS + 1):
+        try:
+            return client.messages.create(**kwargs)
+        except Exception as e:
+            if not _is_transient_anthropic_error(e):
+                raise
+            log.warning(
+                "deconstruct transient API error for ad %s (attempt %s/%s): %s: %s",
+                ad_id, attempt, _MAX_TRANSIENT_ATTEMPTS, type(e).__name__, e,
+            )
+            if attempt == _MAX_TRANSIENT_ATTEMPTS:
+                raise
+            time.sleep(wait)
+            wait *= 2
 
 
 def _load_image_b64_v2(image_path):
@@ -205,7 +271,18 @@ def deconstruct_image(image_bytes, ad_id, source_page, captured_at, destination_
     different nudge, not the JSON-escaping one. Either way, raises if the retry fails
     too, logging ad_id plus the raw response or the validation message on every failed
     attempt so an unfixable ad stays diagnosable from the run log. One retry, never a
-    loop."""
+    loop.
+
+    The raw API call itself (client.messages.create) goes through
+    _call_claude_with_transient_retry on every one of the attempts above - a SEPARATE,
+    independently-capped retry for a network timeout/connection error or a 429/5xx from
+    Anthropic's own infrastructure (see that function's own docstring). That budget
+    never interacts with the parse/validation one above: a transient failure is retried
+    silently within that helper and never reaches the except blocks below at all unless
+    its own budget is exhausted, at which point it propagates straight out of this
+    function exactly as an unretried transient error did before this existed - it is
+    never treated as a parse/validation failure, and never consumes one of THOSE two
+    attempts."""
     b64, media_type = _b64_from_bytes(image_bytes)
     prompt = build_prompt(ad_id, source_page, captured_at, destination_url)
 
@@ -219,7 +296,12 @@ def deconstruct_image(image_bytes, ad_id, source_page, captured_at, destination_
         content.append({"type": "text", "text": "\n\n".join(copy_parts)})
     content.append({"type": "text", "text": prompt})
 
-    client = anthropic.Anthropic(timeout=60.0, max_retries=1)  # reads ANTHROPIC_API_KEY from env
+    # max_retries=0 (was 1): the SDK's own hidden retry covers the same transient
+    # failures _call_claude_with_transient_retry now handles explicitly - leaving both
+    # active would silently compound (the SDK retrying inside every one of OUR retries,
+    # invisible to our own logging and to _MAX_TRANSIENT_ATTEMPTS' own cap). Exactly one
+    # mechanism now owns transient retry, and it's the one that logs and is tested.
+    client = anthropic.Anthropic(timeout=60.0, max_retries=0)  # reads ANTHROPIC_API_KEY from env
     total = _MAX_DECONSTRUCT_ATTEMPTS
     system = None
     for attempt in range(1, total + 1):
@@ -235,7 +317,7 @@ def deconstruct_image(image_bytes, ad_id, source_page, captured_at, destination_
         }
         if system:
             kwargs["system"] = system
-        message = client.messages.create(**kwargs)
+        message = _call_claude_with_transient_retry(client, kwargs, ad_id)
         raw_text = ""
         try:
             raw_text = message.content[0].text if message.content else ""

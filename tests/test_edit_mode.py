@@ -1056,6 +1056,35 @@ def test_build_image_prompt_omits_bottle_material_realism_when_productless():
     assert generate_image_prompt._BOTTLE_MATERIAL_REALISM_CLAUSE not in prompt
 
 
+# ---- 2026-08-13: small-scale label legibility - a genuine gap, not a duplicate of the
+# curved-wrap sentence (that's geometry/decal-vs-wrapped; this is information density
+# at small render size). Added to the SAME clause, not a competing second one, and
+# explicitly reconciled with _bottle_fixed_clause's "label text/layout are FIXED". ----
+
+def test_bottle_material_realism_clause_covers_small_scale_label_simplification():
+    clause = generate_image_prompt._BOTTLE_MATERIAL_REALISM_CLAUSE
+    assert "small fraction of the frame" in clause
+    assert "BESQUE wordmark and the product name at minimum" in clause
+    assert "dropping certification icons, border/rule detail, and fine print" in clause
+
+
+def test_bottle_material_realism_clause_small_scale_addition_never_changes_real_content():
+    """Must be explicit that this is a rendering simplification, not a content change -
+    or it would read as contradicting _bottle_fixed_clause's "label text/layout are
+    FIXED"."""
+    clause = generate_image_prompt._BOTTLE_MATERIAL_REALISM_CLAUSE
+    assert "never a change to what the label actually contains" in clause
+    assert "full label" in clause and "still applies whenever the bottle is rendered large" in clause
+
+
+def test_bottle_material_realism_clause_still_states_curved_wrap_fidelity_unchanged():
+    """The pre-existing wrap-fidelity sentence must survive untouched alongside the new
+    size-driven addition - this is an extension, not a replacement."""
+    clause = generate_image_prompt._BOTTLE_MATERIAL_REALISM_CLAUSE
+    assert "wraps the bottle's own curve" in clause
+    assert "flat decal pasted" in clause
+
+
 def test_bottle_material_realism_clause_never_invents_a_colour_or_material():
     """Deliberately generic - naming a specific colour/material not present in
     product.visual_description would be an invented product fact (compliance C3)."""

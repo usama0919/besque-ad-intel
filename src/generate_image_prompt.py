@@ -372,7 +372,7 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
             _critic_feedback_clause(critic_feedback) +
             _scene_elements_clause(blueprint.get("scene_elements")) +
             _semantic_split_clause(blueprint.get("semantic_split")) +
-            _illustrated_elements_clause(blueprint.get("illustrated_elements"), resolved_style) +
+            _illustrated_elements_clause(blueprint.get("scene_elements"), resolved_style) +
             # include_product here is the RAW operator toggle - identical to
             # effective_include_product since the 2026-08-07 reference usability gate
             # reversal (reference_has_product no longer forces effective_include_product
@@ -414,7 +414,7 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
             _critic_feedback_clause(critic_feedback) +
             _scene_elements_clause(blueprint.get("scene_elements")) +
             _semantic_split_clause(blueprint.get("semantic_split")) +
-            _illustrated_elements_clause(blueprint.get("illustrated_elements"), resolved_style) +
+            _illustrated_elements_clause(blueprint.get("scene_elements"), resolved_style) +
             creative_description.strip() + " "
             + product_clause
             + _bottle_fixed_clause() + _bottle_register_clause(scene_lighting) +
@@ -429,7 +429,7 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
             _critic_feedback_clause(critic_feedback) +
             _scene_elements_clause(blueprint.get("scene_elements")) +
             _semantic_split_clause(blueprint.get("semantic_split")) +
-            _illustrated_elements_clause(blueprint.get("illustrated_elements"), resolved_style) +
+            _illustrated_elements_clause(blueprint.get("scene_elements"), resolved_style) +
             f"A premium skincare advertisement image for Besque, a natural body-oil brand for women 40+. "
             f"Composition and setting: {layout}. (If this implies a person, render them per compliance "
             f"rule C1 - a generic, non-identifiable model, never the specific individual described - "
@@ -714,14 +714,29 @@ def _scene_elements_clause(scene_elements=None):
     to at all in generate mode. Phrased as inclusion, not prohibition, per instruction:
     this tells the model what must be IN the output, not what to avoid.
 
+    depicts_competitor_category (2026-08-13, item 2 redesign) EXCLUDED here even when
+    essential=true - those entries are the SUBSTITUTE list now, handled by
+    _illustrated_elements_clause instead of the KEEP list here. Before this field
+    existed, an essential element that happened to visually depict the competitor's
+    product category (a drawn steak, a spoon of powder) had no way to be told apart
+    from a register-neutral essential element (a hand, a towel) - both were named as
+    MUST-INCLUDE here, with nothing anywhere saying the former should be substituted
+    instead of kept. The two filters are a strict partition on the SAME field
+    (depicts_competitor_category), so no single entry can ever satisfy both at once -
+    an object named here is never also named by _illustrated_elements_clause, and vice
+    versa, by construction rather than by convention.
+
     Fixed position, same reasoning as _operator_instruction_clause/_critic_feedback_
     clause: called identically in all three build_image_prompt branches (edit mode,
     writer/creative_description, flat template), right after critic feedback and before
     whatever supplies the scene text - so a reference's essential elements are never lost
     to whichever branch happens to fire. Returns "" when scene_elements is empty or has
-    nothing flagged essential, so a blueprint from before this field existed produces
-    byte-for-byte the same prompt as before this existed."""
-    essential = [e for e in (scene_elements or []) if e.get("essential")]
+    nothing flagged essential-and-neutral, so a blueprint from before this field
+    existed, or one where every essential element is competitor-category, produces
+    byte-for-byte the same prompt as before this existed (in the latter case, because
+    the SUBSTITUTE clause below carries those elements instead - never silently
+    dropped from both)."""
+    essential = [e for e in (scene_elements or []) if e.get("essential") and not e.get("depicts_competitor_category")]
     if not essential:
         return ""
     bullets = " ".join(
@@ -776,40 +791,63 @@ def _semantic_split_clause(semantic_split=None):
     )
 
 
-def _illustrated_elements_clause(illustrated_elements=None, style=None):
-    """Item 2 (2026-08-12 evening): deconstruct's illustrated_elements inventory
-    (schema/blueprint.schema.json) - drawn props in an ILLUSTRATED reference that are
-    neither the product, a person, nor text (a steak, a spoon of collagen powder, a
-    hair strand - anything the reference's own artwork depicts to make its argument
-    visually). Live finding: on illustrated references, generation correctly rewrites
-    the TEXT to Besque but clones these drawn elements unchanged - the illustration
-    still visually argues the competitor's product category (a protein supplement)
-    while the words say body oil. Same reasoning as _scene_elements_clause/
-    _competitor_props_clause: a bare "match the reference" instruction has nothing
-    concrete to act on; naming each element and its position gives generation
-    something to actually substitute.
+def _illustrated_elements_clause(scene_elements=None, style=None):
+    """Item 2 REDESIGN (2026-08-13): repointed at deconstruct's scene_elements
+    inventory (schema/blueprint.schema.json), filtered to depicts_competitor_category
+    entries - NOT a separate top-level illustrated_elements field. That field was built
+    and wired (a228539/d57134c) but left permanently unpopulated (no schema, no
+    deconstruct extraction), and the same-day audit that found it inert also found
+    _scene_elements_clause had no style gate and fires on essential=true alone, with
+    nothing reconciling it against a separately-populated illustrated_elements list -
+    the same drawn steak could be named MUST-INCLUDE by one clause and MUST-SUBSTITUTE
+    by the other, with no shared field to tell them apart. depicts_competitor_category
+    makes this ONE list with one boolean instead of two independently-populated ones:
+    _scene_elements_clause keeps essential-and-NOT-depicts_competitor_category
+    (register-neutral); this substitutes every depicts_competitor_category entry,
+    essential or not - an incidental drawn steak argues "protein supplement" just as
+    much as an essential one, so essential is not a gate here. The partition is
+    structural (one shared field, mutually exclusive filters), not a convention either
+    function could silently drift from.
+
+    Live finding this answers: on illustrated references, generation correctly
+    rewrites the TEXT to Besque but clones these drawn elements unchanged (a steak, a
+    spoon of collagen powder, a hair strand) - the illustration still visually argues
+    the competitor's product category (a protein supplement) while the words say body
+    oil. Same reasoning as _scene_elements_clause/_competitor_props_clause: a bare
+    "match the reference" instruction has nothing concrete to act on; naming each
+    element and its role gives generation something to actually substitute.
 
     Deliberately does NOT name a specific replacement ingredient/visual per element -
     inventing "a drop of vitamin E" or similar with no basis in the product's real
-    ingredients would itself be a fabricated product fact (compliance C3). Instead
-    names the CATEGORY of acceptable substitute (a generic natural/botanical/
-    oil-adjacent visual) and requires it be drawn NATIVELY in the reference's own
+    ingredients would itself be a fabricated product fact (compliance C3). Also
+    deliberately does NOT suggest identifiable produce (a citrus slice, a flower) as
+    an example substitute (removed 2026-08-13, same audit that added this redesign) -
+    a drawn, nameable ingredient is ITSELF an implied ingredient claim, the same class
+    of fabrication compliance C3 already forbids and the same reason products.
+    description was trimmed of mechanism claims earlier this session. Names only an
+    oil droplet or an abstract botanical FORM (a plain leaf/petal shape, never a
+    specific named flower or fruit) as acceptable substitutes - visual categories with
+    no specific-ingredient claim attached, drawn NATIVELY in the reference's own
     illustrated style at the same position - never the literal off-brand item redrawn
     unchanged, and never a photographic/photorealistic insert into a drawing.
 
     Illustrated-register only (style == "illustrated") - a photographic reference's
     off-brand props are already covered by _competitor_props_clause (PROP_KEYWORDS)
-    and the general product-substitution instructions; this field only exists for
-    drawn scenes where those don't apply. Fixed position, same reasoning as
+    and the general product-substitution instructions; this only exists for drawn
+    scenes where those don't apply. Fixed position, same reasoning as
     _scene_elements_clause: called identically in all three build_image_prompt
-    branches. Returns "" when style isn't illustrated or the list is empty, so a
-    non-illustrated blueprint, or one from before this field existed, produces
-    byte-for-byte the same prompt as before this existed."""
-    if style != "illustrated" or not illustrated_elements:
+    branches. Returns "" when style isn't illustrated or nothing is flagged
+    depicts_competitor_category, so a non-illustrated blueprint, or one from before
+    this field existed, produces byte-for-byte the same prompt as before this
+    existed."""
+    if style != "illustrated":
+        return ""
+    competitor_elements = [e for e in (scene_elements or []) if e.get("depicts_competitor_category")]
+    if not competitor_elements:
         return ""
     bullets = " ".join(
-        f"({i}) \"{e.get('depicts', '')}\" at {e.get('position') or 'its shown position'}"
-        for i, e in enumerate(illustrated_elements, start=1)
+        f"({i}) \"{e.get('element', '')}\" ({e.get('role', '')})"
+        for i, e in enumerate(competitor_elements, start=1)
     )
     return (
         f"ILLUSTRATED ELEMENTS TO SUBSTITUTE (STRICT): the reference's own artwork "
@@ -817,9 +855,10 @@ def _illustrated_elements_clause(illustrated_elements=None, style=None):
         f"one visually argues the COMPETITOR's product category (an ingredient, prop, "
         f"or symbol specific to what they sell), not a body oil - keeping any of them "
         f"unchanged leaves the illustration arguing a different product even after the "
-        f"text is rewritten to Besque. Replace EACH with a generic, on-brand natural/"
-        f"botanical/oil-adjacent visual (e.g. a leaf, a flower, an oil droplet, a "
-        f"citrus slice) - never a specific named ingredient not in this product's real "
+        f"text is rewritten to Besque. Replace EACH with a generic, on-brand oil-"
+        f"adjacent visual - an oil droplet, or an abstract botanical form (a plain "
+        f"leaf or petal shape, never a specific, identifiable, nameable flower or "
+        f"fruit) - never a specific named ingredient not in this product's real "
         f"ingredient list, and never the reference's own item redrawn unchanged. Draw "
         f"the replacement NATIVELY in this scene's own illustrated style - same line "
         f"weight, shading, and position as the original - never a photograph or "
@@ -878,6 +917,20 @@ def _substance_recolour_clause(substance_colour=None):
 # an extension of that same "match the scene's own light, never a separate studio
 # light" principle (see _bottle_register_clause), applied to a transparent object
 # specifically, not a second, competing lighting instruction.
+#
+# SMALL-SCALE LABEL LEGIBILITY (2026-08-13): added, not restated - checked first
+# whether the wrap-fidelity sentence below ("legible, without warping...") already
+# covered this, and it doesn't. That sentence is about GEOMETRY (does the label read
+# as wrapped onto the glass vs a flat decal); the live bug is about INFORMATION DENSITY
+# at small render size (a hero-sized bottle's label is correct, the same label shrunk
+# to a small in-scene bottle garbles) - a label that wraps perfectly can still garble
+# if it's asked to render the full wordmark+certs+fine print in too few pixels. No
+# existing instruction addressed render-size at all, so this isn't a contradiction to
+# remove, it's a genuine gap. Deliberately scoped as a SIZE-DRIVEN RENDERING
+# simplification, never a content change, so it does not compete with
+# _bottle_fixed_clause's "label text/layout are FIXED" - that governs what the real
+# label IS; this governs what's legible to actually render at a given size, and says so
+# explicitly to head off exactly that reading.
 _BOTTLE_MATERIAL_REALISM_CLAUSE = (
     "The oil inside the bottle must read as a REAL LIQUID, not a flat, uniform fill: "
     "render a visible liquid volume with a distinct surface line (a meniscus) where "
@@ -894,7 +947,15 @@ _BOTTLE_MATERIAL_REALISM_CLAUSE = (
     "highlights and reflections consistent with this scene's lighting, never a flat, "
     "single-tone shape. The label wraps the bottle's own curve as a real printed label "
     "would - legible, without warping, stretching, or reading as a flat decal pasted "
-    "over a curved surface. "
+    "over a curved surface. When the bottle occupies only a small fraction of the "
+    "frame, simplify what the label shows to what will actually render legibly at "
+    "that size - the BESQUE wordmark and the product name at minimum, dropping "
+    "certification icons, border/rule detail, and fine print below the size where "
+    "they would legibly render. This is a size-driven simplification of what is SHOWN "
+    "on a small render, never an invented label or a different one, and never a "
+    "change to what the label actually contains - the full label (wordmark, name, "
+    "certifications, fine print) still applies whenever the bottle is rendered large "
+    "enough to show it legibly. "
 )
 
 
@@ -1559,6 +1620,16 @@ def _non_carryover_exceptions_clause():
     also silently re-asserting "carries over exactly" against the product-count
     composition-adaptation instruction stated in the product branches above.
 
+    A FOURTH exception is added 2026-08-13 (item 2 redesign): the same catch-all was
+    ALSO silently re-asserting "carries over exactly" against the illustrated-elements
+    substitution clause (_illustrated_elements_clause, which runs earlier in the
+    assembled prompt than this one) - a drawn steak/spoon/hair-strand is exactly a
+    "non-person element" this clause otherwise demands survive, directly contradicting
+    an instruction to substitute it. Confirmed by reading the whole function before
+    building this: `opening`'s own "which non-person elements appear must still carry
+    over" sentence had the identical gap - see that sentence's own fourth exception,
+    added in the same audit.
+
     Called fresh each time rather than cached as a module constant so a future
     exception can be added without hunting for five call sites to update by hand -
     there is exactly one place this text is written."""
@@ -1569,10 +1640,14 @@ def _non_carryover_exceptions_clause():
         "competitor's own product or packaging anywhere in the scene, including a "
         "SECOND product beyond the one being substituted, added, or removed above (see "
         "rule 9 above, which governs both and wins over this carry-over instruction no "
-        "matter how broadly \"everything else\" might otherwise be read), and EXCEPT "
+        "matter how broadly \"everything else\" might otherwise be read), EXCEPT "
         "the scale of any prop, holder, float, or opening sized for the reference's own "
         "product - that adapts to fit the substituted Besque bottle's real, fixed "
-        "proportions instead, never the reverse (see the product instruction above)"
+        "proportions instead, never the reverse (see the product instruction above), "
+        "and EXCEPT any drawn element named in the ILLUSTRATED ELEMENTS TO SUBSTITUTE "
+        "instruction above, where one applies - those are substituted per that "
+        "instruction, never carried over unchanged just because they are otherwise "
+        "part of the scene"
     )
 
 
@@ -1770,7 +1845,10 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             "competitor's own product/packaging anywhere in frame, including a SECOND "
             "product the reference shows - see rule 9 above, which governs those and "
             "overrides this carry-over instruction entirely, regardless of how broadly "
-            "\"which non-person elements appear\" might otherwise be read. "
+            "\"which non-person elements appear\" might otherwise be read - NOR to any "
+            "drawn element named in the ILLUSTRATED ELEMENTS TO SUBSTITUTE instruction "
+            "above, where one applies, which is substituted per that instruction rather "
+            "than carried over unchanged. "
             + exception_clause +
             f"At the same time, every hue in the scene (background, props, "
             f"surfaces) re-maps to Besque's palette: {effective_palette} - "
@@ -1793,7 +1871,10 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             "competitor brand mark (logo, wordmark, tagline, or \"by X\" endorsement "
             "line) or the competitor's own product/packaging anywhere in frame, "
             "including a SECOND product the reference shows - see rule 9 above, which "
-            "governs those and overrides this reproduce instruction entirely. "
+            "governs those and overrides this reproduce instruction entirely - NOR to "
+            "any drawn element named in the ILLUSTRATED ELEMENTS TO SUBSTITUTE "
+            "instruction above, where one applies, which is substituted per that "
+            "instruction rather than reproduced unchanged. "
             + exception_clause
         )
     opening += _register_clause(style, scene_lighting)

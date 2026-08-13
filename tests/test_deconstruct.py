@@ -196,3 +196,185 @@ def test_deconstruct_image_missing_structural_zones_retries_once_then_raises(mon
             ad_id="AD1", source_page="PageX", captured_at="2026-01-01",
         )
     assert call_count["n"] == 2
+
+
+# ---- 2026-08-13: transient API-error retry - a network timeout/connection error or a
+# 429/5xx from Anthropic must retry with backoff, capped, and never be confused with
+# the parse/validation retry above. Two ads were lost live to
+# anthropic.APITimeoutError ("Request timed out or interrupted") propagating straight
+# out of deconstruct_image with no retry at all. ----
+
+import httpx
+import anthropic as _anthropic_module
+
+
+def _api_status_error(cls, status_code, message="error"):
+    req = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    resp = httpx.Response(status_code, request=req, json={"error": {"type": "x", "message": message}})
+    return cls(message, response=resp, body={})
+
+
+def _timeout_error():
+    req = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    return _anthropic_module.APITimeoutError(request=req)
+
+
+def test_is_transient_anthropic_error_true_for_timeout_and_connection():
+    assert deconstruct._is_transient_anthropic_error(_timeout_error()) is True
+    req = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    assert deconstruct._is_transient_anthropic_error(
+        _anthropic_module.APIConnectionError(request=req)) is True
+
+
+def test_is_transient_anthropic_error_true_for_429_and_5xx():
+    assert deconstruct._is_transient_anthropic_error(
+        _api_status_error(_anthropic_module.RateLimitError, 429)) is True
+    assert deconstruct._is_transient_anthropic_error(
+        _api_status_error(_anthropic_module.InternalServerError, 500)) is True
+    assert deconstruct._is_transient_anthropic_error(
+        _api_status_error(_anthropic_module.OverloadedError, 529)) is True
+
+
+def test_is_transient_anthropic_error_false_for_auth_and_bad_request():
+    assert deconstruct._is_transient_anthropic_error(
+        _api_status_error(_anthropic_module.AuthenticationError, 401)) is False
+    assert deconstruct._is_transient_anthropic_error(
+        _api_status_error(_anthropic_module.BadRequestError, 400)) is False
+    assert deconstruct._is_transient_anthropic_error(
+        _api_status_error(_anthropic_module.PermissionDeniedError, 403)) is False
+
+
+def test_is_transient_anthropic_error_false_for_plain_exception():
+    assert deconstruct._is_transient_anthropic_error(ValueError("not an API error")) is False
+
+
+def _fake_message(text):
+    return type("obj", (), {"content": [type("obj", (), {"text": text})()]})()
+
+
+def test_call_claude_with_transient_retry_succeeds_after_two_timeouts(monkeypatch):
+    monkeypatch.setattr(deconstruct.time, "sleep", lambda s: None)
+    calls = {"n": 0}
+
+    class FakeMessages:
+        def create(self, **kwargs):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise _timeout_error()
+            return _fake_message("ok")
+
+    result = deconstruct._call_claude_with_transient_retry(
+        type("obj", (), {"messages": FakeMessages()})(), {}, ad_id="AD1",
+    )
+    assert result.content[0].text == "ok"
+    assert calls["n"] == 3
+
+
+def test_call_claude_with_transient_retry_raises_after_exhausting_cap(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(deconstruct.time, "sleep", lambda s: sleeps.append(s))
+    calls = {"n": 0}
+
+    class FakeMessages:
+        def create(self, **kwargs):
+            calls["n"] += 1
+            raise _timeout_error()
+
+    with pytest.raises(_anthropic_module.APITimeoutError):
+        deconstruct._call_claude_with_transient_retry(
+            type("obj", (), {"messages": FakeMessages()})(), {}, ad_id="AD1",
+        )
+    assert calls["n"] == deconstruct._MAX_TRANSIENT_ATTEMPTS
+    # exponential backoff: 2s, 4s, 8s (one fewer sleep than attempts - no sleep after
+    # the final, exhausted attempt)
+    assert sleeps == [2.0, 4.0, 8.0]
+
+
+def test_call_claude_with_transient_retry_does_not_retry_non_transient(monkeypatch):
+    monkeypatch.setattr(deconstruct.time, "sleep", lambda s: (_ for _ in ()).throw(AssertionError("must not sleep")))
+    calls = {"n": 0}
+
+    class FakeMessages:
+        def create(self, **kwargs):
+            calls["n"] += 1
+            raise _api_status_error(_anthropic_module.AuthenticationError, 401)
+
+    with pytest.raises(_anthropic_module.AuthenticationError):
+        deconstruct._call_claude_with_transient_retry(
+            type("obj", (), {"messages": FakeMessages()})(), {}, ad_id="AD1",
+        )
+    assert calls["n"] == 1  # failed fast, no retry
+
+
+def test_call_claude_with_transient_retry_logs_attempt_and_error_class(monkeypatch, caplog):
+    monkeypatch.setattr(deconstruct.time, "sleep", lambda s: None)
+    calls = {"n": 0}
+
+    class FakeMessages:
+        def create(self, **kwargs):
+            calls["n"] += 1
+            if calls["n"] < 2:
+                raise _timeout_error()
+            return _fake_message("ok")
+
+    with caplog.at_level("WARNING", logger="deconstruct"):
+        deconstruct._call_claude_with_transient_retry(
+            type("obj", (), {"messages": FakeMessages()})(), {}, ad_id="AD1",
+        )
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("AD1" in m and "1/4" in m and "APITimeoutError" in m for m in messages)
+
+
+def test_deconstruct_image_retries_transient_timeout_then_succeeds(monkeypatch):
+    """End to end: a timeout on the FIRST vision call must not fail the ad or consume
+    a parse/validation attempt - it retries transiently and the ad completes normally."""
+    monkeypatch.setattr(deconstruct.time, "sleep", lambda s: None)
+    calls = {"n": 0}
+
+    class FakeMessages:
+        def create(self, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise _timeout_error()
+            return _fake_message(_fake_claude_json())
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            self.messages = FakeMessages()
+
+    monkeypatch.setattr(deconstruct.anthropic, "Anthropic", FakeClient)
+
+    bp = deconstruct.deconstruct_image(
+        image_bytes=b"\x89PNG\r\n\x1a\nfakepngbytes",
+        ad_id="AD1", source_page="PageX", captured_at="2026-01-01",
+    )
+    assert bp["ad_id"] == "AD123"
+    assert calls["n"] == 2  # one transient retry, zero parse/validation retries
+
+
+def test_deconstruct_image_transient_exhaustion_propagates_without_touching_validation_retry(monkeypatch):
+    """A transient failure that exhausts its own budget must raise directly - never
+    fall through to the parse/validation except blocks (which would pointlessly retry
+    with a JSON-escaping nudge that has nothing to do with a timeout)."""
+    monkeypatch.setattr(deconstruct.time, "sleep", lambda s: None)
+    calls = {"n": 0}
+
+    class FakeMessages:
+        def create(self, **kwargs):
+            calls["n"] += 1
+            raise _timeout_error()
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            self.messages = FakeMessages()
+
+    monkeypatch.setattr(deconstruct.anthropic, "Anthropic", FakeClient)
+
+    with pytest.raises(_anthropic_module.APITimeoutError):
+        deconstruct.deconstruct_image(
+            image_bytes=b"\x89PNG\r\n\x1a\nfakepngbytes",
+            ad_id="AD1", source_page="PageX", captured_at="2026-01-01",
+        )
+    # exactly _MAX_TRANSIENT_ATTEMPTS raw calls - the parse/validation loop's own
+    # attempt=2 (a DIFFERENT nudge) was never reached at all.
+    assert calls["n"] == deconstruct._MAX_TRANSIENT_ATTEMPTS
