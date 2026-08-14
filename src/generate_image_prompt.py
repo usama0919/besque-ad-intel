@@ -317,7 +317,30 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
             )
         else:
             product_desc = "(a natural botanical body oil in an elegant bottle). "
-        product_desc += _BOTTLE_MATERIAL_REALISM_CLAUSE
+        # Style-aware (2026-08-14) - see _BOTTLE_MATERIAL_REALISM_CLAUSE_ILLUSTRATED's
+        # own comment for why: the photoreal clause's meniscus/refraction/specular-
+        # highlight language directly contradicts an illustrated register's own
+        # "never photorealistic" instruction elsewhere in the same prompt.
+        product_desc += (
+            _BOTTLE_MATERIAL_REALISM_CLAUSE_ILLUSTRATED if resolved_style == "illustrated"
+            else _BOTTLE_MATERIAL_REALISM_CLAUSE
+        )
+        # Skip only the PLACEMENT sentence below (never product_desc above - the
+        # identity/ingredients/material-realism facts Gemini needs regardless of
+        # add-vs-substitute) when edit mode's own substitution already placed the
+        # product into an existing reference zone - see _edit_mode_instruction's
+        # reference_has_product SUBSTITUTE branches, which already state their own
+        # placement/composition instructions (including their own "account for more
+        # than one distinct product" handling). Fail-closed like the product edit
+        # control's element_provenance predicate (edit_capability._product_control): a
+        # positive signal the product is ALREADY accounted for suppresses only the
+        # placement instruction, never the description. Live evidence (ad
+        # 2390171264812593): an illustrated reference's correctly-substituted bottle
+        # (in a character's hand) was joined by a SECOND, standalone photorealistic
+        # bottle composited at the bottom of the frame from this placement sentence -
+        # product_clause was built purely from effective_include_product (intent), with
+        # no awareness that a product had already been placed by substitution.
+        already_placed_by_substitution = edit_mode and reference_has_product
         if resolved_product_count and resolved_product_count > 1:
             # REVERSED 2026-08-12 (live failure, ad with product_count=5): rule 7 above
             # already states "exactly one bottle... NEVER add a second bottle... whether
@@ -341,7 +364,7 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
                 "adapts around the single bottle instead of reproducing the count",
                 resolved_product_count, product_count_source,
             )
-            product_clause = (
+            placement = (
                 f"The reference shows {resolved_product_count} products together, but "
                 f"Besque's product renders as exactly ONE bottle - rule 7 above permits "
                 f"exactly one, with no exception for what the reference happens to show. "
@@ -351,14 +374,14 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
                 f"slots where the reference's other products were, and never shrink the "
                 f"single bottle to read like part of a missing set. Do not render the "
                 f"competitor's product. "
-                + product_desc
             )
+            product_clause = ("" if already_placed_by_substitution else placement) + product_desc
         else:
-            product_clause = (
+            placement = (
                 f"Place the Besque product described below as the subject "
                 f"within this setting; do not render the competitor's product. "
-                + product_desc
             )
+            product_clause = ("" if already_placed_by_substitution else placement) + product_desc
     else:
         product_clause = (
             "This is a deliberately productless, educational/illustrative image - do not "
@@ -390,7 +413,11 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
         prompt = (
             brand_rules(include_product=effective_include_product, text_in_image=text_in_image,
                         headline=headline, subtext=subtext, edit_mode=True) +
-            (_bottle_identity_clause(product) + _bottle_integration_clause()
+            # _bottle_geometry_source_clause is edit-mode-only (2026-08-15) - this is the
+            # ONE branch where a competitor reference image AND Besque's own product
+            # reference photos are both attached at once, so it's the only place a
+            # source-attribution statement between them is meaningful.
+            (_bottle_identity_clause(product) + _bottle_integration_clause() + _bottle_geometry_source_clause()
              if effective_include_product else "") +
             _operator_instruction_clause(operator_instruction) +
             _critic_feedback_clause(critic_feedback) +
@@ -402,8 +429,7 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
             # reversal (reference_has_product no longer forces effective_include_product
             # off; see resolve_effective_include_product). reference_has_product/
             # reference_has_text_zone independently select SUBSTITUTE-vs-ADD wording per
-            # element, never the boolean outcome itself - product_clause below is built
-            # from the same effective_include_product, so this can never contradict it.
+            # element, never the boolean outcome itself.
             _edit_mode_instruction(text_in_image=text_in_image, headline=headline, subtext=subtext,
                                    offer_text=offer_text, include_product=include_product,
                                    reference_has_product=reference_has_product,
@@ -422,6 +448,12 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
                                    face_present=blueprint.get("face_present"),
                                    testimonial_zones=blueprint.get("testimonial_zones"),
                                    clone_mode=clone_mode) +
+            # product_clause already omits its own PLACEMENT sentence when
+            # already_placed_by_substitution (edit_mode and reference_has_product) is
+            # true - see where product_clause is built above - so it is always safe to
+            # append here unconditionally; it still carries product_desc (identity/
+            # ingredients/material-realism facts) even when the placement sentence is
+            # suppressed.
             product_clause +
             closing
         )
@@ -1025,6 +1057,44 @@ _BOTTLE_MATERIAL_REALISM_CLAUSE = (
     "change to what the label actually contains - the full label (wordmark, name, "
     "certifications, fine print) still applies whenever the bottle is rendered large "
     "enough to show it legibly. "
+)
+
+# Illustrated-register equivalent (2026-08-14): _BOTTLE_MATERIAL_REALISM_CLAUSE above
+# demands photorealistic physical properties - a meniscus, glass refraction, specular
+# highlights - unconditionally, in every style, which directly contradicts
+# _edit_mode_instruction's own illustrated branch ("draw the Besque product NATIVELY...
+# never a photograph or photorealistic render composited into the drawing"). Same
+# prompt, opposite instructions about the same bottle - same contradiction class as the
+# 12 Aug findings and the product/background/lighting preservation-list fix earlier the
+# same day. Identity facts (label content, colours, proportions - stated once, in
+# _bottle_identity_clause, explicitly style-invariant) are UNCHANGED by this split; only
+# HOW those facts render changes here - flat fill instead of a meniscus, flat colour
+# instead of refraction, flat shading instead of specular highlights, matching the
+# surrounding artwork's own line weight rather than photographic material behaviour.
+# The small-scale label simplification and "never a content change" statements are kept
+# verbatim from the photoreal clause - simplification-at-small-size and content-fixed
+# are style-independent facts, not photorealism-specific ones.
+_BOTTLE_MATERIAL_REALISM_CLAUSE_ILLUSTRATED = (
+    "The oil inside the bottle renders FLAT, in this scene's own illustrated visual "
+    "language: a single flat fill colour (or the scene's own flat/cel-shading "
+    "convention) suggesting the oil's level and hue - never a photorealistic meniscus, "
+    "never translucency or light passing through the liquid, never a rendered surface "
+    "highlight on the liquid itself; those are photographic-register effects and do not "
+    "belong in a hand-drawn scene. The glass and any pump/cap hardware render as FLAT "
+    "SHAPES matching the surrounding artwork's own line weight and shading - never "
+    "glass refraction, never specular highlights, never reflective material rendering; "
+    "a flat, drawn bottle is CORRECT here, not a failure to fix. The label wraps the "
+    "bottle's own drawn silhouette legibly, in the scene's own line/colour treatment - "
+    "never a flat decal floating disconnected from the bottle's shape, and never "
+    "rendered with photographic material properties. When the bottle occupies only a "
+    "small fraction of the frame, simplify what the label shows to what will actually "
+    "render legibly at that size - the BESQUE wordmark and the product name at "
+    "minimum, dropping certification icons, border/rule detail, and fine print below "
+    "the size where they would legibly render. This is a size-driven simplification of "
+    "what is SHOWN on a small render, never an invented label or a different one, and "
+    "never a change to what the label actually contains - the full label (wordmark, "
+    "name, certifications, fine print) still applies whenever the bottle is rendered "
+    "large enough to show it legibly. "
 )
 
 
@@ -1649,6 +1719,42 @@ def _bottle_identity_clause(product):
     )
 
 
+def _bottle_geometry_source_clause():
+    """Edit mode only (2026-08-15): the ONE place two different images are both in play
+    at once - the competitor's reference ad (attached as the first image, framed as "THE
+    AD TO REPRODUCE") and Besque's OWN product reference photo(s) (attached separately,
+    if any, framed by _reference_framing) - and nothing before this clause said, in so
+    many words, which image supplies which fact about the bottle. Live evidence: across
+    a 5-ad OSEA batch, the rendered bottle changed silhouette, height, width, and
+    proportions between ads - tracking each reference ad's OWN product geometry instead
+    of Besque's, exactly the failure mode this clause exists to name and forbid.
+
+    _bottle_identity_clause (above) already states the bottle's fixed facts; this
+    clause instead states WHERE those facts are allowed to come from, explicitly
+    excluding the competitor reference as a source for any of them - a source-
+    attribution gap _bottle_identity_clause's own wording never closed, since it never
+    named the competitor image at all."""
+    return (
+        "BOTTLE GEOMETRY SOURCE (STRICT, NON-NEGOTIABLE, EVERY PRODUCTION STYLE): two "
+        "different images are attached for two entirely different jobs, and they must "
+        "never be conflated. The COMPETITOR'S reference ad (the first attached image) "
+        "supplies RENDERING STYLE ONLY - register, lighting treatment, finish, and "
+        "whether the scene reads photographic or flat/illustrated. It supplies NOTHING "
+        "about the Besque bottle's own shape: not its silhouette or body shape, not its "
+        "height-to-width ratio or proportions, not its neck, shoulder, or base "
+        "geometry, not its pump or collar hardware design, not its label's shape, "
+        "placement, border, or content, and not the label's scale relative to the "
+        "bottle. Besque's OWN product reference photo(s) (attached separately, where "
+        "supplied) are the ONLY source for every one of those geometry facts, and every "
+        "one of them is FIXED - identical on every generation, regardless of what "
+        "shape, proportions, or hardware the competitor's OWN product in the reference "
+        "ad happens to show. A bottle whose silhouette, height, width, or proportions "
+        "changes between generations because it is tracking the reference ad's own "
+        "product shape, rather than Besque's, is always wrong - in every register this "
+        "prompt might otherwise describe. "
+    )
+
+
 def _bottle_integration_clause():
     """Item 2 (2026-08-13 build): nothing in this prompt stated, before now, that the
     bottle must read as a participating object in the scene rather than a flat packshot
@@ -1663,7 +1769,15 @@ def _bottle_integration_clause():
     the SAME bottle floats or participates. Resolved by the explicit override sentence
     below, the same "this rule wins regardless of what the reference shows" pattern
     rule 10 already uses for age - "faithfully" governs POSITION/scale/framing within
-    the composition, never whether the product is grounded vs. floating."""
+    the composition, never whether the product is grounded vs. floating.
+
+    Pump orientation (2026-08-15): every configured Besque product reference photo
+    happens to show the pump facing the same way, and nothing before this clause said
+    that facing is not itself a fixed fact - every generated bottle showed the pump
+    facing that one direction regardless of the scene. Pump/collar DESIGN and geometry
+    are governed by _bottle_geometry_source_clause/_bottle_identity_clause and stay
+    fixed; FACING is a composition detail, addressed here alongside grip/scale/contact-
+    shadow, the same category of fact as everything else in this clause."""
     return (
         "BOTTLE INTEGRATION (STRICT, EVERY GENERATION PATH, OVERRIDES ANY COMPOSITION-"
         "MATCHING INSTRUCTION ELSEWHERE THAT WOULD REPRODUCE A FLOATING PRODUCT SHOT): "
@@ -1686,7 +1800,12 @@ def _bottle_integration_clause():
         "bottle in frame. The bottle must NEVER overlap a text block or caption - if "
         "the composition would otherwise place one over the other, move or resize the "
         "bottle within the scene's own logic (per its stated scale) rather than let it "
-        "cross behind or in front of rendered text. "
+        "cross behind or in front of rendered text. PUMP/CAP ORIENTATION follows THIS "
+        "SCENE's own composition and whichever hand or surface the bottle sits on or is "
+        "held by - never fixed to match the facing shown in Besque's own reference "
+        "photo(s), which fix the pump's design and geometry only, never which way it "
+        "points. Rotate the pump/cap to whatever facing this scene's grip or resting "
+        "position actually requires. "
     )
 
 
@@ -2130,9 +2249,16 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             "Changing ONLY the product. Remove the competitor's product entirely and draw "
             f"the Besque product NATIVELY in this scene's own illustrated visual language - "
             f"flat, matching the surrounding artwork's own line weight and shading, never a "
-            f"photograph or photorealistic render composited into the drawing. No product "
-            f"reference photo is attached this run, on purpose: work from silhouette, "
-            f"colour, and the label name alone - \"{name}\". Secondary label content "
+            f"photograph or photorealistic render composited into the drawing, REGARDLESS "
+            f"of how photographic the attached product reference photo(s) (if any) look - a "
+            f"photographic reference photo does not make the DRAWN bottle photographic. "
+            f"Use those photos ONLY to confirm this product's exact identity - label design, "
+            f"colours, proportions, and hardware - never as a rendering-style reference; "
+            f"the leak this instruction replaced (2026-08-06, then reversed 2026-08-14) was "
+            f"the photo's photographic REGISTER bleeding into the drawing, not its identity "
+            f"facts, so withholding the photo is no longer how this is prevented. Where no "
+            f"reference photo is attached for this run, work from silhouette, colour, and "
+            f"the label name alone - \"{name}\". Secondary label content "
             f"(sub-lines, certification icons, fine print) does not need to be legible at "
             f"this scale in this style; name and colour accuracy matter, secondary-text "
             f"legibility does not. If the reference shows more than one distinct "
@@ -2770,19 +2896,26 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
     line - there is no attached reference there to derive one from. image_size is a
     separate knob and is always set, both modes.
 
-    Illustrated register (2026-08-06, Grüns GLP-1 leak): reference_images (the product's
-    OWN photos) are dropped entirely - never attached to Gemini at all - whenever the
-    effective style resolves to "illustrated", the SAME resolution build_image_prompt's
-    edit_mode branch uses (realism override, else the blueprint's own detected
-    production_style). Passing a photographic reference while simultaneously demanding
-    faithful substitution is what produced a photorealistic bottle composited into an
-    otherwise hand-drawn scene - dropping the photo and describing the bottle in the
-    scene's own visual language instead (see _edit_mode_instruction's style=="illustrated"
-    branch) fixes it structurally rather than with more prompt wording. Applies in every
-    mode, not just edit_mode - reference_images are attached the same way regardless."""
-    effective_style = (realism or "").strip() or (blueprint.get("production_style") or {}).get("style", "")
-    if effective_style == "illustrated":
-        reference_images = []
+    Illustrated register (2026-08-06 fix, REVISED 2026-08-14): the original fix for the
+    Grüns GLP-1 leak (a photographic reference photo, attached while simultaneously
+    demanding faithful substitution, produced a photorealistic bottle composited into an
+    otherwise hand-drawn scene) dropped reference_images entirely whenever the effective
+    style resolved to "illustrated" - no photo attached at all, identity described from
+    visual_description text alone. That overcorrected: withholding identity is not what
+    the leak needed fixed. pipeline.fetch_reference_images/pipeline.py's own comment
+    already states plainly that building bottle identity from visual_description text
+    alone "reliably gets pump direction and proportions wrong" - live evidence across
+    four generations of the same product (no pump/screw neck, taller pumpless, squat
+    with pump, one correct) traces to exactly this: illustrated-register runs were the
+    ones with NO real photo to anchor identity to. The leak was the reference photo's
+    PHOTOGRAPHIC REGISTER bleeding into the drawing, never the photo's IDENTITY facts
+    (colour, label, proportions) - so reference_images are now attached in every style,
+    including illustrated, and the register instruction instead (see
+    _edit_mode_instruction's style=="illustrated" branch) tells Gemini to use the
+    attached photo(s) ONLY to confirm identity, never as a rendering-style reference:
+    the photo being photographic does not make the DRAWN bottle photographic. Applies in
+    every mode, not just edit_mode - reference_images are attached the same way
+    regardless, same as before this revision."""
     operator_instruction = generate_image_prompt_writer.clip_operator_instruction(operator_instruction)
     creative_description = None
     if messaging_angle and not edit_mode:
@@ -3243,6 +3376,35 @@ def _brand_wordmark_protection_clause(blueprint):
     )
 
 
+# The preservation-list terms, in the original fixed order. "all other text" is kept as
+# ONE list item (never split into "text" + filtered separately) - the word "other"
+# already excludes whichever text-shaped target changed, so no text target ever needs
+# to remove anything from this list; see the 2026-08-14 diagnosis below for why every
+# OTHER term needed this treatment.
+_PRESERVATION_TERMS = (
+    "layout", "product", "bottle", "all other text", "colours", "background",
+    "lighting", "composition",
+)
+
+# Terms to drop from the preservation list for a given edit target - found live
+# 2026-08-14 (artifact 1259): a product edit's own change instruction ("Change Product
+# ... to: One bottle only... No separate photographic bottle anywhere in the image")
+# was followed, in the SAME instruction, by "product, bottle ... must be reproduced
+# EXACTLY as it appears ... completely unchanged" - the target named twice with opposite
+# instructions, same contradiction class as the five found 12 Aug. The photoreal bottle
+# survived the edit. "product" drops BOTH "product" and "bottle" - the bottle IS the
+# product being edited, not a separate concept the list can leave standing. Only targets
+# whose own name (or a synonym) is a literal term in _PRESERVATION_TERMS need an entry
+# here - person_face/person_body/prop/badge/banner/typography/offer/headline/subtext/cta
+# never match any of these words, so they are correctly absent and get the list
+# unfiltered.
+_TARGET_EXCLUDED_PRESERVATION_TERMS = {
+    "product": frozenset({"product", "bottle"}),
+    "background": frozenset({"background"}),
+    "lighting": frozenset({"lighting"}),
+}
+
+
 def build_targeted_edit_instruction(descriptor, operation, new_value, blueprint=None):
     """Dynamic Edit System, Step 3: the ONLY prompt text sent to Gemini for a targeted
     edit. Deliberately NOT the assembled generation prompt, COMPLIANCE_RULES, brand_rules,
@@ -3257,18 +3419,75 @@ def build_targeted_edit_instruction(descriptor, operation, new_value, blueprint=
     operation is "change" or "remove" - both name exactly one thing to alter and demand
     everything else survive unchanged. blueprint (optional) feeds the ALWAYS-ON brand
     wordmark protection clause - omitted only by callers that predate it; every real
-    caller in dashboard.py passes it."""
+    caller in dashboard.py passes it.
+
+    The preservation list (_PRESERVATION_TERMS) is filtered against descriptor['target']
+    via _TARGET_EXCLUDED_PRESERVATION_TERMS (2026-08-14) - never a fixed string - so the
+    edit target's own term is never told to change and stay unchanged in the same
+    instruction. The wordmark protection clause stays unconditional regardless of
+    target - it is never part of this filtering."""
     label = descriptor.get("label") or descriptor.get("attribute") or descriptor.get("target")
     if operation == "remove":
         change = f"REMOVE {label} entirely - it must not appear anywhere in the image afterward."
     else:
         change = f"Change {label} (currently: {descriptor.get('current_value')!r}) to: {new_value}"
+    excluded_terms = _TARGET_EXCLUDED_PRESERVATION_TERMS.get(descriptor.get("target") or "", frozenset())
+    preservation_list = ", ".join(t for t in _PRESERVATION_TERMS if t not in excluded_terms)
     return (
         "The attached image is FINAL and CORRECT exactly as it appears - this is a "
         "targeted edit to it, not a new composition and not a reinterpretation. Make "
-        f"EXACTLY ONE change: {change}. Every other pixel in the image - layout, product, "
-        "bottle, all other text, colours, background, lighting, composition - must be "
-        "reproduced EXACTLY as it appears in the attached image, completely unchanged."
+        f"EXACTLY ONE change: {change}. Every other pixel in the image - {preservation_list} "
+        "- must be reproduced EXACTLY as it appears in the attached image, completely unchanged."
+        + _brand_wordmark_protection_clause(blueprint)
+    )
+
+
+def build_product_realism_edit_instruction(target_style, blueprint=None):
+    """Dynamic Edit System, product-realism control (2026-08-15): re-render the Besque
+    bottle's RENDERING TREATMENT ONLY - flat/illustrated or photographic - to match the
+    scene's own register. Deliberately NOT built via build_targeted_edit_instruction:
+    that function's _TARGET_EXCLUDED_PRESERVATION_TERMS drops "product"/"bottle" from
+    the preservation list for target="product", which is correct for the PLACEMENT
+    control (edit_capability._product_control) but exactly backwards here - this
+    control's whole point is preserving geometry while changing only how it renders, so
+    "product"/"bottle" must stay IN the preserved list, not be excluded from it.
+
+    target_style is matched case-insensitively against "illustrated"; anything else
+    (including a blank/unrecognised value) resolves to the photographic instruction -
+    the same two-way split _bottle_register_clause/_edit_mode_instruction already use
+    elsewhere in this file, never a third, invented register.
+
+    Callers should pass this artifact's own product reference photo(s) to
+    apply_targeted_edit's reference_images param alongside this instruction - unlike
+    every other targeted edit, a realism re-render needs real geometry to redraw the
+    bottle from, not just the current draft pixels."""
+    illustrated = (target_style or "").strip().lower() == "illustrated"
+    register_instruction = (
+        "flat, in this scene's own illustrated visual language - matching the "
+        "surrounding artwork's own line weight and shading, never a photograph or "
+        "photorealistic render composited into the drawing"
+        if illustrated else
+        "fully photographic - a real liquid with a visible meniscus, real glass "
+        "refraction and reflection, real specular highlights on the pump/cap hardware, "
+        "matching this scene's own lighting, never a flat illustrated or vector "
+        "rendering"
+    )
+    preservation_list = ", ".join(_PRESERVATION_TERMS)
+    return (
+        "The attached image is FINAL and CORRECT exactly as it appears - this is a "
+        "targeted edit to it, not a new composition and not a reinterpretation. Make "
+        "EXACTLY ONE change: re-render the Besque bottle's RENDERING TREATMENT ONLY, "
+        f"to be {register_instruction}. Any additional attached image(s) beyond the "
+        "first are Besque's OWN product reference photo(s) - real photographs of this "
+        "exact bottle's geometry - use them ONLY to confirm or correct shape, never to "
+        "change it and never as a rendering-style reference. The bottle's silhouette, "
+        "its height-to-width ratio and proportions, its neck/shoulder/base geometry, "
+        "its pump and collar hardware design, its label's shape, placement, border, "
+        "and content, and the label's scale relative to the bottle all stay EXACTLY as "
+        "they already appear in the draft - changed NOT AT ALL by this edit. Only HOW "
+        "the bottle is rendered changes; never what it is, never its size, never its "
+        f"position in the frame. Every other pixel in the image - {preservation_list} "
+        "- must be reproduced EXACTLY as it appears in the attached image, completely unchanged."
         + _brand_wordmark_protection_clause(blueprint)
     )
 
@@ -3288,16 +3507,25 @@ def build_drift_retry_instruction(base_instruction, descriptor):
     )
 
 
-def apply_targeted_edit(source_image_bytes, instruction):
+def apply_targeted_edit(source_image_bytes, instruction, reference_images=None):
     """Dynamic Edit System, Step 3 Gemini call: contents=[source_image_bytes,
-    instruction] - nothing else. aspect_ratio is derived explicitly from
+    instruction] by default - nothing else. aspect_ratio is derived explicitly from
     source_image_bytes and always passed on ImageConfig (never omitted - see
     derive_aspect_ratio's own docstring on why omitting it is nondeterministic, not
     merely imprecise). Returns the new draft's raw PNG bytes, or None on failure -
     saving/versioning/DB bookkeeping is the caller's job (dashboard.py), the same
     separation edit_image already uses. Returns values explicitly rather than stashing
     onto a function attribute (see CLAUDE.md's .last_prompt note on why that pattern is
-    deliberately not repeated in new code)."""
+    deliberately not repeated in new code).
+
+    reference_images (2026-08-15, product-realism edit control): optional list of the
+    Besque product's OWN reference photo bytes, attached AFTER the draft and framed via
+    the SAME _reference_framing text generate_image already uses - only the product-
+    realism control passes these; every other target's edit omits this entirely and
+    behaves byte-for-byte as before. A realism re-render genuinely needs real geometry
+    to redraw the bottle from; a placement/text/background edit does not, and attaching
+    photos unconditionally for every edit would cost an unnecessary payload/latency hit
+    on edits that never touch the product at all."""
     from google.genai import types as genai_types
     aspect_ratio = derive_aspect_ratio(source_image_bytes)
     image_config = (
@@ -3308,12 +3536,19 @@ def apply_targeted_edit(source_image_bytes, instruction):
     try:
         client = genai.Client(vertexai=True, project="besque-martech", location="global")
         print(f"[apply_targeted_edit] instruction:\n{instruction}")
+        contents = [genai_types.Part.from_bytes(data=source_image_bytes, mime_type="image/png")]
+        text = instruction
+        if reference_images:
+            contents += [genai_types.Part.from_bytes(data=img, mime_type="image/png")
+                         for img in reference_images]
+            text = (
+                "FIRST IMAGE ABOVE: the current draft to edit. " +
+                _reference_framing(len(reference_images)) + instruction
+            )
+        contents.append(text)
         response = client.models.generate_content(
             model="gemini-3.1-flash-image",
-            contents=[
-                genai_types.Part.from_bytes(data=source_image_bytes, mime_type="image/png"),
-                instruction,
-            ],
+            contents=contents,
             config=genai_types.GenerateContentConfig(image_config=image_config),
         )
         for part in response.candidates[0].content.parts:

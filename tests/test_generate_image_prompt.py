@@ -1287,6 +1287,72 @@ def test_bottle_integration_clause_reaches_all_three_branches():
         assert "BOTTLE INTEGRATION (STRICT" in prompt
 
 
+# ---- 2026-08-15: pump/cap orientation is a composition detail, not a fixed geometry
+# fact - live evidence: every configured reference photo shows the pump facing the
+# same way, and every generated bottle inherited that facing regardless of the scene ----
+
+def test_bottle_integration_clause_pump_orientation_follows_scene_not_reference():
+    clause = generate_image_prompt._bottle_integration_clause()
+    assert "PUMP/CAP ORIENTATION follows THIS SCENE's own composition" in clause
+    assert "never fixed to match the facing shown in Besque's own reference photo(s)" in clause
+    assert "fix the pump's design and geometry only, never which way it points" in clause
+
+
+# ---- 2026-08-15: BOTTLE GEOMETRY SOURCE - edit mode is the one branch where the
+# competitor reference image AND Besque's own product reference photos are both in
+# play; live evidence across a 5-ad OSEA batch showed the rendered bottle tracking each
+# reference ad's own product geometry (silhouette/height/width/proportions) instead of
+# Besque's ----
+
+def test_bottle_geometry_source_clause_names_competitor_as_style_only():
+    clause = generate_image_prompt._bottle_geometry_source_clause()
+    assert "supplies RENDERING STYLE ONLY" in clause
+    assert "not its silhouette or body shape" in clause
+    assert "not its height-to-width ratio or proportions" in clause
+    assert "not its neck, shoulder, or base geometry" in clause
+    assert "not its pump or collar hardware design" in clause
+    assert "not its label's shape, placement, border, or content" in clause
+    assert "not the label's scale relative to the bottle" in clause
+
+
+def test_bottle_geometry_source_clause_names_product_photos_as_the_only_geometry_source():
+    clause = generate_image_prompt._bottle_geometry_source_clause()
+    assert "Besque's OWN product reference photo(s)" in clause
+    assert "are the ONLY source for every one of those geometry facts" in clause
+    assert "regardless of what shape, proportions, or hardware the competitor's OWN " \
+           "product in the reference ad happens to show" in clause
+
+
+def test_bottle_geometry_source_clause_reaches_edit_mode_prompt_when_product_shown():
+    bp = _blueprint()
+    prompt = generate_image_prompt.build_image_prompt(
+        bp, product=_REAL_SHAPED_PRODUCT, edit_mode=True,
+    )
+    assert "BOTTLE GEOMETRY SOURCE (STRICT" in prompt
+
+
+def test_bottle_geometry_source_clause_absent_when_productless():
+    bp = _blueprint()
+    prompt = generate_image_prompt.build_image_prompt(
+        bp, product=_REAL_SHAPED_PRODUCT, edit_mode=True, include_product=False,
+    )
+    assert "BOTTLE GEOMETRY SOURCE (STRICT" not in prompt
+
+
+def test_bottle_geometry_source_clause_absent_outside_edit_mode():
+    """Only edit mode ever attaches a competitor reference image alongside the product's
+    own reference photos - the writer and flat-template branches have no competitor
+    image in play at all, so the source-attribution statement has nothing to attribute
+    between and is correctly omitted there."""
+    bp_writer, bp_flat = _blueprint(), _blueprint()
+    writer_prompt = generate_image_prompt.build_image_prompt(
+        bp_writer, product=_REAL_SHAPED_PRODUCT, creative_description="A scene.",
+    )
+    flat_prompt = generate_image_prompt.build_image_prompt(bp_flat, product=_REAL_SHAPED_PRODUCT)
+    assert "BOTTLE GEOMETRY SOURCE (STRICT" not in writer_prompt
+    assert "BOTTLE GEOMETRY SOURCE (STRICT" not in flat_prompt
+
+
 def test_bottle_register_and_material_realism_clauses_unchanged_by_item_2():
     """Explicit instruction: keep _bottle_register_clause and the material realism
     clause as they are - lighting/finish should still adapt, untouched by identity."""

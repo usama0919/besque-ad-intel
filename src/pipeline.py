@@ -1374,7 +1374,23 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
             log.info("Ad %s: stop requested, skipping before the paid image generation call", ad_id)
             return "skipped"
 
-        log.info("Ad %s: image generation starting (edit_mode=%s)", ad_id, edit_mode)
+        # Reference-photo count made explicit here (2026-08-14): fetch_reference_images
+        # returns whatever succeeded on a PARTIAL GCS failure (0 to MAX_PRODUCT_IMAGES),
+        # logging only a warning at fetch time - two runs of the SAME ad could silently
+        # receive a different number of real reference photos, with nothing at
+        # generation time itself showing which one this run got. "attached" (post
+        # effective_include_product gate) is what actually reaches Gemini; "fetched" is
+        # what fetch_reference_images returned (may be less than configured, on a
+        # partial failure); "configured" is effective_image_keys(product)'s own count -
+        # the ceiling this run could have had.
+        _fetched_reference_count = len(reference_images or [])
+        _attached_reference_count = _fetched_reference_count if effective_include_product else 0
+        log.info(
+            "Ad %s: image generation starting (edit_mode=%s, reference_images: "
+            "%s attached, %s fetched, %s configured)",
+            ad_id, edit_mode, _attached_reference_count, _fetched_reference_count,
+            len(effective_image_keys(product)),
+        )
 
         # testimonial (2026-08-06, fabricated-testimonials fix): computed ONCE, outside
         # the retry loop below - select_testimonial_review is deterministic by ad_id, so

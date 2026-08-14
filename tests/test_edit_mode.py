@@ -390,12 +390,19 @@ def test_generate_image_edit_mode_orders_competitor_before_product_reference_ima
     assert "REFERENCE PRODUCT PHOTOS ABOVE" in framing_and_prompt
 
 
-def test_generate_image_illustrated_style_drops_product_reference_images(monkeypatch, tmp_path):
-    """2026-08-06, Grüns GLP-1 leak: passing a photographic product reference AND demanding
-    faithful substitution is what produced a photorealistic bottle composited into an
-    otherwise hand-drawn illustrated scene. realism="illustrated" must drop the product
-    photos entirely - the competitor image (the actual scene to reproduce) still attaches,
-    only the product's OWN reference photos are withheld."""
+def test_generate_image_illustrated_style_keeps_product_reference_images(monkeypatch, tmp_path):
+    """REVERSED 2026-08-14 (live evidence: four generations of the same product produced
+    four different bottles - no pump, taller pumpless, squat with pump, one correct - the
+    illustrated-register runs being exactly the ones with no real photo to anchor identity
+    to, matching pipeline.fetch_reference_images' own comment that visual_description text
+    alone "reliably gets pump direction and proportions wrong").
+
+    The 2026-08-06 Grüns GLP-1 leak was the reference photo's PHOTOGRAPHIC REGISTER
+    bleeding into the drawing, never its IDENTITY facts (colour, label, proportions) -
+    dropping the photo entirely overcorrected by withholding identity along with register.
+    realism="illustrated" must now KEEP the product photos attached, same as every other
+    style - _edit_mode_instruction's own illustrated branch is what now keeps the DRAWING
+    native/never-photorealistic, regardless of what's attached."""
     monkeypatch.setattr(generate_image_prompt, "genai", type("obj", (), {"Client": _CapturingGenaiClient}))
     monkeypatch.setattr(generate_image_prompt, "ASSET_DIR", tmp_path)
     competitor_bytes = _png_bytes()
@@ -408,13 +415,14 @@ def test_generate_image_illustrated_style_drops_product_reference_images(monkeyp
     )
     contents = _CapturingGenaiClient.last_contents
     assert contents[0].inline_data.data == competitor_bytes
-    assert len(contents) == 2  # competitor image + framing/prompt text - no product photos
-    assert "REFERENCE PRODUCT PHOTOS ABOVE" not in contents[-1]
+    assert [p.inline_data.data for p in contents[1:3]] == [b"product-photo-1", b"product-photo-2"]
+    assert "REFERENCE PRODUCT PHOTOS ABOVE" in contents[-1]
 
 
 def test_generate_image_photographic_style_keeps_product_reference_images(monkeypatch, tmp_path):
-    """Every non-illustrated register is unaffected - product reference photos are still
-    attached exactly as before."""
+    """Every style is unaffected by realism/production_style - product reference photos
+    are always attached exactly the same way (see the illustrated test above for why
+    illustrated is no longer a special case)."""
     monkeypatch.setattr(generate_image_prompt, "genai", type("obj", (), {"Client": _CapturingGenaiClient}))
     monkeypatch.setattr(generate_image_prompt, "ASSET_DIR", tmp_path)
     competitor_bytes = _png_bytes()
@@ -427,6 +435,34 @@ def test_generate_image_photographic_style_keeps_product_reference_images(monkey
     )
     contents = _CapturingGenaiClient.last_contents
     assert [p.inline_data.data for p in contents[1:3]] == [b"product-photo-1", b"product-photo-2"]
+
+
+# ---- apply_targeted_edit: reference_images (2026-08-15, product-realism edit control)
+# - optional, attached only when a caller passes them; every other targeted edit
+# (placement/text/background/etc.) omits this and is byte-for-byte unaffected ----
+
+def test_apply_targeted_edit_attaches_no_reference_images_by_default(monkeypatch):
+    monkeypatch.setattr(generate_image_prompt, "genai", type("obj", (), {"Client": _CapturingGenaiClient}))
+    generate_image_prompt.apply_targeted_edit(_png_bytes(), "Change the headline to X.")
+    contents = _CapturingGenaiClient.last_contents
+    assert len(contents) == 2  # draft image + instruction text, nothing else
+    assert contents[0].inline_data.data == _png_bytes()
+
+
+def test_apply_targeted_edit_attaches_reference_images_when_given(monkeypatch):
+    monkeypatch.setattr(generate_image_prompt, "genai", type("obj", (), {"Client": _CapturingGenaiClient}))
+    draft_bytes = _png_bytes()
+    generate_image_prompt.apply_targeted_edit(
+        draft_bytes, "Re-render rendering treatment only.",
+        reference_images=[b"product-photo-1", b"product-photo-2"],
+    )
+    contents = _CapturingGenaiClient.last_contents
+    assert contents[0].inline_data.data == draft_bytes
+    assert [p.inline_data.data for p in contents[1:3]] == [b"product-photo-1", b"product-photo-2"]
+    framing_and_instruction = contents[-1]
+    assert "FIRST IMAGE ABOVE: the current draft to edit" in framing_and_instruction
+    assert "REFERENCE PRODUCT PHOTOS ABOVE" in framing_and_instruction
+    assert "Re-render rendering treatment only." in framing_and_instruction
 
 
 # ---- Item 6a (2026-08-04): derive_aspect_ratio - snap the reference image's own
@@ -706,14 +742,52 @@ def test_build_image_prompt_edit_mode_not_product_category_adds_product():
 
 def test_build_image_prompt_edit_mode_product_present_still_substitutes():
     """Regression guard: the new reference_has_product logic must not accidentally
-    suppress the normal substitution case when the reference DOES have a product."""
+    suppress the normal substitution case when the reference DOES have a product.
+
+    Only product_clause's PLACEMENT sentence is deliberately ABSENT here (2026-08-14
+    fix, live incident ad 2390171264812593) - _edit_mode_instruction's own
+    substitution branch already placed the product, so also telling Gemini to place
+    one asked for a SECOND, independent product. The DESCRIPTIVE facts (ingredients,
+    hero claim, bottle material realism) are NOT part of that placement sentence and
+    must still reach the prompt regardless - Gemini still needs to know what the
+    substituted product looks like. See
+    test_build_image_prompt_edit_mode_does_not_duplicate_product_when_substituted for
+    the dedicated regression test."""
     bp = _blueprint()
     bp["layout_detail"] = {"product_count": 1}
     product = {"name": "Magic Body Oil", "description": "seven cold-pressed oils",
                "ingredients": "almond; rosehip", "hero_claim": "Visibly firms"}
     prompt = generate_image_prompt.build_image_prompt(bp, product=product, edit_mode=True, include_product=True)
     assert "Remove the competitor's product entirely and place the Besque product" in prompt
-    assert "Place the Besque product described below as the subject" in prompt
+    assert "Place the Besque product described below as the subject" not in prompt
+    assert "almond; rosehip" in prompt
+    assert generate_image_prompt._BOTTLE_MATERIAL_REALISM_CLAUSE in prompt
+
+
+def test_build_image_prompt_edit_mode_does_not_duplicate_product_when_substituted():
+    """Direct regression test for the live incident (ad 2390171264812593, 2026-08-14):
+    an illustrated reference already showing a product-shaped element was correctly
+    substituted with a Besque bottle in a character's hand, but a SEPARATE
+    photorealistic bottle was also composited into the frame - two products, one of
+    them in the wrong render medium. Root cause: product_clause's PLACEMENT sentence
+    (built purely from effective_include_product - intent, not evidence of scene
+    state) was unconditionally appended after _edit_mode_instruction regardless of
+    whether substitution already placed a product. Multi-product-count wording is
+    included in product_clause too (bp sets product_count=2 here) to prove its
+    placement sentence - not just the single-count one - is suppressed, while the
+    descriptive facts (ingredients) still survive either way."""
+    bp = _blueprint()
+    bp["layout_detail"] = {"product_count": 2}
+    bp["production_style"] = {"style": "illustrated", "confidence": "high", "signals": []}
+    product = {"name": "Magic Body Oil", "description": "seven cold-pressed oils",
+               "ingredients": "almond; rosehip", "hero_claim": ""}
+    prompt = generate_image_prompt.build_image_prompt(bp, product=product, edit_mode=True, include_product=True)
+    # The illustrated register's own substitution wording (draw NATIVELY, not "place ...
+    # shown in the reference photo(s)" - that phrasing is photographic-only).
+    assert "Remove the competitor's product entirely and draw the Besque product NATIVELY" in prompt
+    assert "Place the Besque product described below as the subject" not in prompt
+    assert "The reference shows 2 products together" not in prompt
+    assert "almond; rosehip" in prompt
 
 
 def test_build_image_prompt_edit_mode_illustrated_no_product_adds_natively():
@@ -1054,6 +1128,41 @@ def test_build_image_prompt_includes_bottle_material_realism_in_generate_mode_to
 def test_build_image_prompt_omits_bottle_material_realism_when_productless():
     prompt = generate_image_prompt.build_image_prompt(_blueprint(), edit_mode=True, include_product=False)
     assert generate_image_prompt._BOTTLE_MATERIAL_REALISM_CLAUSE not in prompt
+
+
+# ---- 2026-08-14: the material realism clause is style-aware - the photoreal clause's
+# meniscus/refraction/specular-highlight language directly contradicted an illustrated
+# register's own "never photorealistic" instruction elsewhere in the same prompt (same
+# class as the 12 Aug contradictions) ----
+
+def test_build_image_prompt_illustrated_uses_illustrated_material_clause_not_photoreal():
+    bp = _blueprint()
+    bp["production_style"] = {"style": "illustrated", "confidence": "high", "signals": []}
+    prompt = generate_image_prompt.build_image_prompt(bp, edit_mode=True)
+    assert generate_image_prompt._BOTTLE_MATERIAL_REALISM_CLAUSE_ILLUSTRATED in prompt
+    assert generate_image_prompt._BOTTLE_MATERIAL_REALISM_CLAUSE not in prompt
+
+
+def test_build_image_prompt_photoreal_uses_photoreal_material_clause_not_illustrated():
+    bp = _blueprint()
+    bp["production_style"] = {"style": "high_spec_studio", "confidence": "high", "signals": []}
+    prompt = generate_image_prompt.build_image_prompt(bp, edit_mode=True)
+    assert generate_image_prompt._BOTTLE_MATERIAL_REALISM_CLAUSE in prompt
+    assert generate_image_prompt._BOTTLE_MATERIAL_REALISM_CLAUSE_ILLUSTRATED not in prompt
+
+
+def test_bottle_material_realism_clause_illustrated_never_demands_photorealistic_liquid():
+    """The illustrated variant explicitly BANS the photoreal clause's photographic
+    physical-realism demands (never asserts them as a requirement) - a flat, drawn
+    oil/glass/hardware is explicitly CORRECT in this register, never a failure to fix."""
+    clause = generate_image_prompt._BOTTLE_MATERIAL_REALISM_CLAUSE_ILLUSTRATED
+    assert "never a photorealistic meniscus" in clause
+    assert "refracts and reflects" not in clause  # the photoreal clause's own DEMAND wording
+    assert "never glass refraction, never specular highlights" in clause
+    assert "FLAT" in clause
+    # Content-fidelity guarantees carry over unchanged from the photoreal clause.
+    assert "never a change to what the label actually contains" in clause
+    assert "BESQUE wordmark and the product name at minimum" in clause
 
 
 # ---- 2026-08-13: small-scale label legibility - a genuine gap, not a duplicate of the
@@ -1615,16 +1724,25 @@ def test_edit_mode_instruction_style_reaches_register_clause():
     assert "phone" in instruction.lower()
 
 
-# ---- style=="illustrated" (2026-08-06, Grüns GLP-1 leak): the product-substitution
-# sentence stops pointing at a reference photo and describes the bottle natively instead ----
+# ---- style=="illustrated": the product-substitution sentence describes the bottle
+# drawn natively, using any attached reference photo for IDENTITY only, never as a
+# rendering-style reference (2026-08-06, Grüns GLP-1 leak; REVERSED 2026-08-14 - photos
+# are attached again for this style, see generate_image's own docstring for why) ----
 
-def test_edit_mode_instruction_illustrated_never_mentions_reference_photo():
-    """The old wording ("shown in the reference photo(s) that follow") must not appear at
-    all for this style - generate_image() no longer attaches one, so a prompt still
-    pointing at it would reference nothing."""
+def test_edit_mode_instruction_illustrated_never_points_at_photo_for_rendering_style():
+    """The old photographic-substitute wording ("shown in the reference photo(s) that
+    follow... matching the original shot's composition") must not appear for this style
+    - that phrasing asks Gemini to match the PHOTO's own look, which is exactly the
+    2026-08-06 leak. The instruction must instead say the photo (if any) is identity-only
+    and that native, non-photorealistic drawing applies regardless of the photo."""
     instruction = generate_image_prompt._edit_mode_instruction(style="illustrated")
     assert "shown in the reference photo(s) that follow" not in instruction
-    assert "no product reference photo is attached" in instruction.lower()
+    assert "matching the original shot's composition" not in instruction
+    assert "never as a rendering-style reference" in instruction.lower()
+    assert "regardless" in instruction.lower()
+    # The genuine no-photo fallback wording must still exist for a product with zero
+    # configured reference images - not removed, only no longer the unconditional case.
+    assert "work from silhouette, colour, and" in instruction.lower()
 
 
 def test_edit_mode_instruction_illustrated_names_product_by_name():
