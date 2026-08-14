@@ -5,7 +5,7 @@ used in tests/test_generate_endpoints.py (monkeypatch the module attribute the e
 actually calls through)."""
 import dashboard
 from fastapi.testclient import TestClient
-from src import dedupe, generate_image_prompt
+from src import dedupe, generate_image_prompt, drift_check
 
 
 def _artifact(**overrides):
@@ -96,6 +96,9 @@ def test_edit_endpoint_success_path_creates_new_artifact_and_calls_gemini_with_d
     monkeypatch.setattr(dedupe, "insert_edit_artifact", lambda **k: 43)
     monkeypatch.setattr(dedupe, "get_angle", lambda aid: None)
     monkeypatch.setattr(dashboard, "_read_artifact_image_bytes", lambda art, ad_id: (b"source-bytes", "AD123_draft.png"))
+    monkeypatch.setattr(drift_check, "check_drift", lambda *a, **k: {
+        "method": "skip", "checked": False, "drift_flag": False, "inside_pct": None,
+        "outside_pct": None, "scatter_pct": None, "bbox": None})
 
     captured_call = {}
     def fake_apply(source_bytes, instruction):
@@ -133,6 +136,9 @@ def test_edit_endpoint_clamps_younger_age_request(monkeypatch):
     monkeypatch.setattr(dedupe, "get_angle", lambda aid: None)
     monkeypatch.setattr(dashboard, "_read_artifact_image_bytes", lambda art, ad_id: (b"source-bytes", "AD123_draft.png"))
     monkeypatch.setattr(generate_image_prompt, "apply_targeted_edit", lambda *a, **k: b"new-image-bytes")
+    monkeypatch.setattr(drift_check, "check_drift", lambda *a, **k: {
+        "method": "skip", "checked": False, "drift_flag": False, "inside_pct": None,
+        "outside_pct": None, "scatter_pct": None, "bbox": None})
 
     resp = _client().post("/artifact/42/edit", json={
         "target": "person_face", "attribute": "age", "operation": "change",
@@ -168,3 +174,97 @@ def test_instruction_wordmark_protection_present_even_when_editing_headline():
     instruction = generate_image_prompt.build_targeted_edit_instruction(
         descriptor, "change", "new headline", blueprint=None)
     assert "brand wordmark" in instruction.lower()
+
+
+# ---- Step 4: drift check + one automatic retry, then stop ----
+
+def _setup_common_mocks(monkeypatch, extra_dedupe=None):
+    monkeypatch.setattr(dedupe, "get_artifact_by_id", lambda aid: _artifact())
+    monkeypatch.setattr(dedupe, "insert_edit_event", lambda **k: 100)
+    monkeypatch.setattr(dedupe, "update_edit_event_result", lambda *a, **k: None)
+    monkeypatch.setattr(dedupe, "insert_edit_artifact", lambda **k: 200)
+    monkeypatch.setattr(dedupe, "get_angle", lambda aid: None)
+    monkeypatch.setattr(dashboard, "_read_artifact_image_bytes", lambda art, ad_id: (b"source-bytes", "AD123_draft.png"))
+    if extra_dedupe:
+        for name, fn in extra_dedupe.items():
+            monkeypatch.setattr(dedupe, name, fn)
+
+
+def test_drift_detected_triggers_exactly_one_retry_then_stops(monkeypatch):
+    _setup_common_mocks(monkeypatch)
+    apply_calls = []
+    def fake_apply(source_bytes, instruction):
+        apply_calls.append(instruction)
+        return f"result-{len(apply_calls)}".encode()
+    monkeypatch.setattr(generate_image_prompt, "apply_targeted_edit", fake_apply)
+
+    check_calls = []
+    def fake_check_drift(source_bytes, result_bytes, descriptor, blueprint):
+        check_calls.append(result_bytes)
+        # First attempt drifts; retry (2nd call) comes back clean.
+        drifted = len(check_calls) == 1
+        return {"method": "zone", "checked": True, "drift_flag": drifted,
+                "inside_pct": 10.0, "outside_pct": 5.0 if drifted else 0.05,
+                "scatter_pct": None, "bbox": (0, 0, 10, 10)}
+    monkeypatch.setattr(drift_check, "check_drift", fake_check_drift)
+
+    resp = _client().post("/artifact/42/edit", json={
+        "target": "cta", "attribute": "text", "operation": "change", "new_value": "Buy Now",
+    })
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(apply_calls) == 2  # exactly one retry, never more
+    assert len(check_calls) == 2
+    assert "NOTE: your previous attempt changed pixels outside" in apply_calls[1]
+    assert body["drift_checked"] is True
+    assert body["drift_flag"] is False  # retry's own verdict is final
+    assert body["drift_outside_pct"] == 0.05
+
+
+def test_drift_still_present_after_retry_is_still_returned_not_discarded(monkeypatch):
+    _setup_common_mocks(monkeypatch)
+    apply_calls = []
+    monkeypatch.setattr(generate_image_prompt, "apply_targeted_edit",
+                         lambda *a, **k: (apply_calls.append(1), b"result")[1])
+    # Every check_drift call reports drift - the retry does NOT fix it.
+    monkeypatch.setattr(drift_check, "check_drift", lambda *a, **k: {
+        "method": "zone", "checked": True, "drift_flag": True, "inside_pct": 8.0,
+        "outside_pct": 4.2, "scatter_pct": None, "bbox": (0, 0, 5, 5),
+    })
+    resp = _client().post("/artifact/42/edit", json={
+        "target": "cta", "attribute": "text", "operation": "change", "new_value": "Buy Now",
+    })
+    assert resp.status_code == 200  # STILL returned, never silently discarded
+    body = resp.json()
+    assert len(apply_calls) == 2  # one retry, then stopped - not a retry loop
+    assert body["ok"] is True
+    assert body["drift_flag"] is True
+    assert body["artifact_id"] == 200
+
+
+def test_no_zone_target_skips_drift_check_and_never_retries(monkeypatch):
+    # Uses a VALID control (cta) but mocks check_drift to return checked=False - the
+    # real skip case (lighting/background/typography, see
+    # test_drift_check.py::test_lighting_background_typography_still_skip_even_with_full_frame_change
+    # for the actual skip-target coverage). What matters here is the ENDPOINT'S OWN
+    # behaviour on checked=False: no retry, regardless of what drift_flag says.
+    _setup_common_mocks(monkeypatch)
+    apply_calls = []
+    monkeypatch.setattr(generate_image_prompt, "apply_targeted_edit",
+                         lambda *a, **k: (apply_calls.append(1), b"result")[1])
+    check_calls = []
+    def fake_check_drift(*a, **k):
+        check_calls.append(1)
+        return {"method": "skip", "checked": False, "drift_flag": False,
+                "inside_pct": None, "outside_pct": None, "scatter_pct": None, "bbox": None}
+    monkeypatch.setattr(drift_check, "check_drift", fake_check_drift)
+
+    resp = _client().post("/artifact/42/edit", json={
+        "target": "cta", "attribute": "text", "operation": "change", "new_value": "Buy Now",
+    })
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(apply_calls) == 1  # never retries on checked=False
+    assert len(check_calls) == 1
+    assert body["drift_checked"] is False
+    assert body["drift_flag"] is False

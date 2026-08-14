@@ -482,7 +482,7 @@ async def api_apply_edit(artifact_id: int, request: Request):
     if source is None:
         return JSONResponse({"ok": False, "error": "artifact not found"}, status_code=404)
 
-    from src import edit_capability, generate_image_prompt, generate_copy, compliance
+    from src import edit_capability, generate_image_prompt, generate_copy, compliance, drift_check
 
     blueprint = source.get("blueprint") or {}
     competitor_ad_id = source.get("ad_id")
@@ -572,6 +572,24 @@ async def api_apply_edit(artifact_id: int, request: Request):
         dedupe.update_edit_event_result(edit_event_id, None, outcome="rejected", reject_reason=reason)
         return JSONResponse({"ok": False, "error": reason})
 
+    # Step 4 (drift check): compare v1 vs this result inside vs outside the target's
+    # own expected-change zone. checked=False (lighting/background/typography/product/
+    # prop/person_body/offer/banner - no derivable zone) is never treated as a failure.
+    # One automatic retry with a tightened instruction on drift, then stop - same
+    # one-retry cap as the output critic. The retry's own verdict is final either way;
+    # a still-drifted result is still returned, never silently discarded - the operator
+    # sees drift_flag via the version strip and chooses keep/retry/revert themselves.
+    drift_result = drift_check.check_drift(source_bytes, new_image_bytes, descriptor, blueprint)
+    if drift_result["checked"] and drift_result["drift_flag"]:
+        retry_instruction = generate_image_prompt.build_drift_retry_instruction(instruction, descriptor)
+        retry_bytes = generate_image_prompt.apply_targeted_edit(source_bytes, retry_instruction)
+        if retry_bytes is not None:
+            instruction = retry_instruction
+            new_image_bytes = retry_bytes
+            drift_result = drift_check.check_drift(source_bytes, new_image_bytes, descriptor, blueprint)
+        # retry_bytes is None (the retry call itself failed): keep the original,
+        # still-drifted attempt rather than fail the whole edit outright.
+
     angle = dedupe.get_angle(angle_id) if angle_id else None
     angle_slug = angle["slug"] if angle else None
     stem = generate_image_prompt._draft_stem(source["ad_id"], angle_slug)
@@ -601,12 +619,17 @@ async def api_apply_edit(artifact_id: int, request: Request):
         reason = "artifact row insert returned no id"
         dedupe.update_edit_event_result(edit_event_id, None, outcome="rejected", reject_reason=reason)
         return JSONResponse({"ok": False, "error": reason}, status_code=500)
-    dedupe.update_edit_event_result(edit_event_id, new_artifact_id, outcome="pending")
+    dedupe.update_edit_event_result(edit_event_id, new_artifact_id, outcome="pending",
+                                     drift_flag=drift_result["drift_flag"])
 
     return JSONResponse({
         "ok": True, "artifact_id": new_artifact_id, "parent_artifact_id": artifact_id,
         "edit_event_id": edit_event_id, "draft_url": f"/assets/{filename}",
         "clamped": clamped,
+        "drift_checked": drift_result["checked"], "drift_flag": drift_result["drift_flag"],
+        "drift_method": drift_result["method"],
+        "drift_inside_pct": drift_result["inside_pct"], "drift_outside_pct": drift_result["outside_pct"],
+        "drift_scatter_pct": drift_result["scatter_pct"],
     })
 
 

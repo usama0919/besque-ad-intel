@@ -1440,15 +1440,21 @@ def insert_edit_event(source_artifact_id, competitor_ad_id, format, angle_id, ta
         return new_id
 
 
-def update_edit_event_result(edit_event_id, result_artifact_id, outcome="pending", reject_reason=""):
+def update_edit_event_result(edit_event_id, result_artifact_id, outcome="pending", reject_reason="", drift_flag=False):
     """Attach the resulting new artifact row (or a final rejection) to an already-logged
     edit_events row - a two-step write (log the attempt, then record its outcome) rather
     than one INSERT, because the result_artifact_id doesn't exist until AFTER the Gemini
-    call and the new artifacts INSERT both succeed."""
+    call and the new artifacts INSERT both succeed.
+
+    drift_flag (Step 4, 2026-08-14): set from src.drift_check.check_drift's own verdict
+    AFTER the one automatic retry (if one ran) - never the pre-retry verdict. A drifted
+    result is still recorded here with its real outcome/result_artifact_id; drift_flag
+    is a SEPARATE signal for the operator to see (keep/retry/revert), never a reason to
+    reject or discard the edit itself."""
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
-            "UPDATE edit_events SET result_artifact_id=%s, outcome=%s, reject_reason=%s WHERE id=%s",
-            (result_artifact_id, outcome, reject_reason, edit_event_id),
+            "UPDATE edit_events SET result_artifact_id=%s, outcome=%s, reject_reason=%s, drift_flag=%s WHERE id=%s",
+            (result_artifact_id, outcome, reject_reason, drift_flag, edit_event_id),
         )
         conn.commit()
 
@@ -1458,16 +1464,22 @@ def get_artifact_lineage(root_artifact_id):
     root_artifact_id is NULL by convention, see init_artifacts' comment - it is never
     an edit result) plus every row whose root_artifact_id equals it, ordered by
     version_no. Powers the Edit modal's version strip (v1/v2/v3...) - a pure read, no
-    row here is ever mutated."""
+    row here is ever mutated.
+
+    drift_flag (Step 4, 2026-08-14) is LEFT JOINed from edit_events via each row's own
+    edit_event_id - v1 has edit_event_id NULL (it was never an edit result) and always
+    reads back drift_flag=False, correctly."""
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
-            "SELECT id, version_no, draft_image, created_at FROM artifacts "
-            "WHERE id = %s OR root_artifact_id = %s ORDER BY version_no, id",
+            "SELECT a.id, a.version_no, a.draft_image, a.created_at, "
+            "COALESCE(e.drift_flag, false) "
+            "FROM artifacts a LEFT JOIN edit_events e ON e.id = a.edit_event_id "
+            "WHERE a.id = %s OR a.root_artifact_id = %s ORDER BY a.version_no, a.id",
             (root_artifact_id, root_artifact_id),
         )
         return [
             {"id": r[0], "version_no": r[1] or 1, "draft_image": r[2] or "",
-             "created_at": r[3].isoformat() if r[3] else None}
+             "created_at": r[3].isoformat() if r[3] else None, "drift_flag": bool(r[4])}
             for r in cur.fetchall()
         ]
 

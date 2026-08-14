@@ -503,9 +503,30 @@ async function submitDynEdit(target, attribute, operation, newValue){
         'Failed: ' + (res.error || (res.issues||[]).join('; ') || 'unknown');
       return;
     }
-    document.getElementById('dynEditStatus').textContent =
-      'Edit applied - new version created (artifact ' + res.artifact_id + ')' + (res.clamped ? ', age clamped to rule 10 floor.' : '.');
+    let msg = 'Edit applied - new version created (artifact ' + res.artifact_id + ')' +
+      (res.clamped ? ', age clamped to rule 10 floor.' : '.');
+    // Step 4: drift_flag is surfaced, never silently discarded - the operator decides
+    // keep (do nothing) / retry (submit the same edit again) / revert (version strip).
+    // Two check methods: "zone" (% changed outside a known text/face zone) and
+    // "containment" (% of changed pixels scattered outside the single largest
+    // connected blob - used for product/prop/person_body/offer/banner, which have no
+    // recorded zone position).
+    if(res.drift_checked && res.drift_flag){
+      if(res.drift_method === 'zone'){
+        msg += ' DRIFT DETECTED: this edit changed ' + res.drift_outside_pct.toFixed(2) +
+          '% of pixels outside the edited zone (threshold 1.0%)';
+      } else {
+        msg += ' DRIFT DETECTED: ' + res.drift_scatter_pct.toFixed(1) +
+          '% of changed pixels are scattered outside the main edited region (threshold ' +
+          '15.0%) rather than contained to one area';
+      }
+      msg += ' after one automatic retry - review before keeping. Use the version strip to revert if needed.';
+    }
+    // openDynEditModal resets dynEditStatus while it (re)loads controls for the new
+    // version - set the final message AFTER it resolves, or it would be clobbered.
     await openDynEditModal(res.artifact_id);
+    document.getElementById('dynEditStatus').textContent = msg;
+    document.getElementById('dynEditStatus').style.color = (res.drift_checked && res.drift_flag) ? '#c0392b' : '#777';
     await loadCards(true);
   } catch(e) {
     document.getElementById('dynEditStatus').textContent = 'Failed: ' + e;
@@ -524,7 +545,10 @@ async function loadDynVersions(artifactId){
       if(v.id === artifactId && v.draft_url) img.src = v.draft_url;
       const btn = document.createElement('button');
       btn.className = 'mini' + (v.id === artifactId ? ' dyn-version-current' : '');
-      btn.textContent = 'v' + v.version_no;
+      // drift_flag (Step 4) surfaced directly on the version strip - a drifted version
+      // is still shown and still selectable, never hidden.
+      btn.textContent = 'v' + v.version_no + (v.drift_flag ? ' ⚠ drift' : '');
+      if(v.drift_flag){ btn.title = 'This edit changed pixels outside the requested zone'; btn.style.color = '#c0392b'; }
       btn.onclick = () => { if(v.draft_url) img.src = v.draft_url; };
       strip.appendChild(btn);
       if(v.id !== artifactId){

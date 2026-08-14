@@ -3273,6 +3273,21 @@ def build_targeted_edit_instruction(descriptor, operation, new_value, blueprint=
     )
 
 
+def build_drift_retry_instruction(base_instruction, descriptor):
+    """Dynamic Edit System, Step 4: the ONE automatic retry after a drift-check
+    failure (src.drift_check) - appends a tightening note to the SAME base
+    instruction, never a fresh prompt, so every other constraint (wordmark
+    protection, the single-change framing) still applies unchanged. Called at most
+    once per edit request - the caller enforces the one-retry cap, not this function."""
+    label = descriptor.get("label") or descriptor.get("attribute") or descriptor.get("target")
+    return (
+        base_instruction
+        + f" NOTE: your previous attempt changed pixels outside the {label} region - "
+          f"this retry must change ONLY {label} itself and leave every other pixel, "
+          "including areas near it, completely untouched."
+    )
+
+
 def apply_targeted_edit(source_image_bytes, instruction):
     """Dynamic Edit System, Step 3 Gemini call: contents=[source_image_bytes,
     instruction] - nothing else. aspect_ratio is derived explicitly from
