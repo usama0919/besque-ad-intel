@@ -3218,6 +3218,99 @@ def edit_image(current_image_bytes, instruction, ad_id, aspect="1:1", angle_slug
         return None
 
 
+def _brand_wordmark_protection_clause(blueprint):
+    """ALWAYS appended to a targeted-edit instruction, regardless of what's being
+    edited - never target the brand wordmark rule (2026-08-14). Live failure: editing
+    artifact 1251's "headline" (whose current_value didn't actually exist in the
+    pixels - see edit_capability._has_headline_shaped_text_purpose's own comment)
+    caused Gemini to overwrite the BESQUE wordmark region instead of leaving it alone.
+    Named by its own recorded position when a structural_zones brand_wordmark entry
+    exists (src.edit_capability.get_brand_wordmark_zone), so the constraint points at a
+    real location rather than a vague generality; falls back to a generic statement
+    when no such zone is recorded, since the rule must hold either way."""
+    from src import edit_capability
+    zone = edit_capability.get_brand_wordmark_zone(blueprint or {})
+    if zone:
+        return (
+            f" The brand wordmark at position \"{zone.get('position', '')}\" must NEVER be "
+            "modified, replaced, resized, moved, or removed by this edit, regardless of "
+            "the instruction above - it is not eligible for editing under any target."
+        )
+    return (
+        " The brand wordmark/logo, wherever it appears in the image, must NEVER be "
+        "modified, replaced, resized, moved, or removed by this edit, regardless of the "
+        "instruction above - it is not eligible for editing under any target."
+    )
+
+
+def build_targeted_edit_instruction(descriptor, operation, new_value, blueprint=None):
+    """Dynamic Edit System, Step 3: the ONLY prompt text sent to Gemini for a targeted
+    edit. Deliberately NOT the assembled generation prompt, COMPLIANCE_RULES, brand_rules,
+    or the stored image_prompt/copy_prompt - the CORE RULE this build exists to satisfy
+    (see CLAUDE.md): a stored prompt is a lookup for CURRENT FIELD VALUES only, never
+    prose pasted into the edit call - a full creative brief plus "change one word" reads
+    as a generation instruction to Gemini and reintroduces the exact drift this system
+    replaces. `descriptor` is one src/edit_capability.py control (target/attribute/label/
+    current_value); its current_value is used only to phrase the ONE change, never
+    restated as a scene description.
+
+    operation is "change" or "remove" - both name exactly one thing to alter and demand
+    everything else survive unchanged. blueprint (optional) feeds the ALWAYS-ON brand
+    wordmark protection clause - omitted only by callers that predate it; every real
+    caller in dashboard.py passes it."""
+    label = descriptor.get("label") or descriptor.get("attribute") or descriptor.get("target")
+    if operation == "remove":
+        change = f"REMOVE {label} entirely - it must not appear anywhere in the image afterward."
+    else:
+        change = f"Change {label} (currently: {descriptor.get('current_value')!r}) to: {new_value}"
+    return (
+        "The attached image is FINAL and CORRECT exactly as it appears - this is a "
+        "targeted edit to it, not a new composition and not a reinterpretation. Make "
+        f"EXACTLY ONE change: {change}. Every other pixel in the image - layout, product, "
+        "bottle, all other text, colours, background, lighting, composition - must be "
+        "reproduced EXACTLY as it appears in the attached image, completely unchanged."
+        + _brand_wordmark_protection_clause(blueprint)
+    )
+
+
+def apply_targeted_edit(source_image_bytes, instruction):
+    """Dynamic Edit System, Step 3 Gemini call: contents=[source_image_bytes,
+    instruction] - nothing else. aspect_ratio is derived explicitly from
+    source_image_bytes and always passed on ImageConfig (never omitted - see
+    derive_aspect_ratio's own docstring on why omitting it is nondeterministic, not
+    merely imprecise). Returns the new draft's raw PNG bytes, or None on failure -
+    saving/versioning/DB bookkeeping is the caller's job (dashboard.py), the same
+    separation edit_image already uses. Returns values explicitly rather than stashing
+    onto a function attribute (see CLAUDE.md's .last_prompt note on why that pattern is
+    deliberately not repeated in new code)."""
+    from google.genai import types as genai_types
+    aspect_ratio = derive_aspect_ratio(source_image_bytes)
+    image_config = (
+        genai_types.ImageConfig(aspect_ratio=aspect_ratio, image_size=IMAGE_SIZE)
+        if aspect_ratio is not None
+        else genai_types.ImageConfig(image_size=IMAGE_SIZE)
+    )
+    try:
+        client = genai.Client(vertexai=True, project="besque-martech", location="global")
+        print(f"[apply_targeted_edit] instruction:\n{instruction}")
+        response = client.models.generate_content(
+            model="gemini-3.1-flash-image",
+            contents=[
+                genai_types.Part.from_bytes(data=source_image_bytes, mime_type="image/png"),
+                instruction,
+            ],
+            config=genai_types.GenerateContentConfig(image_config=image_config),
+        )
+        for part in response.candidates[0].content.parts:
+            if part.inline_data is not None:
+                return part.inline_data.data
+        return None
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return None
+
+
 def _regenerate_delta_clause(instruction):
     """2026-08-06: no longer claims the prompt above is "the EXACT prompt that produced
     the attached image" - since pipeline._regenerate_existing_draft now REBUILDS that

@@ -28,6 +28,7 @@ def _init_tables():
     row of actual data. Moved here, once, covering every init_* this file calls anywhere
     in a request handler."""
     dedupe.init_artifacts()
+    dedupe.init_edit_events()
     dedupe.init_angles()
     dedupe.init_angle_language()
     dedupe.init_decisions()
@@ -413,6 +414,246 @@ async def api_edit_image(ad_id: str, request: Request):
         except Exception as e:
             print(f"[api_edit_image] ad_id={ad_id} prompt record failed (non-fatal): {e}")
     return JSONResponse({"ok": True, "ad_id": ad_id})
+
+
+def _read_artifact_image_bytes(art, ad_id):
+    """Local-then-bucket read of an artifact's current draft, same pattern
+    api_edit_image already uses - filename is read back from the artifact's OWN stored
+    draft_image path, never reconstructed from ad_id alone (an angle-variant or edited
+    draft lives at a different stem). Returns (bytes_or_None, filename)."""
+    filename = os.path.basename((art.get("draft_image") or f"{ad_id}_draft.png").replace("\\", "/"))
+    local = ASSET_DIR / filename
+    if local.exists():
+        return local.read_bytes(), filename
+    try:
+        from google.cloud import storage
+        blob = storage.Client().bucket(assets.asset_bucket_name()).blob(filename)
+        if blob.exists():
+            return blob.download_as_bytes(), filename
+    except Exception:
+        pass
+    return None, filename
+
+
+# Copy-column key each text-shaped edit target writes back to on success - export_drafts.py
+# reads generated_copy by these same keys, so an edit that changes a headline/subtext/cta
+# must land in the identical field a normal generation run would have written, never a
+# parallel "edited_headline"-style field export_drafts.py wouldn't know to look at.
+_TEXT_TARGET_COPY_KEYS = {"headline": "headline", "subtext": "image_subtext", "cta": "cta"}
+
+
+@app.get("/artifact/{artifact_id}/edit-capabilities")
+def api_edit_capabilities(artifact_id: int):
+    """Dynamic Edit System, Step 2: the editable control set for ONE artifact, derived
+    fresh from its own blueprint + copy columns on every call - never a fixed or cached
+    list. See src/edit_capability.py for the derivation rules. Adding a new control kind
+    requires only a registry entry there, no change here and no UI change."""
+    art = dedupe.get_artifact_by_id(artifact_id)
+    if art is None:
+        return JSONResponse({"ok": False, "error": "artifact not found"}, status_code=404)
+    from src import edit_capability
+    controls = edit_capability.derive_edit_capabilities(art)
+    return JSONResponse({"ok": True, "artifact_id": artifact_id, "controls": controls})
+
+
+@app.post("/artifact/{artifact_id}/edit")
+async def api_apply_edit(artifact_id: int, request: Request):
+    """Dynamic Edit System, Step 3 - control path only (entry_source is always 'control'
+    in this build; the chat interpreter is explicitly out of scope). Body:
+    {target, attribute, operation, new_value}. operation is "change" (new_value
+    required) or "remove" (new_value ignored).
+
+    CORE RULE enforced here: the Gemini call never sees the assembled generation prompt
+    or any stored image_prompt/copy_prompt text - only the source artifact's own current
+    draft image plus a one-line delta instruction (generate_image_prompt.
+    build_targeted_edit_instruction). Every edit creates a NEW artifact row
+    (dedupe.insert_edit_artifact) - the source row is never mutated.
+
+    Every attempt is logged to edit_events BEFORE the Gemini call, including a rejected
+    one (no matching control, disallowed operation, failed compliance) - so a human
+    reviewing why an edit didn't apply always has a row to look at, not silence."""
+    body = await request.json()
+    target = (body.get("target") or "").strip()
+    attribute = (body.get("attribute") or "").strip()
+    operation = (body.get("operation") or "change").strip()
+    new_value = body.get("new_value")
+
+    source = dedupe.get_artifact_by_id(artifact_id)
+    if source is None:
+        return JSONResponse({"ok": False, "error": "artifact not found"}, status_code=404)
+
+    from src import edit_capability, generate_image_prompt, generate_copy, compliance
+
+    blueprint = source.get("blueprint") or {}
+    competitor_ad_id = source.get("ad_id")
+    fmt = blueprint.get("format")
+    angle_id = source.get("angle_id")
+
+    def _log_rejected(reason, original_value=None):
+        dedupe.insert_edit_event(
+            source_artifact_id=artifact_id, competitor_ad_id=competitor_ad_id, format=fmt,
+            angle_id=angle_id, target=target, attribute=attribute, operation=operation,
+            original_value=original_value, new_value=new_value, outcome="rejected",
+            reject_reason=reason,
+        )
+
+    controls = edit_capability.derive_edit_capabilities(source)
+    descriptor = edit_capability.find_control(controls, target, attribute)
+    if descriptor is None:
+        reason = f"no editable control for target={target!r} attribute={attribute!r} on this artifact"
+        _log_rejected(reason)
+        return JSONResponse({"ok": False, "error": reason}, status_code=400)
+
+    allowed_ops = descriptor.get("allowed_ops") or []
+    if operation not in allowed_ops:
+        reason = f"operation {operation!r} not allowed for this control (allowed: {allowed_ops})"
+        _log_rejected(reason, original_value=descriptor.get("current_value"))
+        return JSONResponse({"ok": False, "error": reason}, status_code=400)
+
+    if operation == "change" and not str(new_value or "").strip():
+        reason = "new_value is required for operation=change"
+        _log_rejected(reason, original_value=descriptor.get("current_value"))
+        return JSONResponse({"ok": False, "error": reason}, status_code=400)
+
+    resolved_value = new_value if operation == "change" else None
+    clamped = False
+
+    # Person age edits clamp to the rule 10 floor - older only, never younger.
+    if target == "person_face" and attribute == "age" and operation == "change":
+        resolved_value, clamped = edit_capability.clamp_person_age(new_value)
+
+    new_generated_copy = dict(source.get("generated_copy") or {})
+    new_offer_text = source.get("offer_text")
+
+    # Text-shaped targets go through redaction + C1-C9 before the image call - the same
+    # guardrails a normal generation run applies to copy, applied here to the single
+    # edited field rather than a whole freshly-generated blueprint.
+    if target in _TEXT_TARGET_COPY_KEYS or target == "offer":
+        text_value = resolved_value if operation == "change" else ""
+        redacted_value = generate_copy._redact_personal_attribution(text_value) if text_value else text_value
+        check_copy = dict(new_generated_copy)
+        if target == "offer":
+            check_copy["offer_text_edit"] = redacted_value
+        else:
+            check_copy[_TEXT_TARGET_COPY_KEYS[target]] = redacted_value
+        effective_offer_text = redacted_value if target == "offer" else (source.get("offer_text") or "")
+        ok, issues = compliance.check_compliance(
+            check_copy, competitor_page_name=source.get("page_name") or "",
+            offer_text=effective_offer_text, testimonial_attribution="",
+        )
+        if not ok:
+            reason = "; ".join(issues)
+            _log_rejected(reason, original_value=descriptor.get("current_value"))
+            return JSONResponse({"ok": False, "error": "compliance check failed", "issues": issues}, status_code=400)
+        resolved_value = redacted_value
+        if target == "offer":
+            new_offer_text = redacted_value
+        else:
+            new_generated_copy[_TEXT_TARGET_COPY_KEYS[target]] = redacted_value
+
+    edit_event_id = dedupe.insert_edit_event(
+        source_artifact_id=artifact_id, competitor_ad_id=competitor_ad_id, format=fmt,
+        angle_id=angle_id, target=target, attribute=attribute, operation=operation,
+        original_value=descriptor.get("current_value"), new_value=resolved_value,
+        scope={"essential_removal_warning": descriptor.get("warning")} if (operation == "remove" and descriptor.get("essential")) else {},
+        outcome="pending",
+    )
+
+    source_bytes, _ = _read_artifact_image_bytes(source, source["ad_id"])
+    if source_bytes is None:
+        reason = "no existing draft image to edit"
+        dedupe.update_edit_event_result(edit_event_id, None, outcome="rejected", reject_reason=reason)
+        return JSONResponse({"ok": False, "error": reason}, status_code=404)
+
+    instruction = generate_image_prompt.build_targeted_edit_instruction(descriptor, operation, resolved_value, blueprint=blueprint)
+    new_image_bytes = generate_image_prompt.apply_targeted_edit(source_bytes, instruction)
+    if new_image_bytes is None:
+        reason = "image edit call failed"
+        dedupe.update_edit_event_result(edit_event_id, None, outcome="rejected", reject_reason=reason)
+        return JSONResponse({"ok": False, "error": reason})
+
+    angle = dedupe.get_angle(angle_id) if angle_id else None
+    angle_slug = angle["slug"] if angle else None
+    stem = generate_image_prompt._draft_stem(source["ad_id"], angle_slug)
+    new_version_no = (source.get("version_no") or 1) + 1
+    filename = f"{stem}_edit_v{new_version_no}.png"
+    ASSET_DIR.mkdir(exist_ok=True)
+    with open(ASSET_DIR / filename, "wb") as f:
+        f.write(new_image_bytes)
+    try:
+        from google.cloud import storage
+        storage.Client().bucket(assets.asset_bucket_name()).blob(filename).upload_from_string(
+            new_image_bytes, content_type="image/png")
+    except Exception as e:
+        print(f"[api_apply_edit] bucket upload failed (non-fatal): {e}")
+
+    new_image_prompt = f"[EDIT of artifact {artifact_id}] {instruction}"
+    new_artifact_id = dedupe.insert_edit_artifact(
+        source=source, new_draft_image=filename, new_image_path=filename,
+        new_generated_copy=new_generated_copy, new_image_prompt=new_image_prompt,
+        new_offer_text=new_offer_text, edit_event_id=edit_event_id,
+    )
+    if new_artifact_id is None:
+        # Defensive: insert_artifact_row_unconditional should never return None, but a
+        # silent null id here is exactly the shape of the live bug this system already
+        # hit once (save_artifact's old dedupe-skip gate) - never report ok:true with a
+        # null artifact_id again, whatever the cause.
+        reason = "artifact row insert returned no id"
+        dedupe.update_edit_event_result(edit_event_id, None, outcome="rejected", reject_reason=reason)
+        return JSONResponse({"ok": False, "error": reason}, status_code=500)
+    dedupe.update_edit_event_result(edit_event_id, new_artifact_id, outcome="pending")
+
+    return JSONResponse({
+        "ok": True, "artifact_id": new_artifact_id, "parent_artifact_id": artifact_id,
+        "edit_event_id": edit_event_id, "draft_url": f"/assets/{filename}",
+        "clamped": clamped,
+    })
+
+
+@app.get("/artifact/{artifact_id}/versions")
+def api_artifact_versions(artifact_id: int):
+    """Version strip data for the Edit modal - every row in this artifact's edit
+    lineage (v1, plus every edit descended from it), ordered oldest first. Never
+    mutates anything; see dedupe.get_artifact_lineage."""
+    art = dedupe.get_artifact_by_id(artifact_id)
+    if art is None:
+        return JSONResponse({"ok": False, "error": "artifact not found"}, status_code=404)
+    root_id = art["root_artifact_id"]
+    versions = dedupe.get_artifact_lineage(root_id)
+    for v in versions:
+        v["draft_url"] = f"/assets/{os.path.basename((v['draft_image'] or '').replace(chr(92), '/'))}" if v["draft_image"] else None
+    return JSONResponse({"ok": True, "root_artifact_id": root_id, "versions": versions})
+
+
+@app.post("/artifact/{artifact_id}/revert")
+def api_artifact_revert(artifact_id: int):
+    """Revert to an earlier version - creates a NEW head row copying that version's
+    content forward, never mutates or deletes any existing row (same "edits create a
+    new row" rule as a normal edit). artifact_id is the OLDER version being restored;
+    the new row's version_no is the lineage's current max + 1."""
+    target = dedupe.get_artifact_by_id(artifact_id)
+    if target is None:
+        return JSONResponse({"ok": False, "error": "artifact not found"}, status_code=404)
+    root_id = target["root_artifact_id"]
+    lineage = dedupe.get_artifact_lineage(root_id)
+    max_version = max((v["version_no"] or 1) for v in lineage) if lineage else (target.get("version_no") or 1)
+    new_id = dedupe.insert_artifact_row_unconditional(
+        ad_id=target["ad_id"], page_name=target["page_name"], image_path=target.get("image_path") or "",
+        blueprint=target["blueprint"], generated_copy=target["generated_copy"],
+        draft_image=target["draft_image"], metadata=target.get("metadata") or {},
+        image_prompt=target.get("image_prompt") or "", copy_prompt=target.get("copy_prompt") or "",
+        model_info=target.get("model_info") or "", angle_id=target.get("angle_id"),
+        text_in_image=bool(target.get("text_in_image")),
+        operator_instruction=target.get("operator_instruction") or "",
+        format_flag=target.get("format_flag") or "", product_override_note=target.get("product_override_note") or "",
+        include_product=target.get("include_product"), retheme_colours=target.get("retheme_colours"),
+        realism=target.get("realism"), body_area=target.get("body_area"),
+        offer_text=target.get("offer_text"), product_id=target.get("product_id"),
+        element_provenance=target.get("element_provenance"),
+        parent_artifact_id=artifact_id, root_artifact_id=root_id,
+        version_no=max_version + 1, edit_event_id=None,
+    )
+    return JSONResponse({"ok": True, "artifact_id": new_id, "reverted_from": artifact_id, "version_no": max_version + 1})
 
 
 def _stem_from_artifact(art, ad_id):

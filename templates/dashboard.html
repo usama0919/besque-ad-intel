@@ -144,6 +144,18 @@
   .modal input[type=text], .modal textarea { width:100%; padding:9px 12px; border:1px solid #ccc; border-radius:7px; font-size:13px; font-family:inherit; box-sizing:border-box; }
   .modal textarea { min-height:90px; resize:vertical; }
   .modal-actions { display:flex; justify-content:flex-end; gap:10px; margin-top:20px; }
+  .dyn-modal { width:min(680px, 94vw); }
+  .dyn-group { border-top:1px solid #eee; padding:12px 0; }
+  .dyn-group:first-child { border-top:none; }
+  .dyn-group-title { font-size:11px; font-weight:700; color:#6b4f9e; text-transform:uppercase; letter-spacing:.05em; margin-bottom:8px; }
+  .dyn-control-row { margin-bottom:10px; }
+  .dyn-control-row label { display:block; font-size:12px; font-weight:600; color:#333; margin-bottom:4px; text-transform:none; }
+  .dyn-input { width:100%; padding:8px 10px; border:1px solid #ccc; border-radius:7px; font-size:13px; font-family:inherit; box-sizing:border-box; min-height:44px; resize:vertical; }
+  .dyn-warning { background:#fff4e0; color:#8a5a00; font-size:11px; padding:4px 8px; border-radius:5px; margin-bottom:6px; }
+  .dyn-btn-row { display:flex; gap:6px; margin-top:6px; }
+  .dyn-version-strip { display:flex; gap:6px; flex-wrap:wrap; margin-top:10px; padding-top:10px; border-top:1px dashed #eee; }
+  .dyn-version-current { background:#1a1a1a !important; color:#fff !important; }
+  #dynEditImg { max-width:100%; border-radius:8px; margin-bottom:10px; }
   .edit-row { padding:10px 18px 14px; display:flex; gap:8px; border-top:1px dashed #eee; align-items:center; }
   .edit-row input { flex:1; padding:8px 10px; border:1px solid #ccc; border-radius:7px; font-size:12px; min-width:0; }
   .edit-row select { padding:8px; border:1px solid #ccc; border-radius:7px; font-size:12px; }
@@ -398,6 +410,138 @@ async function modalEditCopy(){
   }
 }
 
+// ---- Dynamic Edit System modal (Part B) - renders ONLY what /edit-capabilities
+// returns. No hard-coded control/button list anywhere in here: the group names, the
+// control count, and the allowed operations per control all come from the API
+// response. Adding a new control kind server-side requires zero changes in this file.
+let dynEditArtifactId = null;
+
+async function openDynEditModal(artifactId){
+  dynEditArtifactId = artifactId;
+  document.getElementById('dynEditModal').classList.add('open');
+  document.getElementById('dynEditControls').innerHTML = '';
+  document.getElementById('dynEditStatus').textContent = 'Loading controls...';
+  try {
+    const r = await fetch('/artifact/'+artifactId+'/edit-capabilities');
+    const d = await r.json();
+    if(!d.ok){ document.getElementById('dynEditStatus').textContent = 'Failed: ' + (d.error||'unknown'); return; }
+    renderDynControls(d.controls);
+    document.getElementById('dynEditStatus').textContent = d.controls.length ? '' : 'No editable controls for this artifact.';
+  } catch(e) {
+    document.getElementById('dynEditStatus').textContent = 'Failed: ' + e;
+  }
+  loadDynVersions(artifactId);
+}
+
+function closeDynEditModal(){ document.getElementById('dynEditModal').classList.remove('open'); }
+
+function renderDynControls(controls){
+  const container = document.getElementById('dynEditControls');
+  container.innerHTML = '';
+  // Group by target - the grouping itself is derived from whatever targets the API
+  // actually returned, never a fixed list of expected group names.
+  const order = [];
+  const groups = {};
+  (controls||[]).forEach(c => {
+    if(!groups[c.target]){ groups[c.target] = []; order.push(c.target); }
+    groups[c.target].push(c);
+  });
+  order.forEach(target => {
+    const groupEl = document.createElement('div');
+    groupEl.className = 'dyn-group';
+    const heading = document.createElement('div');
+    heading.className = 'dyn-group-title';
+    heading.textContent = target.replace(/_/g, ' ');
+    groupEl.appendChild(heading);
+    groups[target].forEach(c => groupEl.appendChild(renderDynControlRow(c)));
+    container.appendChild(groupEl);
+  });
+}
+
+function renderDynControlRow(c){
+  const row = document.createElement('div');
+  row.className = 'dyn-control-row';
+  const label = document.createElement('label');
+  label.textContent = c.label || c.attribute;
+  row.appendChild(label);
+  if(c.warning){
+    const w = document.createElement('div');
+    w.className = 'dyn-warning';
+    w.textContent = c.warning;
+    row.appendChild(w);
+  }
+  const input = document.createElement('textarea');
+  input.className = 'dyn-input';
+  const cv = c.current_value;
+  input.value = (cv && typeof cv === 'object') ? JSON.stringify(cv) : (cv==null ? '' : String(cv));
+  row.appendChild(input);
+  const btnRow = document.createElement('div');
+  btnRow.className = 'dyn-btn-row';
+  // allowed_ops drives which buttons exist for THIS control - never a fixed set.
+  (c.allowed_ops||[]).forEach(op => {
+    const btn = document.createElement('button');
+    btn.className = 'mini';
+    btn.textContent = op === 'remove' ? 'Remove' : 'Apply change';
+    btn.onclick = () => submitDynEdit(c.target, c.attribute, op, input.value);
+    btnRow.appendChild(btn);
+  });
+  row.appendChild(btnRow);
+  return row;
+}
+
+async function submitDynEdit(target, attribute, operation, newValue){
+  document.getElementById('dynEditStatus').textContent = 'Applying edit... this takes 20-30 seconds';
+  try {
+    const body = {target, attribute, operation};
+    if(operation !== 'remove') body.new_value = newValue;
+    const r = await fetch('/artifact/'+dynEditArtifactId+'/edit', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)
+    });
+    const res = await r.json();
+    if(!res.ok){
+      document.getElementById('dynEditStatus').textContent =
+        'Failed: ' + (res.error || (res.issues||[]).join('; ') || 'unknown');
+      return;
+    }
+    document.getElementById('dynEditStatus').textContent =
+      'Edit applied - new version created (artifact ' + res.artifact_id + ')' + (res.clamped ? ', age clamped to rule 10 floor.' : '.');
+    await openDynEditModal(res.artifact_id);
+    await loadCards(true);
+  } catch(e) {
+    document.getElementById('dynEditStatus').textContent = 'Failed: ' + e;
+  }
+}
+
+async function loadDynVersions(artifactId){
+  const strip = document.getElementById('dynVersionStrip');
+  const img = document.getElementById('dynEditImg');
+  strip.innerHTML = '';
+  try {
+    const r = await fetch('/artifact/'+artifactId+'/versions');
+    const d = await r.json();
+    if(!d.ok) return;
+    (d.versions||[]).forEach(v => {
+      if(v.id === artifactId && v.draft_url) img.src = v.draft_url;
+      const btn = document.createElement('button');
+      btn.className = 'mini' + (v.id === artifactId ? ' dyn-version-current' : '');
+      btn.textContent = 'v' + v.version_no;
+      btn.onclick = () => { if(v.draft_url) img.src = v.draft_url; };
+      strip.appendChild(btn);
+      if(v.id !== artifactId){
+        const revertBtn = document.createElement('button');
+        revertBtn.className = 'mini';
+        revertBtn.textContent = 'Revert to v' + v.version_no;
+        revertBtn.onclick = async () => {
+          const rr = await fetch('/artifact/'+v.id+'/revert', {method:'POST'});
+          const rd = await rr.json();
+          if(rd.ok){ await openDynEditModal(rd.artifact_id); await loadCards(true); }
+        };
+        strip.appendChild(revertBtn);
+      }
+    });
+  } catch(e) {}
+}
+
 function imgFallback(el){
   // A 404 here is often transient - the dashboard can request an asset while the
   // pipeline is still writing it. The dirty check means the card won't re-render on
@@ -560,6 +704,7 @@ function renderCards(data){
         <button class="btn-a" onclick="decide('${a.ad_id}','approve',${angleArg})">Approve</button>
         <button class="btn-r" onclick="openRejectModal('${a.ad_id}',${angleArg})">Reject</button>
         <button style="flex:0 0 auto;background:#3b3b3b;color:#fff;" onclick="openEditModal('${a.ad_id}',${angleArg})">Edit</button>
+        ${a.id ? `<button style="flex:0 0 auto;background:#6b4f9e;color:#fff;" onclick="openDynEditModal(${a.id})">Edit (targeted)</button>` : ''}
       </div></div>`;
   }).join('');
 }
@@ -1200,6 +1345,18 @@ document.addEventListener('focusout', e=>{
       <button class="mini" onclick="closeEditModal()">Cancel</button>
       <button class="mini" id="aeCopyBtn" onclick="modalEditCopy()">Revise Copy</button>
       <button class="run" id="aeImgBtn" onclick="modalEditImage()">Regenerate Image</button>
+    </div>
+  </div>
+</div>
+<div class="modal-overlay" id="dynEditModal" onclick="if(event.target===this)closeDynEditModal()">
+  <div class="modal dyn-modal">
+    <h3>Edit Draft (targeted)</h3>
+    <img id="dynEditImg" src="" />
+    <div id="dynVersionStrip" class="dyn-version-strip"></div>
+    <div id="dynEditControls"></div>
+    <div id="dynEditStatus" style="margin-top:12px;font-size:13px;color:#777;"></div>
+    <div class="modal-actions">
+      <button class="mini" onclick="closeDynEditModal()">Close</button>
     </div>
   </div>
 </div>

@@ -242,7 +242,11 @@ def init_artifacts():
                 critic_findings JSONB DEFAULT '[]',
                 format_flag TEXT DEFAULT '',
                 product_override_note TEXT DEFAULT '',
-                review_status TEXT DEFAULT 'ok'
+                review_status TEXT DEFAULT 'ok',
+                parent_artifact_id INTEGER REFERENCES artifacts(id) ON DELETE SET NULL,
+                root_artifact_id INTEGER,
+                version_no INTEGER DEFAULT 1,
+                edit_event_id INTEGER
             )
         """)
         # Self-migrating: unlike angle_id/text_in_image/category before it (which each
@@ -301,6 +305,78 @@ def init_artifacts():
         # to 'ok' - the 4 Aug schema gap (a column present in CREATE TABLE but never
         # added via ALTER, so unreproducible against a fresh DB) must not repeat here.
         cur.execute("ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS review_status TEXT DEFAULT 'ok'")
+        # parent_artifact_id/root_artifact_id/version_no/edit_event_id (Dynamic Edit System,
+        # 2026-08-14): lineage for the targeted-edit engine (src/edit_capability.py,
+        # POST /artifact/{id}/edit) - an edit NEVER mutates the row it edits, it inserts a
+        # NEW artifact row and links back to its source. parent_artifact_id is the
+        # immediate predecessor (NULL for a v1/first-generation row); root_artifact_id is
+        # the very first row in the lineage - left NULL for a v1 row itself (convention:
+        # NULL means "this row IS its own root", read via effective_root_id() below, so a
+        # v1 insert never needs a chicken-and-egg self-referential UPDATE after the INSERT
+        # returns its own new id). version_no starts at 1 and increments once per edit.
+        # ON DELETE SET NULL (not the Postgres default NO ACTION): pipeline.save_artifact's
+        # existing FORCE_REPROCESS regenerate path DELETEs the old row for an (ad_id,
+        # angle_id) pair before re-inserting - without SET NULL, regenerating an ad that has
+        # ever been edited would raise a ForeignKeyViolation and crash the run, since child
+        # edit rows' parent_artifact_id would still point at the row being deleted.
+        # edit_event_id has no FK here (edit_events.result_artifact_id already references
+        # this row the other way) - it's a convenience pointer, not an integrity constraint.
+        cur.execute("ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS parent_artifact_id INTEGER REFERENCES artifacts(id) ON DELETE SET NULL")
+        cur.execute("ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS root_artifact_id INTEGER")
+        cur.execute("ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS version_no INTEGER DEFAULT 1")
+        cur.execute("ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS edit_event_id INTEGER")
+        conn.commit()
+
+
+def init_edit_events():
+    """Dynamic Edit System (2026-08-14) audit log - one row per targeted-edit attempt,
+    control path only (entry_source='chat' is a reserved value for a future chat
+    interpreter, out of scope for this build - never written today). Deliberately a
+    SEPARATE table from artifacts, not new artifact columns: an edit can be rejected
+    (compliance/age-floor/no-matching-control) without ever producing a new artifact row,
+    and this table is the only place that attempt is recorded at all.
+
+    source_artifact_id/result_artifact_id reference artifacts(id) - ON DELETE SET NULL for
+    the same regenerate-collision reason as artifacts.parent_artifact_id above. result_
+    artifact_id is NULL until (and unless) the edit succeeds and a new artifact row is
+    created; outcome carries the row's disposition either way ('pending' immediately after
+    a successful image call awaiting review, 'approved'/'rejected'/'superseded' set later
+    by review action - not yet built here, ok to sit at 'pending' until then).
+
+    original_value/new_value are the resolved field values (never a raw instruction) -
+    the CORE RULE this whole system exists to enforce: a stored prompt is a lookup for
+    values, never prose pasted into the edit call, so what's recorded here must be the
+    field-level before/after, not a copy of any prompt text.
+
+    scope JSONB carries per-edit structural context that doesn't deserve its own column
+    (e.g. which scene_elements entry, an essential-removal warning, a clamp note) -
+    open-ended by design, unlike the fixed target/attribute/operation columns.
+
+    drift_flag is a placeholder for the (out-of-scope, not built) learning layer's future
+    post-hoc drift detector - always NULL/false from this build, never computed here."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS edit_events (
+                id                 SERIAL PRIMARY KEY,
+                source_artifact_id INTEGER REFERENCES artifacts(id) ON DELETE SET NULL,
+                result_artifact_id INTEGER REFERENCES artifacts(id) ON DELETE SET NULL,
+                competitor_ad_id   TEXT,
+                format             TEXT,
+                angle_id           INTEGER,
+                target             TEXT,
+                attribute          TEXT,
+                operation          TEXT,
+                original_value     TEXT,
+                new_value          TEXT,
+                scope              JSONB DEFAULT '{}',
+                entry_source       TEXT DEFAULT 'control',
+                raw_instruction    TEXT DEFAULT '',
+                drift_flag         BOOLEAN DEFAULT false,
+                outcome            TEXT DEFAULT 'pending',
+                reject_reason      TEXT DEFAULT '',
+                created_at         TIMESTAMPTZ DEFAULT now()
+            )
+        """)
         conn.commit()
 
 
@@ -308,7 +384,8 @@ def save_artifact(ad_id, page_name, image_path, blueprint, generated_copy, draft
                    image_prompt="", copy_prompt="", model_info="", angle_id=None, text_in_image=False,
                    operator_instruction="", format_flag="", product_override_note="", regenerate=None,
                    include_product=None, retheme_colours=None, realism=None, body_area=None,
-                   offer_text=None, product_id=None, element_provenance=None):
+                   offer_text=None, product_id=None, element_provenance=None,
+                   parent_artifact_id=None, root_artifact_id=None, version_no=1, edit_event_id=None):
     """Persist all artifacts for one (ad_id, angle_id) pair with a timestamp. Skips if that
     exact pair is already stored. angle_id=None reproduces the pre-angle behaviour exactly -
     one artifact per ad_id. A different angle_id for an already-processed ad is a distinct
@@ -349,7 +426,31 @@ def save_artifact(ad_id, page_name, image_path, blueprint, generated_copy, draft
     actually took for THIS generation, computed by process_ad from the blueprint's own
     fields (never a fixed value, never keyed off ad_id/competitor/page). None (a caller
     that doesn't pass it) stores '{}', read back as "nothing recorded" by any future
-    reader, never guessed at."""
+    reader, never guessed at.
+
+    parent_artifact_id/root_artifact_id/version_no/edit_event_id (Dynamic Edit System,
+    2026-08-14): lineage columns. Every pre-existing caller (the normal generation
+    pipeline) leaves these at their defaults - None/None/1/None, a plain v1 row with no
+    edit history - so this signature change is invisible to every call site until
+    updated. The targeted-edit engine (src/edit_capability.py's caller in dashboard.py)
+    is the only code that passes these explicitly, via insert_edit_artifact below, which
+    calls this same function so the CRITICAL requirement holds in one place: any new
+    column added to artifacts' INSERT list here is automatically present on an edit-
+    created row too, never a second INSERT list to keep in sync.
+
+    BUG FOUND LIVE 2026-08-14 and fixed here: this function's own (ad_id, angle_id)
+    dedupe-skip gate (below) silently SKIPPED every edit-created row, because an edit
+    reuses the SAME ad_id/angle_id as the row it edited - "SELECT 1 ... WHERE ad_id=...
+    AND angle_id IS NOT DISTINCT FROM ..." always found the source row itself already
+    there and returned None without inserting anything. The Gemini call still ran, the
+    new PNG still got written to disk, edit_events still got logged - only the new
+    artifacts row silently never existed, surfacing as `artifact_id: null` in the API
+    response with a 200 status. insert_edit_artifact below now calls
+    `_insert_artifact_row` directly, bypassing this gate and the regenerate-DELETE
+    branch entirely - an edit must ALWAYS create a new row unconditionally, regardless
+    of how many existing rows already share that (ad_id, angle_id) pair; the
+    dedupe-skip/regenerate-delete logic only ever made sense for the normal generation
+    pipeline's OWN callers, never for an edit."""
     effective_regenerate = FORCE_REPROCESS if regenerate is None else regenerate
     with get_conn() as conn, conn.cursor() as cur:
         if effective_regenerate:
@@ -358,21 +459,80 @@ def save_artifact(ad_id, page_name, image_path, blueprint, generated_copy, draft
             cur.execute("SELECT 1 FROM artifacts WHERE ad_id = %s AND angle_id IS NOT DISTINCT FROM %s", (ad_id, angle_id))
             if cur.fetchone() is not None:
                 return
-        cur.execute(
-            """INSERT INTO artifacts
-               (ad_id, page_name, image_path, blueprint, generated_copy, draft_image, metadata,
-                image_prompt, copy_prompt, model_info, angle_id, text_in_image, operator_instruction,
-                format_flag, product_override_note, include_product, retheme_colours, realism,
-                body_area, offer_text, product_id, element_provenance)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-            (ad_id, page_name, image_path,
-             _json.dumps(blueprint), _json.dumps(generated_copy),
-             draft_image, _json.dumps(metadata), image_prompt, copy_prompt, model_info,
-             angle_id, text_in_image, operator_instruction or "", format_flag or "",
-             product_override_note or "", include_product, retheme_colours, realism,
-             body_area, offer_text, product_id, _json.dumps(element_provenance or {})),
+        # Same cursor, same transaction as the DELETE/check above - a regenerate's
+        # DELETE and its replacement INSERT must commit together atomically, exactly as
+        # before this refactor (see _insert_artifact_row_on_cursor's own docstring for
+        # why the INSERT itself is now a shared helper).
+        new_id = _insert_artifact_row_on_cursor(
+            cur, ad_id, page_name, image_path, blueprint, generated_copy, draft_image, metadata,
+            image_prompt=image_prompt, copy_prompt=copy_prompt, model_info=model_info,
+            angle_id=angle_id, text_in_image=text_in_image, operator_instruction=operator_instruction,
+            format_flag=format_flag, product_override_note=product_override_note,
+            include_product=include_product, retheme_colours=retheme_colours, realism=realism,
+            body_area=body_area, offer_text=offer_text, product_id=product_id,
+            element_provenance=element_provenance, parent_artifact_id=parent_artifact_id,
+            root_artifact_id=root_artifact_id, version_no=version_no, edit_event_id=edit_event_id,
         )
         conn.commit()
+        return new_id
+
+
+def _insert_artifact_row_on_cursor(cur, ad_id, page_name, image_path, blueprint, generated_copy, draft_image, metadata,
+                                    image_prompt="", copy_prompt="", model_info="", angle_id=None, text_in_image=False,
+                                    operator_instruction="", format_flag="", product_override_note="",
+                                    include_product=None, retheme_colours=None, realism=None, body_area=None,
+                                    offer_text=None, product_id=None, element_provenance=None,
+                                    parent_artifact_id=None, root_artifact_id=None, version_no=1, edit_event_id=None):
+    """The raw INSERT, taking an already-open cursor rather than opening its own
+    connection - so save_artifact's DELETE-then-INSERT (regenerate path) stays ONE
+    atomic transaction, not two, while insert_edit_artifact (which needs no gating at
+    all - see save_artifact's own docstring on the bug this fixes) can still open its
+    own connection and call straight through. Exactly one column list either way, per
+    the CRITICAL requirement - no dedupe-skip check and no DELETE happen in here."""
+    cur.execute(
+        """INSERT INTO artifacts
+           (ad_id, page_name, image_path, blueprint, generated_copy, draft_image, metadata,
+            image_prompt, copy_prompt, model_info, angle_id, text_in_image, operator_instruction,
+            format_flag, product_override_note, include_product, retheme_colours, realism,
+            body_area, offer_text, product_id, element_provenance,
+            parent_artifact_id, root_artifact_id, version_no, edit_event_id)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+           RETURNING id""",
+        (ad_id, page_name, image_path,
+         _json.dumps(blueprint), _json.dumps(generated_copy),
+         draft_image, _json.dumps(metadata), image_prompt, copy_prompt, model_info,
+         angle_id, text_in_image, operator_instruction or "", format_flag or "",
+         product_override_note or "", include_product, retheme_colours, realism,
+         body_area, offer_text, product_id, _json.dumps(element_provenance or {}),
+         parent_artifact_id, root_artifact_id, version_no, edit_event_id),
+    )
+    return cur.fetchone()[0]
+
+
+def insert_artifact_row_unconditional(ad_id, page_name, image_path, blueprint, generated_copy, draft_image, metadata,
+                                       image_prompt="", copy_prompt="", model_info="", angle_id=None, text_in_image=False,
+                                       operator_instruction="", format_flag="", product_override_note="",
+                                       include_product=None, retheme_colours=None, realism=None, body_area=None,
+                                       offer_text=None, product_id=None, element_provenance=None,
+                                       parent_artifact_id=None, root_artifact_id=None, version_no=1, edit_event_id=None):
+    """Opens its own connection and inserts a new artifacts row UNCONDITIONALLY - no
+    (ad_id, angle_id) dedupe-skip check, no regenerate-DELETE. insert_edit_artifact
+    below is the only caller: an edit must always create a new row regardless of how
+    many rows already share that ad_id/angle_id pair (see save_artifact's docstring for
+    the live bug this exists to avoid reintroducing)."""
+    with get_conn() as conn, conn.cursor() as cur:
+        new_id = _insert_artifact_row_on_cursor(
+            cur, ad_id, page_name, image_path, blueprint, generated_copy, draft_image, metadata,
+            image_prompt=image_prompt, copy_prompt=copy_prompt, model_info=model_info,
+            angle_id=angle_id, text_in_image=text_in_image, operator_instruction=operator_instruction,
+            format_flag=format_flag, product_override_note=product_override_note,
+            include_product=include_product, retheme_colours=retheme_colours, realism=realism,
+            body_area=body_area, offer_text=offer_text, product_id=product_id,
+            element_provenance=element_provenance, parent_artifact_id=parent_artifact_id,
+            root_artifact_id=root_artifact_id, version_no=version_no, edit_event_id=edit_event_id,
+        )
+        conn.commit()
+        return new_id
 
 
 def get_artifacts(ad_id=None):
@@ -457,7 +617,7 @@ def get_artifacts_full(limit=50):
     whichever one's decision was recorded most recently."""
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("""
-            SELECT a.ad_id, a.page_name, a.image_path, a.blueprint,
+            SELECT a.id, a.ad_id, a.page_name, a.image_path, a.blueprint,
                    a.generated_copy, a.draft_image, a.metadata, a.created_at,
                    d.decision, a.image_prompt, a.copy_prompt, a.model_info,
                    a.angle_id, a.text_in_image, a.operator_instruction, a.critic_findings,
@@ -472,7 +632,11 @@ def get_artifacts_full(limit=50):
             ORDER BY a.created_at DESC
             LIMIT %s
         """, (limit,))
-        cols = ["ad_id", "page_name", "image_path", "blueprint", "generated_copy",
+        # "id" (Dynamic Edit System, 2026-08-14) is this row's own PK - added so the
+        # dashboard can key GET/POST /artifact/{id}/edit-capabilities|/edit requests
+        # correctly. Every existing reader of this dict already ignores unknown keys,
+        # so this is additive - nothing that reads ad_id/angle_id today is affected.
+        cols = ["id", "ad_id", "page_name", "image_path", "blueprint", "generated_copy",
                 "draft_image", "metadata", "created_at", "decision",
                 "image_prompt", "copy_prompt", "model_info",
                 "angle_id", "text_in_image", "operator_instruction", "critic_findings",
@@ -1161,6 +1325,151 @@ def get_artifact(ad_id, angle_id=None):
                 "body_area": r[17], "offer_text": r[18], "product_id": r[19],
                 "element_provenance": elem_prov, "critic_findings": crit_findings,
                 "review_status": r[22] or "ok"}
+
+
+def get_artifact_by_id(artifact_id):
+    """Return one artifact row by its own PK `id` - not by (ad_id, angle_id), the key
+    every other artifact reader here uses. The Dynamic Edit System (2026-08-14) needs
+    this because artifacts.ad_id has no unique constraint (CLAUDE.md) and, once edits
+    exist, several DISTINCT rows share the same (ad_id, angle_id) - get_artifact's own
+    ORDER BY id DESC LIMIT 1 would silently return the newest one regardless of which
+    specific version an edit request named. Returns None if no row has this id.
+
+    effective_root_id is computed here, not stored raw: root_artifact_id is NULL on a
+    v1 row by convention (see init_artifacts' own comment) - callers need "this row's
+    own id" in that case, not None, to build a lineage chain."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, ad_id, page_name, blueprint, generated_copy, draft_image, angle_id, text_in_image, "
+            "image_path, metadata, image_prompt, copy_prompt, model_info, format_flag, product_override_note, "
+            "include_product, retheme_colours, realism, body_area, offer_text, product_id, element_provenance, "
+            "critic_findings, review_status, parent_artifact_id, root_artifact_id, version_no, edit_event_id "
+            "FROM artifacts WHERE id=%s",
+            (artifact_id,),
+        )
+        r = cur.fetchone()
+        if r is None:
+            return None
+        import json as _j
+        bp = r[3] if isinstance(r[3], dict) else _j.loads(r[3] or "{}")
+        cp = r[4] if isinstance(r[4], dict) else _j.loads(r[4] or "{}")
+        meta = r[9] if isinstance(r[9], dict) else _j.loads(r[9] or "{}")
+        elem_prov = r[21] if isinstance(r[21], dict) else _j.loads(r[21] or "{}")
+        crit_findings = r[22] if isinstance(r[22], list) else _j.loads(r[22] or "[]")
+        return {"id": r[0], "ad_id": r[1], "page_name": r[2], "blueprint": bp, "generated_copy": cp,
+                "draft_image": r[5], "angle_id": r[6], "text_in_image": r[7],
+                "image_path": r[8] or "", "metadata": meta, "image_prompt": r[10] or "",
+                "copy_prompt": r[11] or "", "model_info": r[12] or "",
+                "format_flag": r[13] or "", "product_override_note": r[14] or "",
+                "include_product": r[15], "retheme_colours": r[16], "realism": r[17],
+                "body_area": r[18], "offer_text": r[19], "product_id": r[20],
+                "element_provenance": elem_prov, "critic_findings": crit_findings,
+                "review_status": r[23] or "ok",
+                "parent_artifact_id": r[24], "root_artifact_id": r[25] if r[25] is not None else r[0],
+                "version_no": r[26] or 1, "edit_event_id": r[27]}
+
+
+def insert_edit_artifact(source, new_draft_image, new_image_path, new_generated_copy,
+                          new_image_prompt, new_offer_text, edit_event_id):
+    """Insert the NEW artifact row a successful targeted edit produces - the source row
+    (`source`, a get_artifact_by_id dict) is NEVER mutated, matching the Dynamic Edit
+    System's core rule that edits create a new row. Copies every field the source row
+    carries (blueprint, angle_id, product/realism/body_area/retheme_colours/
+    include_product, competitor page_name, text_in_image, ad_id) forward unchanged
+    except the fields the edit actually changed (draft image, generated_copy, image_prompt,
+    offer_text) - a targeted edit changes ONE thing, so every other stored field must
+    read back exactly as the source row's did.
+
+    version_no = source's own version_no + 1; parent_artifact_id = source['id'];
+    root_artifact_id = source's effective root (get_artifact_by_id already resolves NULL
+    to the source's own id, so a first-ever edit off a v1 row correctly roots at that v1
+    row's id, not at NULL).
+
+    Calls insert_artifact_row_unconditional, NOT save_artifact - a real live bug (found
+    2026-08-14 verifying this against a real artifact): save_artifact's own (ad_id,
+    angle_id) dedupe-skip gate always found the SOURCE row itself already there (an
+    edit reuses the same ad_id/angle_id) and silently skipped the insert entirely,
+    returning None - the Gemini call and edit_events log both succeeded while the new
+    artifacts row silently never existed. insert_artifact_row_unconditional shares the
+    same single INSERT column list (via _insert_artifact_row_on_cursor) without going
+    through any dedupe/regenerate gating, since an edit must always create a new row
+    regardless of how many rows already share that ad_id/angle_id."""
+    return insert_artifact_row_unconditional(
+        ad_id=source["ad_id"], page_name=source["page_name"], image_path=new_image_path,
+        blueprint=source["blueprint"], generated_copy=new_generated_copy,
+        draft_image=new_draft_image, metadata=source.get("metadata") or {},
+        image_prompt=new_image_prompt, copy_prompt=source.get("copy_prompt") or "",
+        model_info=source.get("model_info") or "", angle_id=source.get("angle_id"),
+        text_in_image=bool(source.get("text_in_image")),
+        operator_instruction=source.get("operator_instruction") or "",
+        format_flag=source.get("format_flag") or "",
+        product_override_note=source.get("product_override_note") or "",
+        include_product=source.get("include_product"), retheme_colours=source.get("retheme_colours"),
+        realism=source.get("realism"), body_area=source.get("body_area"),
+        offer_text=new_offer_text, product_id=source.get("product_id"),
+        element_provenance=source.get("element_provenance"),
+        parent_artifact_id=source["id"], root_artifact_id=source["root_artifact_id"],
+        version_no=(source.get("version_no") or 1) + 1, edit_event_id=edit_event_id,
+    )
+
+
+def insert_edit_event(source_artifact_id, competitor_ad_id, format, angle_id, target, attribute,
+                       operation, original_value, new_value, scope=None, entry_source="control",
+                       raw_instruction="", outcome="pending", reject_reason=""):
+    """Log one targeted-edit attempt, control path only (entry_source='control' is the
+    only value this build ever writes - 'chat' is reserved for the out-of-scope chat
+    interpreter). Called BEFORE the edit succeeds or fails, so even a rejected edit
+    (no matching control, failed compliance, age-floor violation) is recorded with
+    outcome='rejected' and reject_reason set - result_artifact_id stays NULL for those,
+    since no new artifact row exists to point at. Returns the new edit_events row id."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO edit_events
+               (source_artifact_id, competitor_ad_id, format, angle_id, target, attribute,
+                operation, original_value, new_value, scope, entry_source, raw_instruction,
+                outcome, reject_reason)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+               RETURNING id""",
+            (source_artifact_id, competitor_ad_id, format, angle_id, target, attribute,
+             operation, str(original_value) if original_value is not None else None,
+             str(new_value) if new_value is not None else None,
+             _json.dumps(scope or {}), entry_source, raw_instruction, outcome, reject_reason),
+        )
+        new_id = cur.fetchone()[0]
+        conn.commit()
+        return new_id
+
+
+def update_edit_event_result(edit_event_id, result_artifact_id, outcome="pending", reject_reason=""):
+    """Attach the resulting new artifact row (or a final rejection) to an already-logged
+    edit_events row - a two-step write (log the attempt, then record its outcome) rather
+    than one INSERT, because the result_artifact_id doesn't exist until AFTER the Gemini
+    call and the new artifacts INSERT both succeed."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "UPDATE edit_events SET result_artifact_id=%s, outcome=%s, reject_reason=%s WHERE id=%s",
+            (result_artifact_id, outcome, reject_reason, edit_event_id),
+        )
+        conn.commit()
+
+
+def get_artifact_lineage(root_artifact_id):
+    """Every artifact row in ONE edit lineage - the root row itself (whose OWN
+    root_artifact_id is NULL by convention, see init_artifacts' comment - it is never
+    an edit result) plus every row whose root_artifact_id equals it, ordered by
+    version_no. Powers the Edit modal's version strip (v1/v2/v3...) - a pure read, no
+    row here is ever mutated."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, version_no, draft_image, created_at FROM artifacts "
+            "WHERE id = %s OR root_artifact_id = %s ORDER BY version_no, id",
+            (root_artifact_id, root_artifact_id),
+        )
+        return [
+            {"id": r[0], "version_no": r[1] or 1, "draft_image": r[2] or "",
+             "created_at": r[3].isoformat() if r[3] else None}
+            for r in cur.fetchall()
+        ]
 
 
 def set_suggested_name(competitor_id, suggested):
