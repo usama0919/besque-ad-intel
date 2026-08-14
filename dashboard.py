@@ -107,6 +107,7 @@ def api_artifacts():
         angle_id = r.get("angle_id")
         angle = angles_by_id.get(angle_id) if angle_id else None
         out.append({
+            "id": r["id"],
             "ad_id": r["ad_id"],
             "page_name": r.get("page_name", ""),
             "original_image": ("/assets/" + os.path.basename(img.replace("\\", "/"))) if img else "",
@@ -143,6 +144,11 @@ def api_artifacts():
             # HIGH-confidence. Drives dashboard.html's Failed Review badge directly;
             # the template never re-derives this from critic_findings/confidence itself.
             "review_status": r.get("review_status") or "ok",
+            # Latest-version-per-lineage (2026-08-14): get_artifacts_full now collapses
+            # each edit lineage to its highest-version_no row, so "id"/"draft_image"
+            # above are already the LATEST version, not the root - this is only the
+            # badge telling the reviewer which version they're looking at.
+            "version_no": r.get("version_no") or 1,
         })
     return JSONResponse(out)
 
@@ -618,7 +624,7 @@ async def api_apply_edit(artifact_id: int, request: Request):
 
     new_image_prompt = f"[EDIT of artifact {artifact_id}] {instruction}"
     new_artifact_id = dedupe.insert_edit_artifact(
-        source=source, new_draft_image=filename, new_image_path=filename,
+        source=source, new_draft_image=filename,
         new_generated_copy=new_generated_copy, new_image_prompt=new_image_prompt,
         new_offer_text=new_offer_text, edit_event_id=edit_event_id,
     )

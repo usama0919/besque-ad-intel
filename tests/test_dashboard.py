@@ -517,6 +517,68 @@ def test_api_artifacts_format_flag_empty_string_when_no_mismatch(monkeypatch):
             conn.commit()
 
 
+def test_api_artifacts_returns_id(monkeypatch):
+    from src import dedupe
+    from fastapi.testclient import TestClient
+    import uuid
+
+    dedupe.init_artifacts()
+    ad_id = f"ART_{uuid.uuid4().hex[:8]}"
+    dedupe.save_artifact(
+        ad_id=ad_id, page_name="TestBrand", image_path="assets/x.jpg",
+        blueprint={"format": "hero"}, generated_copy={"headline": "H"},
+        draft_image="assets/x_draft.png",
+        metadata={"cta": "Shop", "destination_url": "http://x"},
+    )
+    try:
+        client = TestClient(dashboard.app)
+        r = client.get("/api/artifacts")
+        assert r.status_code == 200
+        body = r.json()
+        assert len(body) > 0
+        for row in body:
+            assert isinstance(row["id"], int)
+    finally:
+        with dedupe.get_conn() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM artifacts WHERE ad_id=%s", (ad_id,))
+            conn.commit()
+
+
+def test_api_artifacts_key_contract(monkeypatch):
+    from src import dedupe
+    from fastapi.testclient import TestClient
+    import uuid
+
+    dedupe.init_artifacts()
+    ad_id = f"ART_{uuid.uuid4().hex[:8]}"
+    dedupe.save_artifact(
+        ad_id=ad_id, page_name="TestBrand", image_path="assets/x.jpg",
+        blueprint={"format": "hero"}, generated_copy={"headline": "H"},
+        draft_image="assets/x_draft.png",
+        metadata={"cta": "Shop", "destination_url": "http://x"},
+    )
+    try:
+        client = TestClient(dashboard.app)
+        r = client.get("/api/artifacts")
+        assert r.status_code == 200
+        body = r.json()
+        # "version_no" added deliberately (2026-08-14, latest-version-per-lineage card
+        # fix) - a literal addition to this hardcoded set, never derived from the
+        # endpoint or from any constant in dashboard.py.
+        expected_keys = {
+            "id", "ad_id", "page_name", "original_image", "draft_image",
+            "blueprint", "copy", "image_prompt", "copy_prompt", "model_info",
+            "decision", "created_at", "angle_id", "angle_name", "text_in_image",
+            "operator_instruction", "critic_findings", "format_flag",
+            "product_override_note", "review_status", "version_no",
+        }
+        assert set(body[0]) == expected_keys
+    finally:
+        with dedupe.get_conn() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM artifacts WHERE ad_id=%s", (ad_id,))
+            conn.commit()
+
+
 def test_put_competitor_category_only_preserves_page_id(monkeypatch):
     import uuid
     from src import dedupe

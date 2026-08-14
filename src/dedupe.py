@@ -610,38 +610,60 @@ def delete_competitor(competitor_id: int) -> None:
 # ---- Dashboard read: full artifact data including images ----
 
 def get_artifacts_full(limit=50):
-    """Return full artifact records for the dashboard, newest first.
-    Returns list of dicts with everything needed to display. The LATERAL join now matches
-    on angle_id too (IS NOT DISTINCT FROM, so NULL-angle artifacts still match NULL-angle
-    decisions) - without that, two angle-variant rows for the same ad_id would both show
-    whichever one's decision was recorded most recently."""
+    """Return full artifact records for the dashboard, newest first - ONE row per edit
+    lineage, not one per version. Returns list of dicts with everything needed to display.
+
+    Collapsed to the latest version per lineage (2026-08-14, Dynamic Edit System): before
+    this, every edit created a new `artifacts` row (by design - edits never mutate the
+    source row), and this function returned ALL of them, so a lineage with N edits showed
+    N separate cards, with the ORIGINAL (v1) row's own draft_image never advancing past
+    its first generation. The `latest` CTE below picks, per COALESCE(root_artifact_id, id)
+    (the same "root_artifact_id is NULL on a v1 row by convention" rule
+    get_artifact_by_id/get_artifact_lineage already use), the single row with the highest
+    version_no - resolved in SQL via a window function, not a query per card. LIMIT is
+    applied AFTER collapsing, so it bounds the number of LINEAGES returned, not raw rows.
+
+    The LATERAL join now matches on angle_id too (IS NOT DISTINCT FROM, so NULL-angle
+    artifacts still match NULL-angle decisions) - without that, two angle-variant rows for
+    the same ad_id would both show whichever one's decision was recorded most recently."""
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("""
-            SELECT a.id, a.ad_id, a.page_name, a.image_path, a.blueprint,
-                   a.generated_copy, a.draft_image, a.metadata, a.created_at,
-                   d.decision, a.image_prompt, a.copy_prompt, a.model_info,
-                   a.angle_id, a.text_in_image, a.operator_instruction, a.critic_findings,
-                   a.format_flag, a.product_override_note, a.element_provenance,
-                   a.review_status
-            FROM artifacts a
+            WITH latest AS (
+                SELECT a.*,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY COALESCE(a.root_artifact_id, a.id)
+                           ORDER BY COALESCE(a.version_no, 1) DESC, a.id DESC
+                       ) AS rn
+                FROM artifacts a
+            )
+            SELECT l.id, l.ad_id, l.page_name, l.image_path, l.blueprint,
+                   l.generated_copy, l.draft_image, l.metadata, l.created_at,
+                   d.decision, l.image_prompt, l.copy_prompt, l.model_info,
+                   l.angle_id, l.text_in_image, l.operator_instruction, l.critic_findings,
+                   l.format_flag, l.product_override_note, l.element_provenance,
+                   l.review_status, l.version_no
+            FROM latest l
             LEFT JOIN LATERAL (
                 SELECT decision FROM review_decisions r
-                WHERE r.ad_id = a.ad_id AND r.angle_id IS NOT DISTINCT FROM a.angle_id
+                WHERE r.ad_id = l.ad_id AND r.angle_id IS NOT DISTINCT FROM l.angle_id
                 ORDER BY decided_at DESC LIMIT 1
             ) d ON true
-            ORDER BY a.created_at DESC
+            WHERE l.rn = 1
+            ORDER BY l.created_at DESC
             LIMIT %s
         """, (limit,))
         # "id" (Dynamic Edit System, 2026-08-14) is this row's own PK - added so the
         # dashboard can key GET/POST /artifact/{id}/edit-capabilities|/edit requests
         # correctly. Every existing reader of this dict already ignores unknown keys,
         # so this is additive - nothing that reads ad_id/angle_id today is affected.
+        # "version_no" (2026-08-14, same change as the latest-version collapse above) -
+        # which version of its lineage this row is, so the card can badge it.
         cols = ["id", "ad_id", "page_name", "image_path", "blueprint", "generated_copy",
                 "draft_image", "metadata", "created_at", "decision",
                 "image_prompt", "copy_prompt", "model_info",
                 "angle_id", "text_in_image", "operator_instruction", "critic_findings",
                 "format_flag", "product_override_note", "element_provenance",
-                "review_status"]
+                "review_status", "version_no"]
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
@@ -1374,7 +1396,7 @@ def get_artifact_by_id(artifact_id):
                 "version_no": r[26] or 1, "edit_event_id": r[27]}
 
 
-def insert_edit_artifact(source, new_draft_image, new_image_path, new_generated_copy,
+def insert_edit_artifact(source, new_draft_image, new_generated_copy,
                           new_image_prompt, new_offer_text, edit_event_id):
     """Insert the NEW artifact row a successful targeted edit produces - the source row
     (`source`, a get_artifact_by_id dict) is NEVER mutated, matching the Dynamic Edit
@@ -1384,6 +1406,14 @@ def insert_edit_artifact(source, new_draft_image, new_image_path, new_generated_
     except the fields the edit actually changed (draft image, generated_copy, image_prompt,
     offer_text) - a targeted edit changes ONE thing, so every other stored field must
     read back exactly as the source row's did.
+
+    image_path (the COMPETITOR reference image) is always inherited from source - never
+    a caller-supplied value. Found live (2026-08-14, artifact 1601614774728617 v4): the
+    caller was passing the newly-generated EDITED DRAFT's own filename as image_path too
+    (the same filename it passed as new_draft_image), so image_path and draft_image were
+    identical on every edited row and /api/artifacts rendered the same picture in both
+    the competitor and Besque columns. Only draft_image is meant to change across a
+    version chain - image_path never does, on any version.
 
     version_no = source's own version_no + 1; parent_artifact_id = source['id'];
     root_artifact_id = source's effective root (get_artifact_by_id already resolves NULL
@@ -1400,7 +1430,7 @@ def insert_edit_artifact(source, new_draft_image, new_image_path, new_generated_
     through any dedupe/regenerate gating, since an edit must always create a new row
     regardless of how many rows already share that ad_id/angle_id."""
     return insert_artifact_row_unconditional(
-        ad_id=source["ad_id"], page_name=source["page_name"], image_path=new_image_path,
+        ad_id=source["ad_id"], page_name=source["page_name"], image_path=source.get("image_path") or "",
         blueprint=source["blueprint"], generated_copy=new_generated_copy,
         draft_image=new_draft_image, metadata=source.get("metadata") or {},
         image_prompt=new_image_prompt, copy_prompt=source.get("copy_prompt") or "",

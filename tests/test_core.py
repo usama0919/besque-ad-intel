@@ -416,6 +416,44 @@ def test_save_artifact_product_override_note_defaults_to_empty_string():
             conn.commit()
 
 
+# ---- Dynamic Edit System: insert_edit_artifact must never overwrite image_path ----
+
+def test_insert_edit_artifact_inherits_image_path_from_parent_never_the_new_draft():
+    """Bug found live 2026-08-14 (artifact 1601614774728617, version_no 4): the caller
+    was passing the newly-generated EDITED DRAFT's own filename as image_path too, so
+    image_path (the competitor reference) and draft_image (the Besque draft) ended up
+    identical on every edited row, and /api/artifacts rendered the same picture in both
+    the competitor and Besque columns. image_path must be inherited from the parent row
+    unchanged on every edit - only draft_image is allowed to differ across a version
+    chain."""
+    from src import dedupe
+    import uuid
+    dedupe.init_artifacts()
+    ad_id = f"ART_{uuid.uuid4().hex[:8]}"
+    try:
+        root_id = dedupe.save_artifact(
+            ad_id=ad_id, page_name="TestBrand", image_path="assets/competitor_ref.jpg",
+            blueprint={"format": "hero"}, generated_copy={"headline": "H"},
+            draft_image="assets/x_draft_v1.png",
+            metadata={"cta": "Shop", "destination_url": "http://x"},
+        )
+        source = dedupe.get_artifact_by_id(root_id)
+        edit_id = dedupe.insert_edit_artifact(
+            source=source, new_draft_image="assets/x_draft_v2_edit.png",
+            new_generated_copy=source["generated_copy"],
+            new_image_prompt="[EDIT of artifact %d] change headline" % root_id,
+            new_offer_text=source.get("offer_text"), edit_event_id=None,
+        )
+        edited = dedupe.get_artifact_by_id(edit_id)
+        assert edited["image_path"] == source["image_path"] == "assets/competitor_ref.jpg"
+        assert edited["draft_image"] == "assets/x_draft_v2_edit.png"
+        assert edited["draft_image"] != edited["image_path"]
+    finally:
+        with dedupe.get_conn() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM artifacts WHERE ad_id=%s", (ad_id,))
+            conn.commit()
+
+
 def test_get_artifact_returns_angle_id_and_text_in_image():
     """dashboard.py's api_edit_image reads these back to restore the original generation's
     rule-6 mode on edit - get_artifact must actually return them, not just accept angle_id
