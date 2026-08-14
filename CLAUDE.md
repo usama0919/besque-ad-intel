@@ -1596,3 +1596,22 @@ each other while still being wrong about what's in the pixels.
 Application Default Credentials, exactly the class of failure this file's own
 "Operational gotchas" section already names. Re-running `gcloud auth application-
 default login` and restarting uvicorn resolved it; not a code bug.
+
+### OPEN, known weakness: `reference_has_product()` is default-TRUE on absent data, not fail-closed
+`src/generate_image_prompt.py:87` - `return not (product_category_bp == "not_product" or
+layout_detail_bp.get("product_count") == 0)`. This returns True unless the blueprint
+EXPLICITLY says `product_count == 0` or `category == "not_product"` - a blueprint that
+simply has no `layout_detail` at all (missing data) reads exactly the same as one that
+positively confirms a product in frame. That is the opposite of the fail-closed
+principle `edit_capability._product_control` uses for the SAME question on the edit
+path - that predicate requires TWO positive, confirmed signals in agreement
+(`layout_detail.product_count > 0 AND element_provenance.product == "substituted"`)
+before trusting that a product is present, and withholds the control otherwise.
+`reference_has_product` instead assumes presence by default and only backs off on
+explicit negative evidence, which is a materially weaker standard for a value that
+`_edit_mode_instruction`/`build_image_prompt` use to decide SUBSTITUTE vs. ADD (and, as
+of the 2026-08-14 double-product fix above, whether to suppress product_clause's
+placement sentence) on the GENERATION path. Not changed in this session - flagged as a
+known weakness, not fixed. A future fix direction would mirror `_product_control`'s
+own shape: require positive confirmation (a real `product_count`) rather than treating
+"no data either way" as "yes."
