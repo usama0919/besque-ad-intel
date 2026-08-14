@@ -219,6 +219,53 @@ def test_product_control_ignores_include_product_toggle_alone():
     assert find_control(derive_edit_capabilities(artifact), "product", "placement") is None
 
 
+# ---- Product realism control (2026-08-15): re-render treatment only, same fail-closed
+# agreement _product_control requires - product_count > 0 AND element_provenance.
+# product == "substituted" ----
+
+def test_product_realism_control_present_when_count_and_substituted_agree():
+    artifact = _artifact_with(product_count=1, provenance_product="substituted")
+    control = find_control(derive_edit_capabilities(artifact), "product", "realism")
+    assert control is not None
+    assert control["label"] == "Product — Realism"
+    assert control["allowed_ops"] == ["change"]
+
+
+def test_product_realism_control_current_value_reflects_production_style():
+    artifact = _artifact_with(product_count=1, provenance_product="substituted")
+    artifact["blueprint"]["production_style"] = {"style": "illustrated"}
+    control = find_control(derive_edit_capabilities(artifact), "product", "realism")
+    assert control["current_value"] == "illustrated"
+
+
+def test_product_realism_control_current_value_unspecified_when_no_style_recorded():
+    artifact = _artifact_with(product_count=1, provenance_product="substituted")
+    control = find_control(derive_edit_capabilities(artifact), "product", "realism")
+    assert control["current_value"] == "unspecified"
+
+
+def test_product_realism_control_absent_when_provenance_is_added():
+    artifact = _artifact_with(product_count=2, provenance_product="added", include_product=True)
+    assert find_control(derive_edit_capabilities(artifact), "product", "realism") is None
+
+
+def test_product_realism_control_absent_when_count_zero():
+    artifact = _artifact_with(product_count=0, provenance_product="substituted")
+    assert find_control(derive_edit_capabilities(artifact), "product", "realism") is None
+
+
+def test_product_realism_control_absent_when_provenance_missing_entirely():
+    artifact = _artifact_with(product_count=2, provenance_product=None)
+    assert find_control(derive_edit_capabilities(artifact), "product", "realism") is None
+
+
+def test_product_realism_and_placement_controls_coexist_as_distinct_controls():
+    artifact = _artifact_with(product_count=1, provenance_product="substituted")
+    controls = derive_edit_capabilities(artifact)
+    assert find_control(controls, "product", "placement") is not None
+    assert find_control(controls, "product", "realism") is not None
+
+
 def test_headline_present_but_no_text_purpose_structure_is_omitted():
     # Fail-closed rule stated explicitly in the spec: "No copy column value and no
     # matching text_purpose entry -> no Headline control." Here the copy VALUE exists

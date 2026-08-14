@@ -294,6 +294,34 @@ def _product_control(artifact, blueprint):
     }
 
 
+def _product_realism_control(artifact, blueprint):
+    """New control (2026-08-15): re-render the Besque bottle's RENDERING TREATMENT ONLY
+    (flat for illustrated scenes, photographic for photoreal ones) - never shape,
+    dimensions, proportions, label content, or hardware design, which
+    generate_image_prompt.build_product_realism_edit_instruction explicitly holds
+    fixed regardless of what this control changes.
+
+    Same fail-closed agreement _product_control (above) requires - product_count > 0
+    AND element_provenance.product == "substituted" - for the identical reason: this
+    control only makes sense when there's a real, confirmed Besque product in the
+    pixels to re-render, never a guess. Distinct attribute from Product/placement
+    (target="product", attribute="realism" vs. attribute="placement") so both can
+    coexist as separate controls grouped under the same "product" section in the UI."""
+    layout_detail = blueprint.get("layout_detail") or {}
+    count = layout_detail.get("product_count")
+    provenance = (artifact.get("element_provenance") or {}).get("product")
+    if not count or count <= 0 or provenance != "substituted":
+        return None
+    current_style = (blueprint.get("production_style") or {}).get("style") or "unspecified"
+    return {
+        "target": "product", "attribute": "realism", "label": "Product — Realism",
+        "current_value": current_style,
+        "allowed_ops": ["change"],
+        "blueprint_path": "layout_detail.product_count + artifacts.element_provenance.product "
+                          "+ blueprint.production_style.style",
+    }
+
+
 def _background_control(blueprint):
     background_type = (blueprint.get("layout_detail") or {}).get("background_type")
     if not background_type:
@@ -368,6 +396,7 @@ def derive_edit_capabilities(artifact):
         lambda: _cta_control(artifact, blueprint),
         lambda: _offer_control(artifact),
         lambda: _product_control(artifact, blueprint),
+        lambda: _product_realism_control(artifact, blueprint),
         lambda: _background_control(blueprint),
         lambda: _lighting_control(blueprint),
         lambda: _typography_control(blueprint),

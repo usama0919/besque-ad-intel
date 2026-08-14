@@ -470,6 +470,37 @@ def test_check_draft_never_calls_api_a_third_time(monkeypatch):
     assert calls["n"] == 2
 
 
+def test_check_draft_treats_max_tokens_stop_reason_as_its_own_failure_not_a_json_error(monkeypatch, caplog):
+    """2026-08-14 follow-up (live incident ad 2390171264812593, two attempts failing to
+    parse at DIFFERENT character positions): stop_reason=="max_tokens" must be caught
+    BEFORE parsing and logged as a distinct truncation failure, never left to surface as
+    a generic JSONDecodeError. Both attempts here truncate, so the persistent-failure
+    marker is returned, same as any other exhausted-retry case."""
+    class _TruncatedMessage:
+        def __init__(self):
+            self.content = [type("obj", (), {"text": "{\"violations\": [{\"cat"})()]
+            self.stop_reason = "max_tokens"
+            self.usage = type("obj", (), {"output_tokens": 4096, "input_tokens": 500})()
+
+    class _TruncatedMessages:
+        def create(self, **kwargs):
+            return _TruncatedMessage()
+
+    class _TruncatedClient:
+        def __init__(self, *a, **k):
+            self.messages = _TruncatedMessages()
+
+    monkeypatch.setattr(critic.anthropic, "Anthropic", _TruncatedClient)
+    with caplog.at_level("WARNING", logger="output_critic"):
+        result = critic.check_draft(b"fake-bytes", "rules")
+    assert result == critic.CRITIC_CHECK_FAILED_FINDING
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("TRUNCATED" in m and "max_tokens" in m for m in messages)
+    # Never mislabeled as a JSON parse failure - the generic exception-path log line
+    # (which names the exception class) must not have fired for this attempt.
+    assert not any("JSONDecodeError" in m for m in messages)
+
+
 def test_check_draft_never_raises_even_on_malformed_violation_entries(monkeypatch):
     """A violation entry missing "confidence" must not crash the filter - it's simply
     dropped (not high/medium), never a hard failure."""

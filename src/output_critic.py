@@ -32,6 +32,18 @@ CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
 # JSON_ESCAPE_SYSTEM nudge (imported above, not re-typed) rather than a second copy of it.
 MAX_CRITIC_ATTEMPTS = 2
 
+# Raised from 1024 (2026-08-14, live incident ad 2390171264812593): both attempts failed
+# to parse at DIFFERENT character positions (4310, then 3866) - not a single bad token,
+# consistent with truncation. 1024 output tokens is roughly 3000-4500 characters of
+# English prose/JSON, which is exactly the range both failures cut off in. A full
+# multi-violation response (CRITIC_SYSTEM's checklist spans rules 1-11 plus C1-C9, and a
+# real draft can trip several at once, each with its own "category"/"description") can
+# legitimately need more than that - the checklist's own size, not just one violation's
+# text, is what has to fit. 4096 matches deconstruct.py's own max_tokens for a
+# structurally comparable (arguably larger) single-shot JSON response, rather than
+# picking an arbitrary number with no precedent in this codebase.
+CRITIC_MAX_TOKENS = 4096
+
 # Returned instead of None when the critic's response fails to parse even after the retry
 # (2026-08-12, live incident: "output critic failed (JSONDecodeError: Invalid \escape),
 # draft left unflagged" on ad 926730636855002's attempt 2 - a parse failure silently
@@ -544,6 +556,8 @@ def check_draft(image_bytes, brand_rules_text, headline=None, subtext=None, offe
     system = CRITIC_SYSTEM
     last_exc = None
     for attempt in range(1, MAX_CRITIC_ATTEMPTS + 1):
+        message = None
+        raw = None
         try:
             # Client construction INSIDE the try, not before the loop: a real regression
             # caught by test_check_draft_returns_none_on_api_error - a constructor failure
@@ -552,7 +566,7 @@ def check_draft(image_bytes, brand_rules_text, headline=None, subtext=None, offe
             client = anthropic.Anthropic(timeout=60.0, max_retries=1)  # reads ANTHROPIC_API_KEY from env
             message = client.messages.create(
                 model=CLAUDE_MODEL,
-                max_tokens=1024,
+                max_tokens=CRITIC_MAX_TOKENS,
                 system=system,
                 messages=[{
                     "role": "user",
@@ -561,6 +575,23 @@ def check_draft(image_bytes, brand_rules_text, headline=None, subtext=None, offe
                     ],
                 }],
             )
+            # Checked BEFORE parsing, as its own failure mode - a truncated response is
+            # not a JSON error, it's a response that never finished, and treating it as
+            # one mislabels the actual cause (see CRITIC_MAX_TOKENS' own docstring for the
+            # live incident this is checking for). No JSON_ESCAPE_SYSTEM nudge on this
+            # branch - that nudge addresses escaping, not length, and would do nothing
+            # for truncation.
+            if getattr(message, "stop_reason", None) == "max_tokens":
+                usage = getattr(message, "usage", None)
+                log.warning(
+                    "output critic response TRUNCATED at max_tokens=%s (attempt %s/%s) - "
+                    "output_tokens=%s input_tokens=%s - not a JSON parse failure, the "
+                    "response never finished",
+                    CRITIC_MAX_TOKENS, attempt, MAX_CRITIC_ATTEMPTS,
+                    getattr(usage, "output_tokens", "?"), getattr(usage, "input_tokens", "?"),
+                )
+                last_exc = RuntimeError(f"response truncated at max_tokens={CRITIC_MAX_TOKENS}")
+                continue
             raw = message.content[0].text
             data = json_response.extract_json(raw)
             violations = data.get("violations") or []
@@ -569,6 +600,30 @@ def check_draft(image_bytes, brand_rules_text, headline=None, subtext=None, offe
             last_exc = e
             log.warning("output critic failed (attempt %s/%s): %s: %s",
                         attempt, MAX_CRITIC_ATTEMPTS, type(e).__name__, e)
+            # Diagnostic-only (2026-08-14): added after a live incident (ad
+            # 2390171264812593) where both attempts failed to parse - at DIFFERENT
+            # character positions each time - with nothing but the exception message
+            # to go on, no raw text and no stop_reason to tell truncation apart from a
+            # genuine malformed-JSON response. Never changes control flow or what is
+            # returned - mirrors deconstruct._log_parse_failure/generate_copy.
+            # _log_parse_failure's existing pattern for the identical failure class.
+            # message/raw are None when the exception came from the API call itself
+            # (e.g. client construction, network) rather than from parsing a response
+            # that was actually received - guarded so this never raises on top of the
+            # original failure.
+            if message is not None:
+                usage = getattr(message, "usage", None)
+                log.warning(
+                    "output critic stop_reason=%r output_tokens=%s input_tokens=%s",
+                    getattr(message, "stop_reason", "?"),
+                    getattr(usage, "output_tokens", "?"),
+                    getattr(usage, "input_tokens", "?"),
+                )
+            if raw is not None:
+                log.warning("output critic raw_text len=%s chars", len(raw))
+                log.warning("output critic raw_text repr (first 2000): %r", raw[:2000])
+                if len(raw) > 2000:
+                    log.warning("output critic raw_text repr (last 500): %r", raw[-500:])
             if attempt < MAX_CRITIC_ATTEMPTS:
                 system = CRITIC_SYSTEM + "\n\n" + JSON_ESCAPE_SYSTEM
     log.warning(

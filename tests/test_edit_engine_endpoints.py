@@ -103,7 +103,7 @@ def test_edit_endpoint_success_path_creates_new_artifact_and_calls_gemini_with_d
         "outside_pct": None, "scatter_pct": None, "bbox": None})
 
     captured_call = {}
-    def fake_apply(source_bytes, instruction):
+    def fake_apply(source_bytes, instruction, reference_images=None):
         captured_call["source_bytes"] = source_bytes
         captured_call["instruction"] = instruction
         return b"new-image-bytes"
@@ -179,6 +179,153 @@ def test_instruction_wordmark_protection_present_even_when_editing_headline():
     assert "brand wordmark" in instruction.lower()
 
 
+# ---- Preservation list must not name the edit's own target (2026-08-14, live
+# incident artifact 1259): a product edit's change instruction and the fixed
+# preservation list both named "product"/"bottle" in the same instruction, one asking
+# for a change, the other demanding no change - the photoreal bottle survived the edit
+# unchanged. Hardcoded expected strings throughout, never derived from
+# _PRESERVATION_TERMS/_TARGET_EXCLUDED_PRESERVATION_TERMS - a test built from the same
+# constants the function reads would pass even if those constants were wrong. ----
+
+def test_preservation_list_drops_product_and_bottle_for_product_target():
+    descriptor = {"target": "product", "attribute": "placement", "label": "Product",
+                  "current_value": "1 bottle(s)"}
+    instruction = generate_image_prompt.build_targeted_edit_instruction(
+        descriptor, "change", "One bottle only - no separate photographic bottle anywhere in the image",
+        blueprint=None)
+    assert ("Every other pixel in the image - layout, all other text, colours, "
+            "background, lighting, composition - must be") in instruction
+
+
+def test_preservation_list_drops_background_for_background_target():
+    descriptor = {"target": "background", "attribute": "type", "label": "Background",
+                  "current_value": "pool"}
+    instruction = generate_image_prompt.build_targeted_edit_instruction(
+        descriptor, "change", "a bathroom counter", blueprint=None)
+    assert ("Every other pixel in the image - layout, product, bottle, all other text, "
+            "colours, lighting, composition - must be") in instruction
+
+
+def test_preservation_list_drops_lighting_for_lighting_target():
+    descriptor = {"target": "lighting", "attribute": "scene_lighting", "label": "Lighting",
+                  "current_value": "soft, warm"}
+    instruction = generate_image_prompt.build_targeted_edit_instruction(
+        descriptor, "change", "harsh, cool", blueprint=None)
+    assert ("Every other pixel in the image - layout, product, bottle, all other text, "
+            "colours, background, composition - must be") in instruction
+
+
+def test_preservation_list_unfiltered_for_text_target():
+    """Text targets already read "all other text" - the word "other" already excludes
+    whichever text-shaped target changed, so nothing is dropped for them; the full
+    original list must survive unchanged."""
+    descriptor = {"target": "headline", "attribute": "text", "label": "Headline",
+                  "current_value": "old headline"}
+    instruction = generate_image_prompt.build_targeted_edit_instruction(
+        descriptor, "change", "new headline", blueprint=None)
+    assert ("Every other pixel in the image - layout, product, bottle, all other text, "
+            "colours, background, lighting, composition - must be") in instruction
+
+
+# ---- Product realism control (2026-08-15): build_product_realism_edit_instruction is
+# a DEDICATED instruction builder, never build_targeted_edit_instruction's shared
+# preservation-list filtering (that filtering drops "product"/"bottle" for
+# target="product", correct for Placement, exactly backwards here) ----
+
+def test_realism_instruction_illustrated_demands_flat_never_photorealistic():
+    instruction = generate_image_prompt.build_product_realism_edit_instruction("illustrated")
+    assert "flat, in this scene's own illustrated visual language" in instruction
+    assert "never a photograph or photorealistic render composited into the drawing" in instruction
+
+
+def test_realism_instruction_photographic_demands_real_liquid_and_glass():
+    instruction = generate_image_prompt.build_product_realism_edit_instruction("high_spec_studio")
+    assert "fully photographic - a real liquid with a visible meniscus" in instruction
+    assert "real glass refraction and reflection" in instruction
+
+
+def test_realism_instruction_case_insensitive_illustrated_match():
+    instruction = generate_image_prompt.build_product_realism_edit_instruction("Illustrated")
+    assert "flat, in this scene's own illustrated visual language" in instruction
+
+
+def test_realism_instruction_blank_style_defaults_to_photographic():
+    instruction = generate_image_prompt.build_product_realism_edit_instruction("")
+    assert "fully photographic" in instruction
+
+
+def test_realism_instruction_preserves_full_geometry_list_never_excludes_product_or_bottle():
+    """The whole point of this control: unlike the Placement control's instruction,
+    "product" and "bottle" must stay IN the preserved-unchanged list, not be excluded
+    from it - and geometry facts are named explicitly as unchanged too."""
+    instruction = generate_image_prompt.build_product_realism_edit_instruction("illustrated")
+    assert ("Every other pixel in the image - layout, product, bottle, all other text, "
+            "colours, background, lighting, composition - must be") in instruction
+    assert "silhouette" in instruction
+    assert "height-to-width ratio and proportions" in instruction
+    assert "neck/shoulder/base geometry" in instruction
+    assert "pump and collar hardware design" in instruction
+    assert "label's shape, placement, border, and content" in instruction
+
+
+def test_realism_instruction_includes_wordmark_protection():
+    instruction = generate_image_prompt.build_product_realism_edit_instruction(
+        "illustrated", blueprint={"structural_zones": [
+            {"zone_type": "brand_wordmark", "position": "top-centre", "container": "none", "detail": "d"},
+        ]},
+    )
+    assert "brand wordmark" in instruction.lower()
+    assert "top-centre" in instruction
+
+
+# ---- POST /artifact/{id}/edit for target=product/attribute=realism (2026-08-15):
+# dedicated instruction + product reference photos attached, not just the draft ----
+
+def test_edit_endpoint_realism_uses_dedicated_instruction_and_attaches_reference_photos(monkeypatch):
+    monkeypatch.setattr(
+        dedupe, "get_artifact_by_id",
+        lambda aid: _artifact(element_provenance={"product": "substituted"}),
+    )
+    monkeypatch.setattr(dedupe, "insert_edit_event", lambda **k: 9)
+    monkeypatch.setattr(dedupe, "update_edit_event_result", lambda *a, **k: None)
+    monkeypatch.setattr(dedupe, "insert_edit_artifact", lambda **k: 55)
+    monkeypatch.setattr(dedupe, "get_angle", lambda aid: None)
+    monkeypatch.setattr(
+        dedupe, "get_product",
+        lambda pid: {"id": pid, "name": "Besque Magic Body Oil", "image_keys": ["a.png", "b.png"]},
+    )
+    monkeypatch.setattr(dashboard, "_read_artifact_image_bytes",
+                         lambda art, ad_id: (b"draft-bytes", "AD123_draft.png"))
+    monkeypatch.setattr(drift_check, "check_drift", lambda *a, **k: {
+        "method": "skip", "checked": False, "drift_flag": False, "inside_pct": None,
+        "outside_pct": None, "scatter_pct": None, "bbox": None})
+
+    from src import pipeline
+    monkeypatch.setattr(pipeline, "fetch_reference_images",
+                         lambda product: ([b"ref-photo-1", b"ref-photo-2"], None))
+
+    captured = {}
+    def fake_apply(source_bytes, instruction, reference_images=None):
+        captured["source_bytes"] = source_bytes
+        captured["instruction"] = instruction
+        captured["reference_images"] = reference_images
+        return b"new-image-bytes"
+    monkeypatch.setattr(generate_image_prompt, "apply_targeted_edit", fake_apply)
+
+    resp = _client().post("/artifact/42/edit", json={
+        "target": "product", "attribute": "realism", "operation": "change",
+        "new_value": "illustrated",
+    })
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+
+    assert captured["source_bytes"] == b"draft-bytes"
+    assert captured["reference_images"] == [b"ref-photo-1", b"ref-photo-2"]
+    assert "flat, in this scene's own illustrated visual language" in captured["instruction"]
+    # Never the generic build_targeted_edit_instruction phrasing.
+    assert "Change Product" not in captured["instruction"]
+
+
 # ---- Step 4: drift check + one automatic retry, then stop ----
 
 def _setup_common_mocks(monkeypatch, extra_dedupe=None):
@@ -196,7 +343,7 @@ def _setup_common_mocks(monkeypatch, extra_dedupe=None):
 def test_drift_detected_triggers_exactly_one_retry_then_stops(monkeypatch):
     _setup_common_mocks(monkeypatch)
     apply_calls = []
-    def fake_apply(source_bytes, instruction):
+    def fake_apply(source_bytes, instruction, reference_images=None):
         apply_calls.append(instruction)
         return f"result-{len(apply_calls)}".encode()
     monkeypatch.setattr(generate_image_prompt, "apply_targeted_edit", fake_apply)

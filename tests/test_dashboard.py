@@ -579,6 +579,46 @@ def test_api_artifacts_key_contract(monkeypatch):
             conn.commit()
 
 
+def test_api_stats_total_counts_lineages_not_versions(monkeypatch):
+    """Bug found live 2026-08-14: "ADS PROCESSED" went 330 -> 331 -> 333 while only
+    edits were performed, because the old query was a bare COUNT(*) over `artifacts` -
+    one row per edit, not one per ad. Creating one root artifact plus one edit-created
+    version off it must move total by exactly 1, not 2."""
+    from src import dedupe
+    from fastapi.testclient import TestClient
+    import uuid
+
+    dedupe.init_artifacts()
+    ad_id = f"ART_{uuid.uuid4().hex[:8]}"
+    edit_id = None
+    try:
+        client = TestClient(dashboard.app)
+        before = client.get("/api/stats").json()["total"]
+
+        root_id = dedupe.save_artifact(
+            ad_id=ad_id, page_name="TestBrand", image_path="assets/x.jpg",
+            blueprint={"format": "hero"}, generated_copy={"headline": "H"},
+            draft_image="assets/x_draft_v1.png",
+            metadata={"cta": "Shop", "destination_url": "http://x"},
+        )
+        after_root = client.get("/api/stats").json()["total"]
+        assert after_root == before + 1
+
+        source = dedupe.get_artifact_by_id(root_id)
+        edit_id = dedupe.insert_edit_artifact(
+            source=source, new_draft_image="assets/x_draft_v2_edit.png",
+            new_generated_copy=source["generated_copy"],
+            new_image_prompt="[EDIT] change headline",
+            new_offer_text=source.get("offer_text"), edit_event_id=None,
+        )
+        after_edit = client.get("/api/stats").json()["total"]
+        assert after_edit == after_root  # the edit must NOT move total at all
+    finally:
+        with dedupe.get_conn() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM artifacts WHERE ad_id=%s", (ad_id,))
+            conn.commit()
+
+
 def test_put_competitor_category_only_preserves_page_id(monkeypatch):
     import uuid
     from src import dedupe

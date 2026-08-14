@@ -582,8 +582,29 @@ async def api_apply_edit(artifact_id: int, request: Request):
         dedupe.update_edit_event_result(edit_event_id, None, outcome="rejected", reject_reason=reason)
         return JSONResponse({"ok": False, "error": reason}, status_code=404)
 
-    instruction = generate_image_prompt.build_targeted_edit_instruction(descriptor, operation, resolved_value, blueprint=blueprint)
-    new_image_bytes = generate_image_prompt.apply_targeted_edit(source_bytes, instruction)
+    # Product-realism edit (2026-08-15): a DEDICATED instruction, never
+    # build_targeted_edit_instruction's shared preservation-list filtering - that
+    # filtering drops "product"/"bottle" from what stays unchanged for target="product",
+    # correct for the Placement control but exactly backwards here, where the whole
+    # point is preserving geometry while changing only rendering. Also attaches the
+    # product's OWN reference photo(s) alongside the draft - apply_targeted_edit
+    # otherwise only ever sees the current draft pixels, which is not real geometry to
+    # redraw the bottle from.
+    edit_reference_images = None
+    if target == "product" and attribute == "realism":
+        instruction = generate_image_prompt.build_product_realism_edit_instruction(
+            resolved_value, blueprint=blueprint)
+        product_id = source.get("product_id")
+        if product_id:
+            from src import pipeline
+            edit_product = dedupe.get_product(product_id)
+            if edit_product:
+                edit_reference_images, _ref_warning = pipeline.fetch_reference_images(edit_product)
+    else:
+        instruction = generate_image_prompt.build_targeted_edit_instruction(
+            descriptor, operation, resolved_value, blueprint=blueprint)
+    new_image_bytes = generate_image_prompt.apply_targeted_edit(
+        source_bytes, instruction, reference_images=edit_reference_images)
     if new_image_bytes is None:
         reason = "image edit call failed"
         dedupe.update_edit_event_result(edit_event_id, None, outcome="rejected", reject_reason=reason)
@@ -599,7 +620,8 @@ async def api_apply_edit(artifact_id: int, request: Request):
     drift_result = drift_check.check_drift(source_bytes, new_image_bytes, descriptor, blueprint)
     if drift_result["checked"] and drift_result["drift_flag"]:
         retry_instruction = generate_image_prompt.build_drift_retry_instruction(instruction, descriptor)
-        retry_bytes = generate_image_prompt.apply_targeted_edit(source_bytes, retry_instruction)
+        retry_bytes = generate_image_prompt.apply_targeted_edit(
+            source_bytes, retry_instruction, reference_images=edit_reference_images)
         if retry_bytes is not None:
             instruction = retry_instruction
             new_image_bytes = retry_bytes
@@ -1484,8 +1506,24 @@ async def api_generate_stop(request: Request):
 
 @app.get("/api/stats")
 def api_stats():
+    """"total" must count LINEAGES (one ad's worth of generation work), not raw
+    `artifacts` rows - the Dynamic Edit System (2026-08-14) creates a NEW row per edit,
+    on the SAME (ad_id, root_artifact_id) lineage, so a plain COUNT(*) grows on every
+    edit even when no new ad was ever processed. Confirmed live: "ADS PROCESSED" went
+    330 -> 331 -> 333 while only edits were performed. COALESCE(root_artifact_id, id)
+    is the same "root_artifact_id is NULL on a v1 row by convention" expression
+    get_artifact_by_id/get_artifacts_full/get_artifact_lineage already use to identify
+    a lineage.
+
+    approved/rejected do NOT have this fault: they count DISTINCT ad_id from
+    review_decisions, and ad_id is identical across an entire edit lineage (an edit
+    never gets its own ad_id - see insert_edit_artifact) - not inflated by edit count
+    to begin with, nothing to change here. dashboard.html's "pending" stat IS still
+    computed client-side as total-approved-rejected, so it inherited total's inflation
+    purely by depending on total, not from any separate query of its own; fixing total
+    here fixes pending too, with no separate change needed."""
     with dedupe.get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT COUNT(*) FROM artifacts")
+        cur.execute("SELECT COUNT(DISTINCT COALESCE(root_artifact_id, id)) FROM artifacts")
         total = cur.fetchone()[0]
         cur.execute("SELECT decision, COUNT(DISTINCT ad_id) FROM review_decisions GROUP BY decision")
         counts = dict(cur.fetchall())
