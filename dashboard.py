@@ -161,6 +161,17 @@ def api_decision(ad_id: str, decision: str, reason: str = "", angle_id: int = No
     if decision not in ("approve", "reject"):
         return JSONResponse({"ok": False, "error": "bad decision"}, status_code=400)
     dedupe.record_decision(ad_id, decision, reason, angle_id=angle_id)
+    # Outcome backfill (Dynamic Edit System, 2026-08-14): outcome attaches to the image
+    # VERSION being judged, not "the edit" abstractly - resolve the LATEST artifact row
+    # for this (ad_id, angle_id), the same "current version" convention already used
+    # throughout this codebase (get_artifact's own docstring: ORDER BY id DESC LIMIT 1).
+    # A v1 row (edit_event_id NULL - never produced by an edit) is a no-op here, not an
+    # error - approving/rejecting the ad itself via review_decisions above still happens
+    # either way.
+    art = dedupe.get_artifact(ad_id, angle_id=angle_id)
+    if art and art.get("edit_event_id") is not None:
+        outcome = "approved" if decision == "approve" else "rejected"
+        dedupe.set_edit_event_outcome(art["edit_event_id"], outcome)
     return JSONResponse({"ok": True, "ad_id": ad_id, "decision": decision})
 
 
@@ -621,6 +632,14 @@ async def api_apply_edit(artifact_id: int, request: Request):
         return JSONResponse({"ok": False, "error": reason}, status_code=500)
     dedupe.update_edit_event_result(edit_event_id, new_artifact_id, outcome="pending",
                                      drift_flag=drift_result["drift_flag"])
+    # Outcome backfill (2026-08-14): a new version was just successfully created FROM
+    # the source artifact - if the source's OWN edit_event (the one that produced IT)
+    # was never judged, it's now superseded. source["edit_event_id"] is None for a v1
+    # source (never produced by an edit) - nothing to supersede, correctly a no-op.
+    # supersede_pending_edit_event's own WHERE clause guard means an ALREADY-judged
+    # source (approved/rejected) is never downgraded here.
+    if source.get("edit_event_id") is not None:
+        dedupe.supersede_pending_edit_event(source["edit_event_id"])
 
     return JSONResponse({
         "ok": True, "artifact_id": new_artifact_id, "parent_artifact_id": artifact_id,

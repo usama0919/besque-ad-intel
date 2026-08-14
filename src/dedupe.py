@@ -1297,13 +1297,18 @@ def get_artifact(ad_id, angle_id=None):
     before this migration, or a caller that didn't pass it), NOT "recorded as False/empty".
     pipeline._regenerate_existing_draft relies on that distinction to know which stored
     inputs it has to default and log, rather than treating None and a real False/empty
-    value as the same thing."""
+    value as the same thing.
+
+    Also returns id/edit_event_id (Dynamic Edit System outcome backfill, 2026-08-14) -
+    dashboard.api_decision uses these to attach an approve/reject judgment to the
+    SPECIFIC edit_events row that produced this artifact (edit_event_id is NULL for a
+    v1 row never produced by an edit - callers treat that as a no-op, not an error)."""
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT ad_id, page_name, blueprint, generated_copy, draft_image, angle_id, text_in_image, "
             "image_path, metadata, image_prompt, copy_prompt, model_info, format_flag, product_override_note, "
             "include_product, retheme_colours, realism, body_area, offer_text, product_id, element_provenance, "
-            "critic_findings, review_status "
+            "critic_findings, review_status, id, edit_event_id "
             "FROM artifacts WHERE ad_id=%s AND angle_id IS NOT DISTINCT FROM %s ORDER BY id DESC LIMIT 1",
             (ad_id, angle_id),
         )
@@ -1324,7 +1329,7 @@ def get_artifact(ad_id, angle_id=None):
                 "include_product": r[14], "retheme_colours": r[15], "realism": r[16],
                 "body_area": r[17], "offer_text": r[18], "product_id": r[19],
                 "element_provenance": elem_prov, "critic_findings": crit_findings,
-                "review_status": r[22] or "ok"}
+                "review_status": r[22] or "ok", "id": r[23], "edit_event_id": r[24]}
 
 
 def get_artifact_by_id(artifact_id):
@@ -1455,6 +1460,36 @@ def update_edit_event_result(edit_event_id, result_artifact_id, outcome="pending
         cur.execute(
             "UPDATE edit_events SET result_artifact_id=%s, outcome=%s, reject_reason=%s, drift_flag=%s WHERE id=%s",
             (result_artifact_id, outcome, reject_reason, drift_flag, edit_event_id),
+        )
+        conn.commit()
+
+
+def set_edit_event_outcome(edit_event_id, outcome):
+    """Outcome backfill (2026-08-14): sets outcome on ONE edit_events row directly,
+    used by the approve/reject flow (dashboard.api_decision) to record a human
+    judgment against the specific edit that produced the artifact version being
+    judged. Unlike update_edit_event_result (written once, at edit-creation time,
+    alongside result_artifact_id/reject_reason/drift_flag), this only ever touches
+    outcome, called well after that row's other fields are already final - and can be
+    called more than once (a human can change their mind and re-decide)."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("UPDATE edit_events SET outcome=%s WHERE id=%s", (outcome, edit_event_id))
+        conn.commit()
+
+
+def supersede_pending_edit_event(edit_event_id):
+    """Marks an edit_event 'superseded' ONLY if its outcome is still 'pending' - the
+    WHERE clause guard means an edit_event already judged (approved/rejected) by a
+    human is NEVER downgraded just because a later edit was made from the same
+    version. Supersession only applies to a version that was never judged at all
+    before something newer came along - "before being judged" is the whole rule, not
+    "instead of a real judgment". Called from dashboard.api_apply_edit, on the SOURCE
+    artifact's own edit_event_id, right after a new version is successfully created
+    from it - never from api_artifact_revert, which does not judge anything at all."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "UPDATE edit_events SET outcome='superseded' WHERE id=%s AND outcome='pending'",
+            (edit_event_id,),
         )
         conn.commit()
 
