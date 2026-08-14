@@ -204,30 +204,22 @@ def _offer_control(artifact):
 
 
 def _person_face_controls(blueprint):
-    """Age and Expression exist together, gated ONLY on face_present.has_face - never on
-    a scene_elements entry, per the explicit rule that a human hand with has_face==false
-    gets a person_body control instead, not Age/Expression. Neither has a real stored
-    current_value: no field anywhere records what age/expression was actually rendered -
-    only rule 10's own prompt text enforces a floor. Reporting that honestly (rather than
-    fabricating a specific value) is deliberate, not a gap to fix here."""
-    face = blueprint.get("face_present") or {}
-    if not face.get("has_face"):
-        return []
-    return [
-        {
-            "target": "person_face", "attribute": "age", "label": "Person — Age",
-            "current_value": f"not individually tracked; rule 10 floor is {RULE_10_AGE_FLOOR}-60, "
-                              "grey/silver hair, visible facial lines, mature skin texture",
-            "allowed_ops": ["change"],
-            "blueprint_path": "face_present.has_face",
-        },
-        {
-            "target": "person_face", "attribute": "expression", "label": "Person — Expression",
-            "current_value": None,
-            "allowed_ops": ["change"],
-            "blueprint_path": "face_present.has_face",
-        },
-    ]
+    """Fail-closed (2026-08-14, same principle as _product_control's agreement
+    requirement): NEITHER Age nor Expression has a real per-artifact stored value
+    anywhere in the data model today, so neither is emitted, regardless of
+    face_present.has_face.
+
+    Age previously reported rule 10's own prompt-text floor ("not individually
+    tracked; rule 10 floor is 45-60...") as if it were this artifact's current_value -
+    that is RULE description text, not an observed per-artifact fact, and it was being
+    interpolated into a live delta edit instruction as "currently: not individually
+    tracked...", which is not a real observation to hand Gemini. Expression's
+    current_value was already None, which still rendered a live Apply button that would
+    have submitted new_value="" - never emit a control whose current_value is None.
+
+    Both are absent until a real per-artifact age/expression field exists to read a
+    genuine current_value from - not guessed, not defaulted, not filled with rule text."""
+    return []
 
 
 def _scene_element_controls(blueprint):
@@ -332,9 +324,10 @@ def _typography_control(blueprint):
     fields = {k: v for k, v in typography.items() if v}
     if not fields:
         return None
+    current_value = ", ".join(f"{k}: {v}" for k, v in fields.items())
     return {
         "target": "typography", "attribute": "style", "label": "Typography",
-        "current_value": fields, "allowed_ops": ["change"],
+        "current_value": current_value, "allowed_ops": ["change"],
         "blueprint_path": "typography.*",
     }
 

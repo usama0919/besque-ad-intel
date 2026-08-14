@@ -47,6 +47,7 @@
   .badge.reject { background:#fbe6e6; color:#c0392b; }
   .badge.pending { background:#f0ece4; color:#999; }
   .badge.failed-review { background:#fff3cd; color:#8a6100; }
+  .badge.version { background:#eee7f7; color:#6b4f9e; }
   .split { display:grid; grid-template-columns:1fr 1fr; }
   .side { padding:18px; }
   .side.orig { border-right:1px solid #f0ece4; background:#fafafa; }
@@ -482,7 +483,21 @@ function renderDynControlRow(c){
     const btn = document.createElement('button');
     btn.className = 'mini';
     btn.textContent = op === 'remove' ? 'Remove' : 'Apply change';
-    btn.onclick = () => submitDynEdit(c.target, c.attribute, op, input.value);
+    // In-flight guard (2026-08-14): a double-click fired two POST /artifact/{id}/edit
+    // calls with identical instructions before the first one's response ever came
+    // back - disabling synchronously, before the fetch is even issued, means a second
+    // click on the same button can't fire at all. Re-enabled in `finally` so a
+    // rejected/failed edit leaves the control usable again; a successful edit reloads
+    // the whole control set anyway (openDynEditModal inside submitDynEdit), which
+    // discards this button regardless.
+    btn.onclick = async () => {
+      btn.disabled = true;
+      try {
+        await submitDynEdit(c.target, c.attribute, op, input.value);
+      } finally {
+        btn.disabled = false;
+      }
+    };
     btnRow.appendChild(btn);
   });
   row.appendChild(btnRow);
@@ -541,15 +556,32 @@ async function loadDynVersions(artifactId){
     const r = await fetch('/artifact/'+artifactId+'/versions');
     const d = await r.json();
     if(!d.ok) return;
-    (d.versions||[]).forEach(v => {
-      if(v.id === artifactId && v.draft_url) img.src = v.draft_url;
+    const versions = d.versions || [];
+    // Which version is initially previewed/selected is the one with the highest
+    // version_no in the lineage - never assumed to equal `artifactId` itself. Fixes a
+    // live bug (artifact 1230): `artifactId` isn't always the lineage's actual latest
+    // version, which previously left the "current" highlight on the wrong chip while a
+    // different version's image was shown as the preview.
+    const latestVersion = versions.reduce((best, v) =>
+      (!best || (v.version_no||1) > (best.version_no||1)) ? v : best, null);
+    const chipButtons = {};
+    // Preview only - swaps the modal's image and moves the "selected" highlight to the
+    // clicked chip. No DB write, no revert; Revert to vN (below) is the only action that
+    // actually persists anything.
+    function selectVersion(v){
+      if(v.draft_url) img.src = v.draft_url;
+      Object.values(chipButtons).forEach(b => b.classList.remove('dyn-version-current'));
+      if(chipButtons[v.id]) chipButtons[v.id].classList.add('dyn-version-current');
+    }
+    versions.forEach(v => {
       const btn = document.createElement('button');
-      btn.className = 'mini' + (v.id === artifactId ? ' dyn-version-current' : '');
+      btn.className = 'mini';
       // drift_flag (Step 4) surfaced directly on the version strip - a drifted version
       // is still shown and still selectable, never hidden.
       btn.textContent = 'v' + v.version_no + (v.drift_flag ? ' ⚠ drift' : '');
       if(v.drift_flag){ btn.title = 'This edit changed pixels outside the requested zone'; btn.style.color = '#c0392b'; }
-      btn.onclick = () => { if(v.draft_url) img.src = v.draft_url; };
+      btn.onclick = () => selectVersion(v);
+      chipButtons[v.id] = btn;
       strip.appendChild(btn);
       if(v.id !== artifactId){
         const revertBtn = document.createElement('button');
@@ -563,6 +595,7 @@ async function loadDynVersions(artifactId){
         strip.appendChild(revertBtn);
       }
     });
+    if(latestVersion) selectVersion(latestVersion);
   } catch(e) {}
 }
 
@@ -685,6 +718,12 @@ function renderCards(data){
       // HIGH-after-retry branch).
       + (a.review_status==='failed-review'
           ? ' <span class="badge failed-review" title="Output critic still found high-confidence issue(s) after one corrective retry">Failed Review</span>'
+          : '')
+      // Latest-version-per-lineage (2026-08-14): this card already shows the LATEST
+      // edited version, not v1 - the badge is only shown once there's more than one
+      // version, so an un-edited ad's card carries no extra noise.
+      + (a.version_no > 1
+          ? ` <span class="badge version" title="This card shows the latest edited version">v${a.version_no}</span>`
           : '');
     const orig = a.original_image?`<img onerror="imgFallback(this)" src="${a.original_image}">`:'';
     const draft = a.draft_image

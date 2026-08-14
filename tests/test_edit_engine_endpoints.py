@@ -45,7 +45,9 @@ def test_edit_capabilities_endpoint_returns_derived_controls(monkeypatch):
     targets = {(c["target"], c["attribute"]) for c in body["controls"]}
     assert ("cta", "text") in targets
     assert ("offer", "text") in targets
-    assert ("person_face", "age") in targets
+    # Fail-closed (2026-08-14): person_face/age has no real per-artifact stored value
+    # anywhere in the data model, so it is never emitted - see _person_face_controls.
+    assert ("person_face", "age") not in targets
 
 
 def test_edit_capabilities_endpoint_404_when_missing(monkeypatch):
@@ -128,24 +130,25 @@ def test_edit_endpoint_success_path_creates_new_artifact_and_calls_gemini_with_d
     assert results[0][0] == (7, 43)
 
 
-def test_edit_endpoint_clamps_younger_age_request(monkeypatch):
+def test_edit_endpoint_rejects_person_face_age_since_no_control_is_ever_emitted(monkeypatch):
+    # Fail-closed (2026-08-14): person_face/age is never emitted by
+    # derive_edit_capabilities (see _person_face_controls) since no per-artifact age
+    # value exists anywhere in the data model - so this target/attribute pair can never
+    # resolve to a control, and the edit is rejected before any image/DB work, the same
+    # as any other unknown control (test_edit_endpoint_rejects_unknown_control). This
+    # replaces the old test_edit_endpoint_clamps_younger_age_request, which exercised a
+    # path that no longer exists; clamp_person_age itself is still unit-tested directly
+    # in tests/test_edit_capability.py.
     monkeypatch.setattr(dedupe, "get_artifact_by_id", lambda aid: _artifact())
-    monkeypatch.setattr(dedupe, "insert_edit_event", lambda **k: 9)
-    monkeypatch.setattr(dedupe, "update_edit_event_result", lambda *a, **k: None)
-    monkeypatch.setattr(dedupe, "insert_edit_artifact", lambda **k: 44)
-    monkeypatch.setattr(dedupe, "get_angle", lambda aid: None)
-    monkeypatch.setattr(dashboard, "_read_artifact_image_bytes", lambda art, ad_id: (b"source-bytes", "AD123_draft.png"))
-    monkeypatch.setattr(generate_image_prompt, "apply_targeted_edit", lambda *a, **k: b"new-image-bytes")
-    monkeypatch.setattr(drift_check, "check_drift", lambda *a, **k: {
-        "method": "skip", "checked": False, "drift_flag": False, "inside_pct": None,
-        "outside_pct": None, "scatter_pct": None, "bbox": None})
+    logged = {}
+    monkeypatch.setattr(dedupe, "insert_edit_event", lambda **k: logged.update(k) or 9)
 
     resp = _client().post("/artifact/42/edit", json={
         "target": "person_face", "attribute": "age", "operation": "change",
         "new_value": "make her look younger, like early 20s",
     })
-    assert resp.status_code == 200
-    assert resp.json()["clamped"] is True
+    assert resp.status_code == 400
+    assert logged.get("outcome") == "rejected"
 
 
 # ---- Never target the brand wordmark - build_targeted_edit_instruction ----

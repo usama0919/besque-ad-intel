@@ -56,8 +56,11 @@ def test_full_artifact_has_every_control_category():
     assert ("subtext", "text") in targets
     assert ("cta", "text") in targets
     assert ("offer", "text") in targets
-    assert ("person_face", "age") in targets
-    assert ("person_face", "expression") in targets
+    # person_face/age and person_face/expression are fail-closed (2026-08-14): neither
+    # has a real per-artifact stored value anywhere in the data model, so neither is
+    # ever emitted - see _person_face_controls' own docstring.
+    assert ("person_face", "age") not in targets
+    assert ("person_face", "expression") not in targets
     assert ("product", "placement") in targets
     assert ("background", "type") in targets
     assert ("lighting", "scene_lighting") in targets
@@ -353,3 +356,27 @@ def test_get_brand_wordmark_zone_finds_it_by_zone_type():
 
 def test_get_brand_wordmark_zone_none_when_absent():
     assert get_brand_wordmark_zone({"structural_zones": []}) is None
+
+
+# ---- current_value must render as text, never a nested object ("[object Object]") ----
+
+def test_current_value_is_a_string_where_populated():
+    # person_face/age and person_face/expression are no longer emitted at all (fail-closed,
+    # 2026-08-14 - see _person_face_controls), so they never reach this list. badge/banner
+    # (current_value=True - a boolean presence flag, not free text) are excluded on
+    # purpose: not the nested-dict shape that caused typography's "[object Object]" bug,
+    # and fixing those two is not in scope here.
+    excluded = {("badge", "corner_badge"), ("banner", "bottom_banner")}
+    controls = derive_edit_capabilities(FULL_ARTIFACT)
+    for c in controls:
+        if (c["target"], c["attribute"]) in excluded:
+            continue
+        assert isinstance(c["current_value"], str), (c["target"], c["attribute"], c["current_value"])
+
+
+def test_typography_current_value_is_flattened_to_a_string():
+    controls = derive_edit_capabilities(FULL_ARTIFACT)
+    typography = find_control(controls, "typography", "style")
+    assert isinstance(typography["current_value"], str)
+    assert "serif" in typography["current_value"]
+    assert "bold" in typography["current_value"]
