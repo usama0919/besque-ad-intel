@@ -6,6 +6,7 @@ from PIL import Image
 from src.drift_check import (
     check_drift, expected_change_region, _parse_position_to_bbox,
     DRIFT_OUTSIDE_ZONE_THRESHOLD_PCT, CONTAINMENT_SCATTER_THRESHOLD_PCT, SKIP_TARGETS,
+    MIN_COMPONENT_SIZE_PX,
 )
 
 W, H = 200, 200
@@ -129,6 +130,36 @@ def test_containment_no_change_at_all_is_not_drift():
     assert result["method"] == "containment"
     assert result["drift_flag"] is False
     assert result["scatter_pct"] == 0.0
+
+
+def test_ambient_noise_specks_below_min_size_do_not_trigger_drift():
+    # Reproduces the live finding (2026-08-14, artifact 1249->1253): a real clean edit
+    # measured 28.33% scatter_pct with no size filter, purely from thousands of 1-4px
+    # ambient regeneration specks (water sparkle/caustic noise) - NOT real drift. Here:
+    # one real, contained edit (a 30x30=900px patch) plus ~200 scattered 2x2=4px
+    # specks - each well below MIN_COMPONENT_SIZE_PX (50) - covering the rest of the
+    # frame. The specks must not count toward scatter_pct at all.
+    assert 4 < MIN_COMPONENT_SIZE_PX  # sanity: the specks below are genuinely "tiny"
+    img = Image.new("RGB", (W, H), (10, 10, 10))
+    for y in range(60, 90):
+        for x in range(60, 90):
+            img.putpixel((x, y), (240, 240, 240))
+    for i in range(200):
+        sx = (i * 37) % (W - 2)
+        sy = (i * 53) % (H - 2)
+        if 60 <= sx <= 90 and 60 <= sy <= 90:
+            continue  # skip specks that would land inside/merge with the real patch
+        for yy in range(sy, sy + 2):
+            for xx in range(sx, sx + 2):
+                img.putpixel((xx, yy), (230, 230, 230))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    v1 = _png_bytes((10, 10, 10))
+    v2 = buf.getvalue()
+    result = check_drift(v1, v2, PRODUCT_DESCRIPTOR, {})
+    assert result["method"] == "containment"
+    assert result["drift_flag"] is False
+    assert result["scatter_pct"] < CONTAINMENT_SCATTER_THRESHOLD_PCT
 
 
 def test_person_face_zone_derived_from_face_present_location():

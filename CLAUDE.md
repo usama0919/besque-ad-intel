@@ -1515,3 +1515,84 @@ C9's account-chrome half has NO mechanical backstop, unlike its name/handle-in-t
   ads simply didn't have an angle selected. Action item, not a code fix: `/pool` should
   surface an unset angle to the operator BEFORE generating, so this is a deliberate
   choice rather than a silent default.
+
+## 2026-08-14 — Dynamic Edit System (Steps 1-4) + a generation-side bug found while calibrating it
+
+### GENERATION-SIDE BUG, found live: `element_provenance.product="added"` does not mean a product was rendered
+Artifact 1250 (`ad_id=1015875454522971`): `layout_detail.product_count=0` (the
+COMPETITOR reference genuinely had no product in frame), `include_product=True`,
+`element_provenance.product="added"` (the pipeline's own record that a product was
+supposed to be added to the scene) - but the rendered draft has **no bottle anywhere**,
+confirmed by direct visual inspection of the full frame including the bottom banner
+region. Compare artifact 1249 (`product_count=2`, `element_provenance.product=
+"substituted"`), where the bottle genuinely is in the pixels - substitution (replacing
+an already-existing structural zone) appears to reliably render; addition (inserting a
+product into a scene that never had one) does not, at least in this case, despite the
+pipeline recording success either way.
+
+**This is a generation-pipeline bug (`process_ad`'s provenance bookkeeping /
+`generate_image`'s add-product path), not an Edit System bug** - `element_provenance`
+is written at generation time, long before any edit exists. Not fixed here - needs
+someone to look at why the "added" path silently produced no bottle while reporting
+success. The Edit System's own `_product_control` (below) now refuses to trust
+`element_provenance.product=="added"` at all as a consequence, but that's a
+containment measure on the edit side, not a fix to the underlying render failure.
+
+### Dynamic Edit System - Steps 1-4 complete, on branch `feat/dynamic-edit-system`
+Schema (parent/root/version_no/edit_event_id lineage + `edit_events` table),
+`src/edit_capability.py` (dynamic control derivation, fail-closed), the targeted-edit
+engine (`POST /artifact/{id}/edit`, delta-instruction-only, brand-wordmark protection),
+Part B's Edit modal (renders whatever `/edit-capabilities` returns, version strip with
+revert), and Step 4's drift check (`src/drift_check.py`) are all built and committed to
+`feat/dynamic-edit-system` (not `main`, not merged).
+
+**Part A verified live**: artifact 1251→1252, a one-word headline edit, measured
+0.076% pixel change outside the headline zone vs 11.898% inside - the "v1 image is the
+baseline, delta instruction only" design holds.
+
+**Two real bugs found and fixed during live verification, not just designed against**:
+`save_artifact`'s own (ad_id, angle_id) dedupe-skip gate silently discarded every
+edit-created row (`insert_edit_artifact` now goes through `insert_artifact_row_
+unconditional`, bypassing that gate entirely - an edit must always create a new row
+regardless of how many rows already share that ad_id); and the headline/subtext
+controls were gated on "any `text_purpose` entry exists" rather than a genuinely
+headline-shaped one, which on artifact 1251 wrongly counted the COMPETITOR's own
+`purpose="other"` wordmark/tagline text as headline structure, even though no headline
+was ever rendered into that artifact's pixels at all.
+
+**Drift check, two methods**: ZONE (headline/subtext/cta/person_face/badge, when a
+position is recorded) compares % changed inside vs outside that region -
+`DRIFT_OUTSIDE_ZONE_THRESHOLD_PCT=1.0`, ~13x Part A's measured 0.076%. CONTAINMENT
+(product/prop/person_body/offer/banner, or any zone-target lacking a recorded
+position) - only lighting/background/typography still skip outright as genuine
+whole-frame effects. Containment does 4-connected-component labelling over the
+changed-pixel mask and flags drift when too much of the changed-pixel mass sits
+outside the single largest component.
+
+**Containment threshold calibrated against two real edits** (product reposition/
+rescale, artifact 1249→1253; prop removal, artifact 1250→1254 - both confirmed
+visually clean). Raw (no size filter): 28.33% and 17.10% - already past a first
+15%-estimate on edits with nothing wrong. Diagnosed why: 17,814 and 3,775 connected
+components respectively, the overwhelming majority 1-4px specks - ambient
+regeneration noise on textured surfaces (water sparkle/caustics), not real secondary
+edits. Added `MIN_COMPONENT_SIZE_PX=50` (components below this are dropped before
+scatter_pct is computed, excluded from both numerator and denominator) - the SAME two
+clean edits then measure 9.36% and 2.81%. `CONTAINMENT_SCATTER_THRESHOLD_PCT` set to
+25.0 from those numbers - only ~2.7x headroom (deliberately less than the zone
+threshold's ~13x), because these two containment edits have real, legitimate secondary
+structure just outside the main blob (re-rendered label sub-regions on the moved
+bottle, water distortion at the edited object's edge) that Part A's near-perfect
+headline edit didn't have - the "clean" baseline is inherently noisier for this method.
+
+**Product control now requires agreement between two signals, fails closed
+otherwise**: `layout_detail.product_count > 0 AND element_provenance.product ==
+"substituted"`. `"added"` is never trusted alone - see the generation-side bug above
+for exactly why. `include_product` (operator intent for the run) is deliberately not
+part of the predicate either - 1250 shows intent and provenance can both agree with
+each other while still being wrong about what's in the pixels.
+
+**ADC note**: mid-session, the live product-edit calibration call failed with
+`google.auth.exceptions.RefreshError: Reauthentication is needed` - expired
+Application Default Credentials, exactly the class of failure this file's own
+"Operational gotchas" section already names. Re-running `gcloud auth application-
+default login` and restarting uvicorn resolved it; not a code bug.

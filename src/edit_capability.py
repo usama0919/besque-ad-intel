@@ -266,16 +266,39 @@ def _scene_element_controls(blueprint):
     return controls
 
 
-def _product_control(blueprint):
+def _product_control(artifact, blueprint):
+    """Requires AGREEMENT between two independent signals, fails closed otherwise -
+    exact predicate: layout_detail.product_count > 0 AND
+    artifact.element_provenance.product == "substituted".
+
+    Found live (2026-08-14): blueprint.layout_detail.product_count alone describes the
+    COMPETITOR reference's structure, never what BESQUE's own draft actually rendered -
+    artifact 1250 has product_count=0 (the reference had no product) but
+    include_product=True and element_provenance.product="added" (Besque was SUPPOSED
+    to add one) - yet the rendered draft has no bottle anywhere (confirmed by direct
+    inspection), a generation-side bug logged separately in CLAUDE.md, not fixed here.
+
+    "added" is deliberately NEVER trusted alone, even now that its live failure is
+    known: unlike "substituted" (an existing structural zone is replaced - the
+    reference already proves a product-shaped region exists to substitute into),
+    "added" has no independent structural evidence backing it at all - the reference
+    had NOTHING there. Requiring product_count > 0 as well means this control is only
+    ever offered when the COMPETITOR reference itself showed a product AND Besque's own
+    bookkeeping confirms it substituted (not invented) one - the one path with two
+    independent signals in agreement, not just one field taken on faith. include_product
+    is deliberately not part of this predicate either - it is operator INTENT for the
+    run, not evidence of what was actually rendered, and 1250 shows intent and
+    provenance can agree with each other while both being wrong about the pixels."""
     layout_detail = blueprint.get("layout_detail") or {}
     count = layout_detail.get("product_count")
-    if not count or count <= 0:
+    provenance = (artifact.get("element_provenance") or {}).get("product")
+    if not count or count <= 0 or provenance != "substituted":
         return None
     return {
         "target": "product", "attribute": "placement", "label": "Product",
         "current_value": f"{int(count)} bottle(s) - identity/label fixed, see products.visual_description",
         "allowed_ops": ["change"],
-        "blueprint_path": "layout_detail.product_count",
+        "blueprint_path": "layout_detail.product_count + artifacts.element_provenance.product",
     }
 
 
@@ -351,7 +374,7 @@ def derive_edit_capabilities(artifact):
         lambda: _subtext_control(artifact, blueprint),
         lambda: _cta_control(artifact, blueprint),
         lambda: _offer_control(artifact),
-        lambda: _product_control(blueprint),
+        lambda: _product_control(artifact, blueprint),
         lambda: _background_control(blueprint),
         lambda: _lighting_control(blueprint),
         lambda: _typography_control(blueprint),

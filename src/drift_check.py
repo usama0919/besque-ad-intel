@@ -37,13 +37,30 @@ from PIL import Image, ImageChops
 # tuned in one place as more real edits are measured.
 DRIFT_OUTSIDE_ZONE_THRESHOLD_PCT = 1.0
 
-# Separate constant for the CONTAINMENT method (2026-08-14) - a different question
-# (what fraction of changed pixels sit outside the largest connected blob) with no
-# equivalent measured "clean edit" baseline yet, so this is a starting estimate, not a
-# calibrated figure like the zone threshold above - tune once real product/prop edits
-# are measured. Deliberately not reused as/for DRIFT_OUTSIDE_ZONE_THRESHOLD_PCT: the
-# two thresholds answer different questions and may need to diverge as real data comes in.
-CONTAINMENT_SCATTER_THRESHOLD_PCT = 15.0
+# Calibrated 2026-08-14 against two real edits (artifact 1249->1253, a product
+# reposition/rescale; artifact 1250->1254, a prop removal). Both are visually clean
+# (confirmed by direct inspection) but the RAW containment measurement (no size filter)
+# came back at 28.33% and 17.10% respectively - already past the original 15%
+# estimate, on edits with nothing actually wrong. Diagnosis: 17,814 and 3,775 connected
+# components respectively, the overwhelming majority 1-4px specks - ambient
+# regeneration noise on textured surfaces (water sparkle/caustics), not real secondary
+# edits. MIN_COMPONENT_SIZE_PX filters these out before the scatter fraction is
+# computed. At that filter, the SAME two clean edits measure 9.36% and 2.81% - the
+# threshold below has ~2.7x headroom over the higher of these two, deliberately less
+# than the zone threshold's ~13x (Part A's headline edit measured 0.076% with almost no
+# genuine secondary structure at all; these two containment edits have real, legitimate
+# secondary changes - e.g. re-rendered label sub-regions on the moved bottle, water
+# distortion at the edited object's edge - sitting just outside the single largest
+# connected blob, so the "clean" baseline itself is inherently noisier here).
+MIN_COMPONENT_SIZE_PX = 50
+
+# See MIN_COMPONENT_SIZE_PX's own comment for the two measurements this was set from
+# (9.36% and 2.81%, both with the filter applied). A different question from
+# DRIFT_OUTSIDE_ZONE_THRESHOLD_PCT (that one measures % outside a DECLARED region; this
+# measures % outside the largest CONNECTED blob) - kept as a separate constant
+# deliberately, not reused, since the two may need to diverge further as more real
+# product/prop/person_body edits are measured.
+CONTAINMENT_SCATTER_THRESHOLD_PCT = 25.0
 
 # Luma-of-difference threshold (0-255) above which a pixel counts as "changed" -
 # identical value and method to the Part A manual diff
@@ -185,10 +202,17 @@ def _pixel_diff_stats(source_bytes, result_bytes, bbox):
 
 def _containment_scatter_stats(source_bytes, result_bytes):
     """CONTAINMENT method: 4-connected-component labelling (union-find) over the
-    changed-pixel mask. Returns (scatter_pct, bbox) where scatter_pct is the % of ALL
-    changed pixels lying outside the single LARGEST connected component, and bbox is
-    the bounding box of every changed pixel (informational, not used for the verdict
-    itself - unlike the zone method, a large bbox alone is not the signal here).
+    changed-pixel mask. Returns (scatter_pct, bbox).
+
+    Components smaller than MIN_COMPONENT_SIZE_PX are dropped BEFORE scatter_pct is
+    computed - excluded from both the numerator and the denominator, never counted as
+    either "contained" or "scattered". Found live (2026-08-14, artifact 1249->1253):
+    without this filter, thousands of 1-4px components from ambient regeneration noise
+    on textured surfaces (water sparkle/caustics) alone pushed scatter_pct to 28% on a
+    visually clean edit. scatter_pct is then the % of the SURVIVING changed pixels
+    lying outside the single LARGEST surviving component. bbox is the bounding box of
+    every changed pixel regardless of the filter (informational, not used for the
+    verdict itself - unlike the zone method, a large bbox alone is not the signal here).
 
     Union-find is keyed by changed pixels only (a dict, not a full W*H array), so cost
     scales with how much actually changed, not the frame size - the same reasoning
@@ -244,10 +268,16 @@ def _containment_scatter_stats(source_bytes, result_bytes):
     for idx in idx_of.values():
         root = find(idx)
         counts[root] = counts.get(root, 0) + 1
-    largest = max(counts.values())
-    total = len(idx_of)
-    scatter_pct = 100.0 * (total - largest) / total
     bbox = (min_x, min_y, max_x + 1, max_y + 1)
+
+    kept_sizes = [size for size in counts.values() if size >= MIN_COMPONENT_SIZE_PX]
+    total_kept = sum(kept_sizes)
+    if not total_kept:
+        # Every component was smaller than the noise floor - nothing meaningful
+        # changed at all, which is not drift by definition.
+        return 0.0, bbox
+    largest = max(kept_sizes)
+    scatter_pct = 100.0 * (total_kept - largest) / total_kept
     return scatter_pct, bbox
 
 

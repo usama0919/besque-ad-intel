@@ -22,6 +22,7 @@ FULL_ARTIFACT = {
     },
     "offer_text": "Free shipping over £40",
     "text_in_image": True,
+    "element_provenance": {"product": "substituted"},
     "blueprint": {
         "text_purpose": [
             {"text_verbatim": "ref headline", "purpose": "problem_hook", "placement": "top-centre"},
@@ -125,6 +126,7 @@ PARTIAL_ARTIFACT = {
     },
     "offer_text": "",
     "text_in_image": False,
+    "element_provenance": {"product": "substituted"},
     "blueprint": {
         "text_purpose": [{"text_verbatim": "x", "purpose": "cta", "placement": "bottom"}],
         "structural_zones": [],
@@ -157,9 +159,60 @@ def test_offer_empty_string_yields_no_offer_control():
 def test_product_count_zero_yields_no_product_control():
     artifact = {
         "generated_copy": {}, "offer_text": None,
+        "element_provenance": {"product": "substituted"},
         "blueprint": {"text_purpose": [], "structural_zones": [], "scene_elements": [],
                        "face_present": {"has_face": False}, "layout_detail": {"product_count": 0}},
     }
+    assert find_control(derive_edit_capabilities(artifact), "product", "placement") is None
+
+
+# ---- Product control requires AGREEMENT: product_count > 0 AND
+# element_provenance.product == "substituted" - fails closed on either alone ----
+
+def _artifact_with(product_count, provenance_product, include_product=None):
+    return {
+        "generated_copy": {}, "offer_text": None,
+        "include_product": include_product,
+        "element_provenance": {"product": provenance_product} if provenance_product is not None else {},
+        "blueprint": {"text_purpose": [], "structural_zones": [], "scene_elements": [],
+                      "face_present": {"has_face": False},
+                      "layout_detail": {"product_count": product_count}},
+    }
+
+
+def test_product_control_present_when_count_and_substituted_agree():
+    artifact = _artifact_with(product_count=2, provenance_product="substituted")
+    assert find_control(derive_edit_capabilities(artifact), "product", "placement") is not None
+
+
+def test_product_control_absent_when_provenance_is_added_even_with_real_product_count():
+    # The exact live case (artifact 1250, 2026-08-14): product_count=0 in the
+    # reference blueprint but element_provenance says "added" - "added" is NEVER
+    # trusted alone, so this must still fail closed even if a nonzero count existed.
+    artifact = _artifact_with(product_count=2, provenance_product="added", include_product=True)
+    assert find_control(derive_edit_capabilities(artifact), "product", "placement") is None
+
+
+def test_product_control_absent_when_provenance_is_none():
+    artifact = _artifact_with(product_count=3, provenance_product="none")
+    assert find_control(derive_edit_capabilities(artifact), "product", "placement") is None
+
+
+def test_product_control_absent_when_provenance_missing_entirely():
+    # Pre-migration rows with no element_provenance at all - fail closed, never assume.
+    artifact = _artifact_with(product_count=2, provenance_product=None)
+    assert find_control(derive_edit_capabilities(artifact), "product", "placement") is None
+
+
+def test_product_control_absent_when_count_zero_even_if_substituted():
+    artifact = _artifact_with(product_count=0, provenance_product="substituted")
+    assert find_control(derive_edit_capabilities(artifact), "product", "placement") is None
+
+
+def test_product_control_ignores_include_product_toggle_alone():
+    # include_product is operator INTENT, not evidence of what rendered - agreeing
+    # with itself is not the same as agreeing with element_provenance.
+    artifact = _artifact_with(product_count=0, provenance_product="added", include_product=True)
     assert find_control(derive_edit_capabilities(artifact), "product", "placement") is None
 
 
