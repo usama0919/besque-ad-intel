@@ -3442,56 +3442,6 @@ def build_targeted_edit_instruction(descriptor, operation, new_value, blueprint=
     )
 
 
-def build_product_realism_edit_instruction(target_style, blueprint=None):
-    """Dynamic Edit System, product-realism control (2026-08-15): re-render the Besque
-    bottle's RENDERING TREATMENT ONLY - flat/illustrated or photographic - to match the
-    scene's own register. Deliberately NOT built via build_targeted_edit_instruction:
-    that function's _TARGET_EXCLUDED_PRESERVATION_TERMS drops "product"/"bottle" from
-    the preservation list for target="product", which is correct for the PLACEMENT
-    control (edit_capability._product_control) but exactly backwards here - this
-    control's whole point is preserving geometry while changing only how it renders, so
-    "product"/"bottle" must stay IN the preserved list, not be excluded from it.
-
-    target_style is matched case-insensitively against "illustrated"; anything else
-    (including a blank/unrecognised value) resolves to the photographic instruction -
-    the same two-way split _bottle_register_clause/_edit_mode_instruction already use
-    elsewhere in this file, never a third, invented register.
-
-    Callers should pass this artifact's own product reference photo(s) to
-    apply_targeted_edit's reference_images param alongside this instruction - unlike
-    every other targeted edit, a realism re-render needs real geometry to redraw the
-    bottle from, not just the current draft pixels."""
-    illustrated = (target_style or "").strip().lower() == "illustrated"
-    register_instruction = (
-        "flat, in this scene's own illustrated visual language - matching the "
-        "surrounding artwork's own line weight and shading, never a photograph or "
-        "photorealistic render composited into the drawing"
-        if illustrated else
-        "fully photographic - a real liquid with a visible meniscus, real glass "
-        "refraction and reflection, real specular highlights on the pump/cap hardware, "
-        "matching this scene's own lighting, never a flat illustrated or vector "
-        "rendering"
-    )
-    preservation_list = ", ".join(_PRESERVATION_TERMS)
-    return (
-        "The attached image is FINAL and CORRECT exactly as it appears - this is a "
-        "targeted edit to it, not a new composition and not a reinterpretation. Make "
-        "EXACTLY ONE change: re-render the Besque bottle's RENDERING TREATMENT ONLY, "
-        f"to be {register_instruction}. Any additional attached image(s) beyond the "
-        "first are Besque's OWN product reference photo(s) - real photographs of this "
-        "exact bottle's geometry - use them ONLY to confirm or correct shape, never to "
-        "change it and never as a rendering-style reference. The bottle's silhouette, "
-        "its height-to-width ratio and proportions, its neck/shoulder/base geometry, "
-        "its pump and collar hardware design, its label's shape, placement, border, "
-        "and content, and the label's scale relative to the bottle all stay EXACTLY as "
-        "they already appear in the draft - changed NOT AT ALL by this edit. Only HOW "
-        "the bottle is rendered changes; never what it is, never its size, never its "
-        f"position in the frame. Every other pixel in the image - {preservation_list} "
-        "- must be reproduced EXACTLY as it appears in the attached image, completely unchanged."
-        + _brand_wordmark_protection_clause(blueprint)
-    )
-
-
 def build_drift_retry_instruction(base_instruction, descriptor):
     """Dynamic Edit System, Step 4: the ONE automatic retry after a drift-check
     failure (src.drift_check) - appends a tightening note to the SAME base
@@ -3518,14 +3468,13 @@ def apply_targeted_edit(source_image_bytes, instruction, reference_images=None):
     onto a function attribute (see CLAUDE.md's .last_prompt note on why that pattern is
     deliberately not repeated in new code).
 
-    reference_images (2026-08-15, product-realism edit control): optional list of the
-    Besque product's OWN reference photo bytes, attached AFTER the draft and framed via
-    the SAME _reference_framing text generate_image already uses - only the product-
-    realism control passes these; every other target's edit omits this entirely and
-    behaves byte-for-byte as before. A realism re-render genuinely needs real geometry
-    to redraw the bottle from; a placement/text/background edit does not, and attaching
-    photos unconditionally for every edit would cost an unnecessary payload/latency hit
-    on edits that never touch the product at all."""
+    reference_images (2026-08-15): optional list of extra reference photo bytes,
+    attached AFTER the draft and framed via the SAME _reference_framing text
+    generate_image already uses. No current caller in dashboard.py passes this - the
+    product-realism control (2026-08-16) deliberately sends ONLY the v1 draft plus its
+    pre-authored delta sentence (src/realism_deltas.py), no reference photos - but the
+    capability stays available here for a future targeted edit that genuinely needs
+    real geometry beyond what the current draft pixels show."""
     from google.genai import types as genai_types
     aspect_ratio = derive_aspect_ratio(source_image_bytes)
     image_config = (

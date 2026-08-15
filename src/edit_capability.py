@@ -20,6 +20,8 @@ pure function of the dict already fetched, unit-testable with plain fixtures.
 """
 import re
 
+from src import realism_deltas
+
 # Scene_elements entries matching one of these (case-insensitive, WORD-boundary - never a
 # raw substring test) are body-part shaped, not props - they route to a "person_body"
 # control instead of a "prop" control, per the explicit rule: face_present.has_face==false
@@ -295,11 +297,21 @@ def _product_control(artifact, blueprint):
 
 
 def _product_realism_control(artifact, blueprint):
-    """New control (2026-08-15): re-render the Besque bottle's RENDERING TREATMENT ONLY
-    (flat for illustrated scenes, photographic for photoreal ones) - never shape,
-    dimensions, proportions, label content, or hardware design, which
-    generate_image_prompt.build_product_realism_edit_instruction explicitly holds
-    fixed regardless of what this control changes.
+    """Bottle-realism-only control (2026-08-16, superseding the 2026-08-15 version):
+    re-render the Besque bottle's RENDERING TREATMENT ONLY over a FIXED set of four
+    values (realism_deltas.REALISM_VALUES) - never shape, dimensions, proportions,
+    label content, or hardware design, which realism_deltas' pre-authored per-value
+    delta sentences explicitly hold fixed regardless of which value is chosen.
+
+    `options` carries the fixed picker set verbatim from realism_deltas.REALISM_VALUES
+    - the single source of truth for what the modal renders as segments - so this
+    descriptor and the delta text it will be edited with can never drift apart.
+    `current_value` is `blueprint.production_style.style` (or "unspecified") AS
+    STORED, never coerced to one of `options` - a value that predates the 2026-08-11
+    enum rename (e.g. "ugc_native" itself, or the dropped "hybrid") or one that
+    otherwise doesn't match any of the four exactly is the caller's job to show as a
+    "current: <value>" chip, never this function's job to normalise or default to
+    options[0].
 
     Same fail-closed agreement _product_control (above) requires - product_count > 0
     AND element_provenance.product == "substituted" - for the identical reason: this
@@ -316,6 +328,7 @@ def _product_realism_control(artifact, blueprint):
     return {
         "target": "product", "attribute": "realism", "label": "Product — Realism",
         "current_value": current_style,
+        "options": list(realism_deltas.REALISM_VALUES),
         "allowed_ops": ["change"],
         "blueprint_path": "layout_detail.product_count + artifacts.element_provenance.product "
                           "+ blueprint.production_style.style",

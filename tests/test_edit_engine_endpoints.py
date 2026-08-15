@@ -227,82 +227,28 @@ def test_preservation_list_unfiltered_for_text_target():
             "colours, background, lighting, composition - must be") in instruction
 
 
-# ---- Product realism control (2026-08-15): build_product_realism_edit_instruction is
-# a DEDICATED instruction builder, never build_targeted_edit_instruction's shared
-# preservation-list filtering (that filtering drops "product"/"bottle" for
-# target="product", correct for Placement, exactly backwards here) ----
+# ---- Product realism control (2026-08-16): the edit call sends ONLY the v1 draft
+# image plus a pre-authored delta sentence from src/realism_deltas.py - never a
+# blueprint-driven instruction, never reference photos, never the stored prompt ----
 
-def test_realism_instruction_illustrated_demands_flat_never_photorealistic():
-    instruction = generate_image_prompt.build_product_realism_edit_instruction("illustrated")
-    assert "flat, in this scene's own illustrated visual language" in instruction
-    assert "never a photograph or photorealistic render composited into the drawing" in instruction
-
-
-def test_realism_instruction_photographic_demands_real_liquid_and_glass():
-    instruction = generate_image_prompt.build_product_realism_edit_instruction("high_spec_studio")
-    assert "fully photographic - a real liquid with a visible meniscus" in instruction
-    assert "real glass refraction and reflection" in instruction
-
-
-def test_realism_instruction_case_insensitive_illustrated_match():
-    instruction = generate_image_prompt.build_product_realism_edit_instruction("Illustrated")
-    assert "flat, in this scene's own illustrated visual language" in instruction
-
-
-def test_realism_instruction_blank_style_defaults_to_photographic():
-    instruction = generate_image_prompt.build_product_realism_edit_instruction("")
-    assert "fully photographic" in instruction
-
-
-def test_realism_instruction_preserves_full_geometry_list_never_excludes_product_or_bottle():
-    """The whole point of this control: unlike the Placement control's instruction,
-    "product" and "bottle" must stay IN the preserved-unchanged list, not be excluded
-    from it - and geometry facts are named explicitly as unchanged too."""
-    instruction = generate_image_prompt.build_product_realism_edit_instruction("illustrated")
-    assert ("Every other pixel in the image - layout, product, bottle, all other text, "
-            "colours, background, lighting, composition - must be") in instruction
-    assert "silhouette" in instruction
-    assert "height-to-width ratio and proportions" in instruction
-    assert "neck/shoulder/base geometry" in instruction
-    assert "pump and collar hardware design" in instruction
-    assert "label's shape, placement, border, and content" in instruction
-
-
-def test_realism_instruction_includes_wordmark_protection():
-    instruction = generate_image_prompt.build_product_realism_edit_instruction(
-        "illustrated", blueprint={"structural_zones": [
-            {"zone_type": "brand_wordmark", "position": "top-centre", "container": "none", "detail": "d"},
-        ]},
-    )
-    assert "brand wordmark" in instruction.lower()
-    assert "top-centre" in instruction
-
-
-# ---- POST /artifact/{id}/edit for target=product/attribute=realism (2026-08-15):
-# dedicated instruction + product reference photos attached, not just the draft ----
-
-def test_edit_endpoint_realism_uses_dedicated_instruction_and_attaches_reference_photos(monkeypatch):
+def test_edit_endpoint_realism_uses_pre_authored_delta_only(monkeypatch):
     monkeypatch.setattr(
         dedupe, "get_artifact_by_id",
         lambda aid: _artifact(element_provenance={"product": "substituted"}),
     )
     monkeypatch.setattr(dedupe, "insert_edit_event", lambda **k: 9)
     monkeypatch.setattr(dedupe, "update_edit_event_result", lambda *a, **k: None)
-    monkeypatch.setattr(dedupe, "insert_edit_artifact", lambda **k: 55)
+    insert_calls = []
+    def fake_insert_edit_artifact(**k):
+        insert_calls.append(k)
+        return 55
+    monkeypatch.setattr(dedupe, "insert_edit_artifact", fake_insert_edit_artifact)
     monkeypatch.setattr(dedupe, "get_angle", lambda aid: None)
-    monkeypatch.setattr(
-        dedupe, "get_product",
-        lambda pid: {"id": pid, "name": "Besque Magic Body Oil", "image_keys": ["a.png", "b.png"]},
-    )
     monkeypatch.setattr(dashboard, "_read_artifact_image_bytes",
                          lambda art, ad_id: (b"draft-bytes", "AD123_draft.png"))
     monkeypatch.setattr(drift_check, "check_drift", lambda *a, **k: {
-        "method": "skip", "checked": False, "drift_flag": False, "inside_pct": None,
-        "outside_pct": None, "scatter_pct": None, "bbox": None})
-
-    from src import pipeline
-    monkeypatch.setattr(pipeline, "fetch_reference_images",
-                         lambda product: ([b"ref-photo-1", b"ref-photo-2"], None))
+        "method": "containment", "checked": True, "drift_flag": False, "inside_pct": None,
+        "outside_pct": None, "scatter_pct": 3.0, "bbox": (0, 0, 10, 10)})
 
     captured = {}
     def fake_apply(source_bytes, instruction, reference_images=None):
@@ -317,13 +263,45 @@ def test_edit_endpoint_realism_uses_dedicated_instruction_and_attaches_reference
         "new_value": "illustrated",
     })
     assert resp.status_code == 200
-    assert resp.json()["ok"] is True
+    body = resp.json()
+    assert body["ok"] is True
 
+    from src import realism_deltas
     assert captured["source_bytes"] == b"draft-bytes"
-    assert captured["reference_images"] == [b"ref-photo-1", b"ref-photo-2"]
-    assert "flat, in this scene's own illustrated visual language" in captured["instruction"]
-    # Never the generic build_targeted_edit_instruction phrasing.
-    assert "Change Product" not in captured["instruction"]
+    # No reference photos, no blueprint text, no stored prompt - exactly the
+    # pre-authored sentence for this value, verbatim.
+    assert captured["reference_images"] is None
+    assert captured["instruction"] == realism_deltas.REALISM_DELTAS["illustrated"]
+    assert "orig prompt" not in captured["instruction"]
+
+    # A NEW artifact row is created (55) - v1 (42) is the parent, never mutated in
+    # place: insert_edit_artifact receives the v1 dict as `source`, and its own
+    # image_prompt/draft_image are untouched (a fresh new_image_prompt/new_draft_image
+    # are passed alongside it, not written back onto v1 itself).
+    assert body["artifact_id"] == 55
+    assert body["parent_artifact_id"] == 42
+    assert len(insert_calls) == 1
+    assert insert_calls[0]["source"]["id"] == 42
+    assert insert_calls[0]["source"]["image_prompt"] == "orig prompt"
+    assert insert_calls[0]["new_draft_image"] != insert_calls[0]["source"]["draft_image"]
+
+
+def test_edit_endpoint_realism_rejects_unknown_value(monkeypatch):
+    monkeypatch.setattr(
+        dedupe, "get_artifact_by_id",
+        lambda aid: _artifact(element_provenance={"product": "substituted"}),
+    )
+    monkeypatch.setattr(dedupe, "insert_edit_event", lambda **k: 9)
+    monkeypatch.setattr(dedupe, "update_edit_event_result", lambda *a, **k: None)
+    monkeypatch.setattr(dashboard, "_read_artifact_image_bytes",
+                         lambda art, ad_id: (b"draft-bytes", "AD123_draft.png"))
+
+    resp = _client().post("/artifact/42/edit", json={
+        "target": "product", "attribute": "realism", "operation": "change",
+        "new_value": "ultra_hd_4k",
+    })
+    assert resp.status_code == 400
+    assert resp.json()["ok"] is False
 
 
 # ---- Step 4: drift check + one automatic retry, then stop ----

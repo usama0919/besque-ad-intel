@@ -582,29 +582,26 @@ async def api_apply_edit(artifact_id: int, request: Request):
         dedupe.update_edit_event_result(edit_event_id, None, outcome="rejected", reject_reason=reason)
         return JSONResponse({"ok": False, "error": reason}, status_code=404)
 
-    # Product-realism edit (2026-08-15): a DEDICATED instruction, never
-    # build_targeted_edit_instruction's shared preservation-list filtering - that
-    # filtering drops "product"/"bottle" from what stays unchanged for target="product",
-    # correct for the Placement control but exactly backwards here, where the whole
-    # point is preserving geometry while changing only rendering. Also attaches the
-    # product's OWN reference photo(s) alongside the draft - apply_targeted_edit
-    # otherwise only ever sees the current draft pixels, which is not real geometry to
-    # redraw the bottle from.
-    edit_reference_images = None
+    # Product-realism edit (2026-08-16): a PRE-AUTHORED delta sentence from
+    # src/realism_deltas.py, never build_targeted_edit_instruction's field-driven
+    # assembly and never the dedicated-but-still-assembled instruction this replaced
+    # (build_product_realism_edit_instruction, 2026-08-15) - the whole point of this
+    # control is a fixed, reviewed sentence per value with no blueprint/field-text
+    # surface for brand or identity content to leak through. Only the v1 draft image
+    # plus that one sentence is ever sent - no reference photos, no stored prompt, no
+    # other blueprint fields.
     if target == "product" and attribute == "realism":
-        instruction = generate_image_prompt.build_product_realism_edit_instruction(
-            resolved_value, blueprint=blueprint)
-        product_id = source.get("product_id")
-        if product_id:
-            from src import pipeline
-            edit_product = dedupe.get_product(product_id)
-            if edit_product:
-                edit_reference_images, _ref_warning = pipeline.fetch_reference_images(edit_product)
+        from src import realism_deltas
+        instruction = realism_deltas.get_delta(resolved_value)
+        if instruction is None:
+            reason = (f"unknown realism value {resolved_value!r} - must be one of "
+                       f"{realism_deltas.REALISM_VALUES}")
+            dedupe.update_edit_event_result(edit_event_id, None, outcome="rejected", reject_reason=reason)
+            return JSONResponse({"ok": False, "error": reason}, status_code=400)
     else:
         instruction = generate_image_prompt.build_targeted_edit_instruction(
             descriptor, operation, resolved_value, blueprint=blueprint)
-    new_image_bytes = generate_image_prompt.apply_targeted_edit(
-        source_bytes, instruction, reference_images=edit_reference_images)
+    new_image_bytes = generate_image_prompt.apply_targeted_edit(source_bytes, instruction)
     if new_image_bytes is None:
         reason = "image edit call failed"
         dedupe.update_edit_event_result(edit_event_id, None, outcome="rejected", reject_reason=reason)
@@ -620,8 +617,7 @@ async def api_apply_edit(artifact_id: int, request: Request):
     drift_result = drift_check.check_drift(source_bytes, new_image_bytes, descriptor, blueprint)
     if drift_result["checked"] and drift_result["drift_flag"]:
         retry_instruction = generate_image_prompt.build_drift_retry_instruction(instruction, descriptor)
-        retry_bytes = generate_image_prompt.apply_targeted_edit(
-            source_bytes, retry_instruction, reference_images=edit_reference_images)
+        retry_bytes = generate_image_prompt.apply_targeted_edit(source_bytes, retry_instruction)
         if retry_bytes is not None:
             instruction = retry_instruction
             new_image_bytes = retry_bytes

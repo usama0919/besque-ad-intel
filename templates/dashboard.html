@@ -154,6 +154,10 @@
   .dyn-input { width:100%; padding:8px 10px; border:1px solid #ccc; border-radius:7px; font-size:13px; font-family:inherit; box-sizing:border-box; min-height:44px; resize:vertical; }
   .dyn-warning { background:#fff4e0; color:#8a5a00; font-size:11px; padding:4px 8px; border-radius:5px; margin-bottom:6px; }
   .dyn-btn-row { display:flex; gap:6px; margin-top:6px; }
+  .dyn-static-value { font-size:13px; color:#333; padding:6px 0; }
+  .dyn-segmented { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:2px; }
+  .dyn-segment-active { background:#1a1a1a !important; color:#fff !important; }
+  .dyn-realism-chip { display:inline-block; background:#f0ece4; color:#555; font-size:11px; padding:3px 8px; border-radius:5px; margin-bottom:6px; }
   .dyn-version-strip { display:flex; gap:6px; flex-wrap:wrap; margin-top:10px; padding-top:10px; border-top:1px dashed #eee; }
   .dyn-version-current { background:#1a1a1a !important; color:#fff !important; }
   #dynEditImg { max-width:100%; border-radius:8px; margin-bottom:10px; }
@@ -471,6 +475,29 @@ function renderDynControlRow(c){
     w.textContent = c.warning;
     row.appendChild(w);
   }
+
+  // Product identity (target=product, attribute=placement) is STATIC READ-ONLY TEXT
+  // in this modal - no textarea, no Apply button. No UI path may edit product
+  // identity (2026-08-16); the only product control this modal lets an operator
+  // actually change is realism, rendered separately below.
+  if(c.target === 'product' && c.attribute === 'placement'){
+    const staticText = document.createElement('div');
+    staticText.className = 'dyn-static-value';
+    const cv = c.current_value;
+    staticText.textContent = (cv && typeof cv === 'object') ? JSON.stringify(cv) : (cv==null ? '' : String(cv));
+    row.appendChild(staticText);
+    return row;
+  }
+
+  // Product realism (target=product, attribute=realism): a FIXED segmented picker
+  // over c.options (src/realism_deltas.REALISM_VALUES, via edit_capability), never
+  // free text. Selecting a segment only changes which value Apply will submit - it
+  // does not fire the edit itself.
+  if(c.target === 'product' && c.attribute === 'realism'){
+    row.appendChild(renderRealismSegmentedControl(c));
+    return row;
+  }
+
   const input = document.createElement('textarea');
   input.className = 'dyn-input';
   const cv = c.current_value;
@@ -502,6 +529,65 @@ function renderDynControlRow(c){
   });
   row.appendChild(btnRow);
   return row;
+}
+
+// Product realism (2026-08-16): a fixed segmented picker over c.options
+// (src/realism_deltas.REALISM_VALUES, threaded through via edit_capability - never a
+// hardcoded list here, so this can never drift from the module that owns the actual
+// delta sentences). The currently stored value is preselected ONLY if it exactly
+// matches one of c.options; a value that doesn't match (a pre-rename style like
+// "ugc"/"high_spec_studio", or "unspecified") shows a "current: <value>" chip instead
+// of silently snapping to the first option - the operator must make an explicit
+// choice before Apply is even enabled. Selecting a segment never fires the edit by
+// itself; only the explicit Apply button does.
+function renderRealismSegmentedControl(c){
+  const wrap = document.createElement('div');
+  const options = c.options || [];
+  let selected = options.includes(c.current_value) ? c.current_value : null;
+
+  if(selected === null){
+    const chip = document.createElement('div');
+    chip.className = 'dyn-realism-chip';
+    chip.textContent = 'current: ' + (c.current_value == null ? 'unspecified' : String(c.current_value));
+    wrap.appendChild(chip);
+  }
+
+  const segRow = document.createElement('div');
+  segRow.className = 'dyn-segmented';
+  const segButtons = {};
+  options.forEach(v => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'mini' + (v === selected ? ' dyn-segment-active' : '');
+    b.textContent = v;
+    b.onclick = () => {
+      selected = v;
+      Object.entries(segButtons).forEach(([val, btn]) => btn.classList.toggle('dyn-segment-active', val === v));
+      applyBtn.disabled = false;
+    };
+    segButtons[v] = b;
+    segRow.appendChild(b);
+  });
+  wrap.appendChild(segRow);
+
+  const btnRow = document.createElement('div');
+  btnRow.className = 'dyn-btn-row';
+  const applyBtn = document.createElement('button');
+  applyBtn.className = 'mini';
+  applyBtn.textContent = 'Apply change';
+  applyBtn.disabled = (selected === null);
+  applyBtn.onclick = async () => {
+    if(selected === null) return;
+    applyBtn.disabled = true;
+    try {
+      await submitDynEdit(c.target, c.attribute, 'change', selected);
+    } finally {
+      applyBtn.disabled = false;
+    }
+  };
+  btnRow.appendChild(applyBtn);
+  wrap.appendChild(btnRow);
+  return wrap;
 }
 
 async function submitDynEdit(target, attribute, operation, newValue){
