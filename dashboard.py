@@ -514,6 +514,19 @@ async def api_apply_edit(artifact_id: int, request: Request):
             reject_reason=reason,
         )
 
+    # Product identity is never editable through this endpoint (2026-08-16) - target=
+    # product/attribute=placement's own current_value is descriptive text ("N bottle(s)
+    # - identity/label fixed, see products.visual_description"), never a real field this
+    # endpoint should let anyone change; the modal already hides this control (renders
+    # it read-only), but that's a UI-only guarantee - reject it here too, server-side,
+    # so a direct API call can't reach what the UI already refuses to expose. Checked
+    # BEFORE edit_capability.find_control so it rejects unconditionally, regardless of
+    # whether this artifact would otherwise even offer the control.
+    if target == "product" and attribute == "placement":
+        reason = "product placement/identity is not editable via this endpoint"
+        _log_rejected(reason)
+        return JSONResponse({"ok": False, "error": reason}, status_code=400)
+
     controls = edit_capability.derive_edit_capabilities(source)
     descriptor = edit_capability.find_control(controls, target, attribute)
     if descriptor is None:
@@ -655,7 +668,7 @@ async def api_apply_edit(artifact_id: int, request: Request):
         dedupe.update_edit_event_result(edit_event_id, None, outcome="rejected", reject_reason=reason)
         return JSONResponse({"ok": False, "error": reason}, status_code=500)
     dedupe.update_edit_event_result(edit_event_id, new_artifact_id, outcome="pending",
-                                     drift_flag=drift_result["drift_flag"])
+                                     drift_flag=drift_result["drift_flag"], drift_method=drift_result["method"])
     # Outcome backfill (2026-08-14): a new version was just successfully created FROM
     # the source artifact - if the source's OWN edit_event (the one that produced IT)
     # was never judged, it's now superseded. source["edit_event_id"] is None for a v1

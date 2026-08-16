@@ -67,6 +67,42 @@ def test_edit_endpoint_rejects_unknown_control(monkeypatch):
     assert logged.get("outcome") == "rejected"
 
 
+def test_edit_endpoint_rejects_product_placement_unconditionally(monkeypatch):
+    """Server-side hole closure (2026-08-16): product identity/placement is never
+    editable through this endpoint, regardless of whether this artifact would
+    otherwise offer the control at all - the modal already hides it, but that's a
+    UI-only guarantee; a direct API call must be rejected here too."""
+    monkeypatch.setattr(
+        dedupe, "get_artifact_by_id",
+        lambda aid: _artifact(element_provenance={"product": "substituted"}),
+    )
+    logged = {}
+    monkeypatch.setattr(dedupe, "insert_edit_event", lambda **k: logged.update(k) or 1)
+    resp = _client().post("/artifact/42/edit", json={
+        "target": "product", "attribute": "placement", "operation": "change",
+        "new_value": "move the bottle to the left",
+    })
+    assert resp.status_code == 400
+    assert logged.get("outcome") == "rejected"
+    assert "not editable" in resp.json()["error"]
+
+
+def test_edit_endpoint_rejects_product_placement_even_when_control_would_be_absent(monkeypatch):
+    # This fixture's default element_provenance={} means _product_control wouldn't
+    # even be derived (fails the substituted-agreement gate) - the placement request
+    # must still be rejected by the unconditional check, not fall through to the
+    # generic "no editable control" 400 for the wrong reason.
+    monkeypatch.setattr(dedupe, "get_artifact_by_id", lambda aid: _artifact())
+    logged = {}
+    monkeypatch.setattr(dedupe, "insert_edit_event", lambda **k: logged.update(k) or 1)
+    resp = _client().post("/artifact/42/edit", json={
+        "target": "product", "attribute": "placement", "operation": "change",
+        "new_value": "move the bottle to the left",
+    })
+    assert resp.status_code == 400
+    assert "not editable via this endpoint" in resp.json()["error"]
+
+
 def test_edit_endpoint_rejects_disallowed_operation(monkeypatch):
     monkeypatch.setattr(dedupe, "get_artifact_by_id", lambda aid: _artifact())
     monkeypatch.setattr(dedupe, "insert_edit_event", lambda **k: 1)
@@ -128,6 +164,42 @@ def test_edit_endpoint_success_path_creates_new_artifact_and_calls_gemini_with_d
 
     assert events[0]["outcome"] == "pending"
     assert results[0][0] == (7, 43)
+    # drift_method is recorded on EVERY apply (2026-08-16), not only a drifted one -
+    # here mocked as "skip", and it must reach update_edit_event_result verbatim.
+    assert results[0][1]["drift_method"] == "skip"
+
+
+def test_containment_fallback_drift_method_is_recorded_not_silent(monkeypatch):
+    """The gap this closes: containment and zone can both report drift_flag=False,
+    but they answer different questions (zone: did the change land in the recorded
+    region; containment: is the change spatially coherent, wherever it is). Without
+    drift_method on the row, a containment fallback is indistinguishable from a real
+    zone pass. Here check_drift reports "containment" with no drift - the row must
+    still show "containment", not blank/"zone"/anything implying a real zone existed."""
+    monkeypatch.setattr(dedupe, "get_artifact_by_id",
+                         lambda aid: _artifact(element_provenance={"product": "substituted"}))
+    monkeypatch.setattr(dedupe, "insert_edit_event", lambda **k: 9)
+    results = []
+    monkeypatch.setattr(dedupe, "update_edit_event_result", lambda *a, **k: results.append((a, k)))
+    monkeypatch.setattr(dedupe, "insert_edit_artifact", lambda **k: 55)
+    monkeypatch.setattr(dedupe, "get_angle", lambda aid: None)
+    monkeypatch.setattr(dashboard, "_read_artifact_image_bytes",
+                         lambda art, ad_id: (b"draft-bytes", "AD123_draft.png"))
+    monkeypatch.setattr(drift_check, "check_drift", lambda *a, **k: {
+        "method": "containment", "checked": True, "drift_flag": False, "inside_pct": None,
+        "outside_pct": None, "scatter_pct": 3.0, "bbox": (0, 0, 10, 10)})
+    monkeypatch.setattr(generate_image_prompt, "apply_targeted_edit", lambda *a, **k: b"new-image-bytes")
+
+    resp = _client().post("/artifact/42/edit", json={
+        "target": "product", "attribute": "realism", "operation": "change",
+        "new_value": "illustrated",
+    })
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["drift_method"] == "containment"
+    assert results[0][1]["drift_method"] == "containment"
+    assert results[0][1]["drift_flag"] is False
 
 
 def test_edit_endpoint_rejects_person_face_age_since_no_control_is_ever_emitted(monkeypatch):

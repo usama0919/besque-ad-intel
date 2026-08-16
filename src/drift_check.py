@@ -2,33 +2,43 @@
 
 Compares v1 (source) and v2 (result) pixel-for-pixel. Two methods, chosen per target:
 
-1. ZONE (headline/subtext/cta/person_face/badge, when a position is actually recorded):
-   split into the EXPECTED-CHANGE region (from text_purpose.placement/structural_zones.
-   position/face_present.location) vs everything else - % changed inside vs outside,
-   same method as the Part A manual verification (2026-08-14, artifact 1251->1252):
-   PIL ImageChops.difference().convert("L"), thresholded.
+1. ZONE (headline/subtext/cta/person_face/badge, when a position is actually
+   recorded; product, when layout_detail.zone_positions names a product-shaped
+   phrase - see _product_zone_position, added 2026-08-16 for the bottle-realism edit
+   control): split into the EXPECTED-CHANGE region (from text_purpose.placement/
+   structural_zones.position/face_present.location/layout_detail.zone_positions) vs
+   everything else - % changed inside vs outside, same method as the Part A manual
+   verification (2026-08-14, artifact 1251->1252): PIL ImageChops.difference()
+   .convert("L"), thresholded.
 
-2. CONTAINMENT (2026-08-14, closing the coverage gap): for product/prop/person_body/
-   offer/banner - and any zone-eligible target whose position wasn't recorded this
-   time - there is no structural position to compare against, but skipping entirely
-   left the most drift-prone class (product edits: tonight's floating bottle, retained
-   competitor jar, wrong scale) with NO check at all. Instead: find every connected
-   component of changed pixels and measure what fraction lies OUTSIDE the single
-   LARGEST one. One big contiguous blob (a bottle repositioned/rescaled across a large
-   area - still ONE coherent edit) reads as contained even though it's large; change
-   scattered across multiple disconnected regions (the actual signature of
-   hallucinated drift - Gemini altering unrelated parts of the frame) reads as
-   uncontained regardless of how small each scattered patch is. A raw bbox-of-all-
-   changed-pixels-vs-frame-fraction approach was considered and rejected: it can't
-   tell "one large legitimate edit" from "scattered small ones" at all, since both
-   can produce an equally large bbox - it would false-flag exactly the large,
-   contained product edits this fix exists to stop skipping.
+2. CONTAINMENT (2026-08-14, closing the coverage gap): for prop/person_body/offer/
+   banner, and for product/any zone-eligible target whose position wasn't recorded
+   this time, there is no structural position to compare against, but skipping
+   entirely left the most drift-prone class (product edits: tonight's floating
+   bottle, retained competitor jar, wrong scale) with NO check at all. Instead: find
+   every connected component of changed pixels and measure what fraction lies
+   OUTSIDE the single LARGEST one. One big contiguous blob (a bottle repositioned/
+   rescaled across a large area - still ONE coherent edit) reads as contained even
+   though it's large; change scattered across multiple disconnected regions (the
+   actual signature of hallucinated drift - Gemini altering unrelated parts of the
+   frame) reads as uncontained regardless of how small each scattered patch is. A raw
+   bbox-of-all-changed-pixels-vs-frame-fraction approach was considered and rejected:
+   it can't tell "one large legitimate edit" from "scattered small ones" at all,
+   since both can produce an equally large bbox - it would false-flag exactly the
+   large, contained product edits this fix exists to stop skipping.
+
+   NOTE this method's real limitation, confirmed live 2026-08-16: it answers "is the
+   changed region spatially coherent," not "did the change land in the right place" -
+   a single contiguous change relocated to the WRONG part of the frame still reads as
+   fully contained. This is why product now prefers the ZONE method above whenever a
+   real position is available; containment remains its only check when none is.
 
 Only lighting/background/typography still skip outright (SKIP_TARGETS) - these
 legitimately affect the whole frame by nature, so there is no "region" concept for
 them at all, not merely a missing one.
 """
 import io
+import re
 from PIL import Image, ImageChops
 
 # Part A measured 0.076% outside-zone change on a clean, correctly-contained edit
@@ -107,6 +117,30 @@ def _structural_zone_position(blueprint, zone_type):
     return None
 
 
+_PRODUCT_POSITION_PATTERN = re.compile(r"\b(?:product|bottle)\b", re.IGNORECASE)
+
+
+def _product_zone_position(blueprint):
+    """The 'product ...'-shaped phrase from layout_detail.zone_positions, if one
+    exists - e.g. "product mid-frame" (src/deconstruct.py's own classifier prompt
+    names this exact example). This is a real, deconstruct-time recorded fact, the
+    same qualitative-position-string contract every other ZONE-eligible target here
+    already relies on (text_purpose.placement/structural_zones.position/
+    face_present.location) - never a guessed or invented box.
+
+    2026-08-16: added because the CONTAINMENT fallback this target previously always
+    used answers a different question - "is the changed region spatially coherent"
+    (one connected blob passes, however large, wherever it sits) - not "did the
+    change actually land on the product region." A realism edit that cleanly
+    relocated its one contiguous change to the WRONG part of the frame would pass
+    containment outright. Falls back to containment (returns None here) only when
+    zone_positions has nothing product-shaped recorded - never fabricates one."""
+    for phrase in (blueprint.get("layout_detail") or {}).get("zone_positions") or []:
+        if _PRODUCT_POSITION_PATTERN.search(phrase or ""):
+            return phrase
+    return None
+
+
 def _position_for_target(descriptor, blueprint):
     """The free-text position string this target's zone is recorded at, or None if
     none is recorded. None no longer means "skip" (2026-08-14) - only SKIP_TARGETS
@@ -126,8 +160,10 @@ def _position_for_target(descriptor, blueprint):
         return (blueprint.get("face_present") or {}).get("location")
     if target == "badge":
         return _structural_zone_position(blueprint, "badge")
-    # offer, banner, product, prop, person_body: no position field exists for these
-    # anywhere in schema/blueprint.schema.json - always falls through to containment.
+    if target == "product":
+        return _product_zone_position(blueprint)
+    # prop, person_body, offer, banner: no position field exists for these anywhere
+    # in schema/blueprint.schema.json - always falls through to containment.
     return None
 
 

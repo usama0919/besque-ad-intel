@@ -76,9 +76,12 @@ def test_skip_targets_constant_matches_the_three_whole_frame_effects():
 
 
 def test_product_prop_person_body_offer_banner_have_no_zone_position():
-    # No position field exists for these anywhere in the schema - expected_change_
-    # region correctly returns None, which check_drift now reads as "use containment",
-    # never "skip" (that's the coverage gap this fix closes).
+    # BLUEPRINT_WITH_TOP_HEADLINE has no layout_detail.zone_positions at all, so
+    # "product" correctly falls back to None here too (see test_product_zone_*
+    # below for when zone_positions DOES name a product phrase) - prop/person_body/
+    # offer/banner have no comparable field anywhere in the schema at all.
+    # expected_change_region returning None is read by check_drift as "use
+    # containment", never "skip" (that's the coverage gap the 2026-08-14 fix closed).
     for target in ("product", "prop", "person_body", "offer", "banner"):
         descriptor = {"target": target, "attribute": "x", "label": target}
         region = expected_change_region(descriptor, BLUEPRINT_WITH_TOP_HEADLINE, W, H)
@@ -170,6 +173,65 @@ def test_person_face_zone_derived_from_face_present_location():
     x0, y0, x1, y1 = region
     assert x0 > W * 0.4  # right-biased
     assert y0 > H * 0.4  # bottom-biased
+
+
+# ---- Product ZONE derivation from layout_detail.zone_positions (2026-08-16, for the
+# bottle-realism edit control): a real recorded position, when one exists, beats the
+# containment fallback - containment alone answers "is the change one coherent blob,"
+# not "did it land on the product" ----
+
+def test_product_zone_derived_from_layout_detail_zone_positions():
+    blueprint = {"layout_detail": {"zone_positions": [
+        "headline top-center", "product mid-frame", "CTA bottom-full-width",
+    ]}}
+    descriptor = {"target": "product", "attribute": "realism", "label": "Product - Realism"}
+    region = expected_change_region(descriptor, blueprint, W, H)
+    assert region is not None
+
+
+def test_product_zone_absent_when_zone_positions_has_no_product_phrase():
+    blueprint = {"layout_detail": {"zone_positions": ["headline top-center", "CTA bottom-full-width"]}}
+    descriptor = {"target": "product", "attribute": "realism", "label": "Product - Realism"}
+    assert expected_change_region(descriptor, blueprint, W, H) is None
+
+
+def test_product_zone_matches_bottle_phrasing_too():
+    blueprint = {"layout_detail": {"zone_positions": ["bottle lower-left"]}}
+    descriptor = {"target": "product", "attribute": "realism", "label": "Product - Realism"}
+    assert expected_change_region(descriptor, blueprint, W, H) is not None
+
+
+def test_realism_edit_uses_zone_method_when_zone_positions_names_product():
+    blueprint = {"layout_detail": {"zone_positions": ["product top-centre"]}}
+    descriptor = {"target": "product", "attribute": "realism", "label": "Product - Realism"}
+    v1 = _png_bytes((10, 10, 10))
+    # change confined to the top-centre zone the phrase points at
+    v2 = _png_bytes((10, 10, 10), patch=(60, 10, 140, 60, (250, 250, 250)))
+    result = check_drift(v1, v2, descriptor, blueprint)
+    assert result["method"] == "zone"
+    assert result["drift_flag"] is False
+
+
+def test_realism_edit_flags_a_single_contiguous_change_in_the_wrong_place():
+    """The exact gap containment alone misses: ONE coherent blob of change - which
+    containment would pass outright, however large - sitting entirely OUTSIDE the
+    recorded product zone. A relocated/wrong-region realism edit must be flagged,
+    not silently accepted because the change happened to be spatially contained."""
+    blueprint = {"layout_detail": {"zone_positions": ["product top-centre"]}}
+    descriptor = {"target": "product", "attribute": "realism", "label": "Product - Realism"}
+    v1 = _png_bytes((10, 10, 10))
+    # one single, fully contiguous patch - but in the BOTTOM half, nowhere near the
+    # recorded top-centre product zone.
+    v2 = _png_bytes((10, 10, 10), patch=(40, 150, 160, 195, (240, 240, 240)))
+    zone_result = check_drift(v1, v2, descriptor, blueprint)
+    assert zone_result["method"] == "zone"
+    assert zone_result["drift_flag"] is True
+
+    # Confirms the premise: the SAME pixels pass outright under containment alone
+    # (no blueprint zone_positions at all) - this is the predicate gap being closed.
+    containment_result = check_drift(v1, v2, descriptor, {})
+    assert containment_result["method"] == "containment"
+    assert containment_result["drift_flag"] is False
 
 
 def test_parse_position_top_centre():

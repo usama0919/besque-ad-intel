@@ -353,7 +353,16 @@ def init_edit_events():
     open-ended by design, unlike the fixed target/attribute/operation columns.
 
     drift_flag is a placeholder for the (out-of-scope, not built) learning layer's future
-    post-hoc drift detector - always NULL/false from this build, never computed here."""
+    post-hoc drift detector - always NULL/false from this build, never computed here.
+
+    drift_method (2026-08-16): which src.drift_check.check_drift method actually ran -
+    "zone", "containment", or "skip" - written on EVERY edit, not only a drifted one.
+    Exists so a containment fallback (no recorded zone position for this target/
+    blueprint) is visible on the row itself, rather than indistinguishable from a
+    clean zone-method pass just because both happen to report drift_flag=false. The
+    explicit ALTER below is required even though the column is also in CREATE TABLE -
+    CREATE TABLE IF NOT EXISTS is a no-op against a table that already exists (see
+    this file's own repeated lesson on this, e.g. review_status/critic_findings)."""
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("""
             CREATE TABLE IF NOT EXISTS edit_events (
@@ -372,11 +381,13 @@ def init_edit_events():
                 entry_source       TEXT DEFAULT 'control',
                 raw_instruction    TEXT DEFAULT '',
                 drift_flag         BOOLEAN DEFAULT false,
+                drift_method       TEXT DEFAULT '',
                 outcome            TEXT DEFAULT 'pending',
                 reject_reason      TEXT DEFAULT '',
                 created_at         TIMESTAMPTZ DEFAULT now()
             )
         """)
+        cur.execute("ALTER TABLE edit_events ADD COLUMN IF NOT EXISTS drift_method TEXT DEFAULT ''")
         conn.commit()
 
 
@@ -1475,7 +1486,8 @@ def insert_edit_event(source_artifact_id, competitor_ad_id, format, angle_id, ta
         return new_id
 
 
-def update_edit_event_result(edit_event_id, result_artifact_id, outcome="pending", reject_reason="", drift_flag=False):
+def update_edit_event_result(edit_event_id, result_artifact_id, outcome="pending", reject_reason="",
+                              drift_flag=False, drift_method=""):
     """Attach the resulting new artifact row (or a final rejection) to an already-logged
     edit_events row - a two-step write (log the attempt, then record its outcome) rather
     than one INSERT, because the result_artifact_id doesn't exist until AFTER the Gemini
@@ -1485,11 +1497,17 @@ def update_edit_event_result(edit_event_id, result_artifact_id, outcome="pending
     AFTER the one automatic retry (if one ran) - never the pre-retry verdict. A drifted
     result is still recorded here with its real outcome/result_artifact_id; drift_flag
     is a SEPARATE signal for the operator to see (keep/retry/revert), never a reason to
-    reject or discard the edit itself."""
+    reject or discard the edit itself.
+
+    drift_method (2026-08-16): which method actually ran - "zone", "containment", or
+    "skip" - written on EVERY edit (not gated on drift_flag), so a containment
+    fallback (no recorded zone position for this target/blueprint) is visible on the
+    row itself rather than silently indistinguishable from a clean zone-method pass."""
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
-            "UPDATE edit_events SET result_artifact_id=%s, outcome=%s, reject_reason=%s, drift_flag=%s WHERE id=%s",
-            (result_artifact_id, outcome, reject_reason, drift_flag, edit_event_id),
+            "UPDATE edit_events SET result_artifact_id=%s, outcome=%s, reject_reason=%s, "
+            "drift_flag=%s, drift_method=%s WHERE id=%s",
+            (result_artifact_id, outcome, reject_reason, drift_flag, drift_method, edit_event_id),
         )
         conn.commit()
 
