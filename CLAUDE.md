@@ -82,6 +82,17 @@ been drafted before — never via Regenerate.**
 
 ## Operational gotchas (learned 3 Aug 2026)
 
+- **Default test command is `python -m pytest tests/ -q`, scoped to the files a change
+  actually touched — never the full suite, unless explicitly asked.** A full run of
+  `tests/` takes ~18 minutes and reports 239 failures, every one of them
+  `psycopg2.OperationalError` on port 5433 (connection refused), never a real
+  regression: this machine's local Postgres 17 service runs on 5432 and is a dev DB,
+  not the isolated test DB `tests/conftest.py` forces every test onto via
+  `DATABASE_URL`. Running the scoped set for the files actually touched, then reading
+  the pass/fail counts, is both faster and the only way a real failure isn't buried
+  under 239 expected ones. **Never background a test run** — if the scoped run
+  legitimately needs the full suite, run it in the foreground and wait; do not let it
+  silently move to a background task the operator has to come back and check later.
 - **Restart uvicorn after any commit touching `src/`.** No `--reload` (deliberate —
   the watcher kills runs mid-flight), so Python holds each module as first imported.
   This cost an afternoon: every ad failed on a `save_artifact` kwarg that was

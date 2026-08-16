@@ -416,8 +416,11 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
             # _bottle_geometry_source_clause is edit-mode-only (2026-08-15) - this is the
             # ONE branch where a competitor reference image AND Besque's own product
             # reference photos are both attached at once, so it's the only place a
-            # source-attribution statement between them is meaningful.
-            (_bottle_identity_clause(product) + _bottle_integration_clause() + _bottle_geometry_source_clause()
+            # source-attribution statement between them is meaningful. _bottle_geometry_
+            # clause (2026-08-16) is the single hardcoded source of truth those source-
+            # attribution facts now defer to, rather than restating shape categories.
+            (_bottle_identity_clause(product) + _bottle_geometry_clause()
+             + _bottle_integration_clause() + _bottle_geometry_source_clause()
              if effective_include_product else "") +
             _operator_instruction_clause(operator_instruction) +
             _critic_feedback_clause(critic_feedback) +
@@ -466,7 +469,7 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
         prompt = (
             brand_rules(include_product=include_product, text_in_image=text_in_image,
                         headline=headline, subtext=subtext) +
-            (_bottle_identity_clause(product) + _bottle_integration_clause()
+            (_bottle_identity_clause(product) + _bottle_geometry_clause() + _bottle_integration_clause()
              if effective_include_product else "") +
             _operator_instruction_clause(operator_instruction) +
             _critic_feedback_clause(critic_feedback) +
@@ -483,7 +486,7 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
         prompt = (
             brand_rules(include_product=include_product, text_in_image=text_in_image,
                         headline=headline, subtext=subtext) +
-            (_bottle_identity_clause(product) + _bottle_integration_clause()
+            (_bottle_identity_clause(product) + _bottle_geometry_clause() + _bottle_integration_clause()
              if effective_include_product else "") +
             _operator_instruction_clause(operator_instruction) +
             _critic_feedback_clause(critic_feedback) +
@@ -1648,6 +1651,73 @@ def _bottle_fixed_clause():
     )
 
 
+PRODUCT_CUTOUT_GCS_KEY = "product_assets/besque_magic_body_oil_cutout.png"
+
+# Fetched at most ONCE per process (the file is a static asset, never changes at
+# runtime) - cached even on failure, never retried within the same process. Without
+# this, a stretch of expired ADC/network trouble costs a real multi-second GCS round
+# trip (or auth failure) on EVERY single generate_image call, not just the first -
+# measured live at ~4-5s per attempt. This mirrors the existing operational practice
+# for ADC issues in this codebase (CLAUDE.md: "Re-auth *and* restart") - a stale
+# None cached here clears on the next process restart, same as any other ADC problem.
+_product_cutout_cache_populated = False
+_product_cutout_bytes_cache = None
+
+
+def _fetch_product_cutout_bytes():
+    """Fetch the Besque Magic Body Oil product cutout (a background-removed packshot)
+    from the asset bucket - fails OPEN, returning None on any error (missing blob, auth
+    failure, network), the same non-fatal contract pipeline.fetch_reference_images'
+    own per-key try/except already uses for the product's other reference photos. An
+    optional extra reference image is never worth failing an otherwise-working
+    generation over. Attached only on the generate path (generate_image), never the
+    realism-only targeted edit path, and only for non-illustrated runs - see
+    generate_image's own gating. Result cached process-wide - see the cache
+    variables' own comment above for why."""
+    global _product_cutout_cache_populated, _product_cutout_bytes_cache
+    if _product_cutout_cache_populated:
+        return _product_cutout_bytes_cache
+    try:
+        from google.cloud import storage as _storage
+        blob = _storage.Client().bucket(assets.asset_bucket_name()).blob(PRODUCT_CUTOUT_GCS_KEY)
+        _product_cutout_bytes_cache = blob.download_as_bytes() if blob.exists() else None
+    except Exception as e:
+        log.warning("could not fetch product cutout %s: %s", PRODUCT_CUTOUT_GCS_KEY, e)
+        _product_cutout_bytes_cache = None
+    finally:
+        _product_cutout_cache_populated = True
+    return _product_cutout_bytes_cache
+
+
+def _bottle_geometry_clause():
+    """2026-08-16: the ONE authoritative statement of the Besque bottle's actual
+    proportions - a fixed, hardcoded constant, never assembled from blueprint,
+    artifact, or DB fields, and never varying by call. Every other place in this file
+    that used to describe bottle shape/proportions/pump/collar in its own words
+    (_bottle_geometry_source_clause, the "confirm... proportions" phrase in the
+    illustrated substitute/add branches of _edit_mode_instruction) has been folded to
+    defer to THIS clause instead of re-stating the categories itself - a second,
+    differently-worded geometry statement nearer the point of use is exactly the
+    "closer wins" contradiction shape this codebase has hit repeatedly (see CLAUDE.md's
+    2026-08-12 finding), so there is now only one place actual proportions are stated.
+
+    Composed into build_image_prompt's generate path only (all three branches, gated
+    on effective_include_product same as _bottle_identity_clause/_bottle_integration_
+    clause) - never the realism-only targeted edit path (src/realism_deltas.py), which
+    sends its own pre-authored delta sentence alone, by design."""
+    return (
+        "Bottle geometry is fixed and identical in every render. Total height is 4.33 "
+        "times the glass body width. The glass body is a straight-sided cylinder with "
+        "parallel walls and no taper, occupying the lower 2.85 body-widths. Above it a "
+        "short shoulder of 0.21 body-widths meets a polished gold collar 0.75 "
+        "body-widths wide and 0.63 body-widths tall. Above the collar sits a black "
+        "pump: a stem 0.43 body-widths wide and a horizontal lever spout overhanging "
+        "the body's left edge by 0.38 body-widths. These proportions never vary with "
+        "scene, crop, style, realism, bottle count, or how large the bottle appears "
+        "in frame."
+    )
+
+
 def _bottle_identity_clause(product):
     """Item 2 (2026-08-13 build): promotes bottle identity to a dedicated STRICT clause
     with the same weight/position as the numbered brand rules - appended immediately
@@ -1729,28 +1799,28 @@ def _bottle_geometry_source_clause():
     proportions between ads - tracking each reference ad's OWN product geometry instead
     of Besque's, exactly the failure mode this clause exists to name and forbid.
 
-    _bottle_identity_clause (above) already states the bottle's fixed facts; this
-    clause instead states WHERE those facts are allowed to come from, explicitly
-    excluding the competitor reference as a source for any of them - a source-
-    attribution gap _bottle_identity_clause's own wording never closed, since it never
-    named the competitor image at all."""
+    REWRITTEN 2026-08-16: this used to enumerate the geometry categories itself
+    (silhouette, height-to-width ratio, neck/shoulder/base geometry, pump/collar
+    hardware design, label shape/placement/border/content) - a SECOND, differently-
+    worded geometry statement sitting near the point of use, exactly the "closer wins"
+    contradiction shape CLAUDE.md's 2026-08-12 finding already names. Now defers
+    entirely to _bottle_geometry_clause's single hardcoded numbers instead of
+    re-describing what they cover - there is exactly one place actual proportions are
+    stated, this clause only says where they may NOT come from."""
     return (
         "BOTTLE GEOMETRY SOURCE (STRICT, NON-NEGOTIABLE, EVERY PRODUCTION STYLE): two "
         "different images are attached for two entirely different jobs, and they must "
         "never be conflated. The COMPETITOR'S reference ad (the first attached image) "
         "supplies RENDERING STYLE ONLY - register, lighting treatment, finish, and "
         "whether the scene reads photographic or flat/illustrated. It supplies NOTHING "
-        "about the Besque bottle's own shape: not its silhouette or body shape, not its "
-        "height-to-width ratio or proportions, not its neck, shoulder, or base "
-        "geometry, not its pump or collar hardware design, not its label's shape, "
-        "placement, border, or content, and not the label's scale relative to the "
-        "bottle. Besque's OWN product reference photo(s) (attached separately, where "
-        "supplied) are the ONLY source for every one of those geometry facts, and every "
-        "one of them is FIXED - identical on every generation, regardless of what "
-        "shape, proportions, or hardware the competitor's OWN product in the reference "
-        "ad happens to show. A bottle whose silhouette, height, width, or proportions "
-        "changes between generations because it is tracking the reference ad's own "
-        "product shape, rather than Besque's, is always wrong - in every register this "
+        "about the Besque bottle's own shape - the bottle's proportions are stated "
+        "exactly, once, in the BOTTLE GEOMETRY clause above, and neither this reference "
+        "ad NOR Besque's own product reference photo(s) (attached separately, where "
+        "supplied) may override, adjust, or re-derive them from what either image shows; "
+        "those photos confirm colour, label, and hardware finish only (see BOTTLE "
+        "IDENTITY above), never shape. A bottle whose proportions change between "
+        "generations because it is tracking the reference ad's own product shape, "
+        "rather than the fixed clause above, is always wrong - in every register this "
         "prompt might otherwise describe. "
     )
 
@@ -2253,11 +2323,13 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             f"of how photographic the attached product reference photo(s) (if any) look - a "
             f"photographic reference photo does not make the DRAWN bottle photographic. "
             f"Use those photos ONLY to confirm this product's exact identity - label design, "
-            f"colours, proportions, and hardware - never as a rendering-style reference; "
+            f"colours, and hardware finish - never as a rendering-style reference and never "
+            f"for shape or proportions, which are fixed exactly as stated in the BOTTLE "
+            f"GEOMETRY clause above, with or without a photo; "
             f"the leak this instruction replaced (2026-08-06, then reversed 2026-08-14) was "
             f"the photo's photographic REGISTER bleeding into the drawing, not its identity "
             f"facts, so withholding the photo is no longer how this is prevented. Where no "
-            f"reference photo is attached for this run, work from silhouette, colour, and "
+            f"reference photo is attached for this run, work from colour and "
             f"the label name alone - \"{name}\". Secondary label content "
             f"(sub-lines, certification icons, fine print) does not need to be legible at "
             f"this scale in this style; name and colour accuracy matter, secondary-text "
@@ -2289,7 +2361,7 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             "place the Besque product (shown in the reference photo(s) that follow, if "
             "any) in its position, matching the original shot's composition as "
             "faithfully as possible. The bottle's own geometry and proportions are "
-            "FIXED (see the bottle-fixed instruction above) - if the reference's own "
+            "FIXED exactly as stated in the BOTTLE GEOMETRY clause above - if the reference's own "
             "product sits inside, on, or against a prop, holder, float, or opening "
             "sized for ITS shape, that PROP is what adapts: resize or reshape it to "
             "properly fit the Besque bottle's real proportions, never the reverse "
@@ -2309,7 +2381,8 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
         # reference has no product to substitute, but include_product=True still means
         # one belongs in the output - added natively into the scene's own illustrated
         # visual language, same drawing constraints as the substitute-illustrated branch
-        # above (no reference photo attached, work from silhouette/colour/name alone),
+        # above (no reference photo attached, work from colour/name alone - shape is
+        # always fixed by _bottle_geometry_clause regardless),
         # just with no competitor product to remove first. Placement is DERIVED from this
         # reference's own observed composition, never a fixed position.
         name = product_name or "Besque"
@@ -2325,8 +2398,9 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             f"own illustrated visual language: flat, matching the surrounding artwork's "
             f"own line weight and shading, never a photograph or photorealistic render "
             f"composited into the drawing. No product reference photo is attached this "
-            f"run, on purpose: work from silhouette, colour, and the label name alone - "
-            f"\"{name}\". " + placement_instruction +
+            f"run, on purpose: work from colour and the label name alone - shape is "
+            f"already fixed by the BOTTLE GEOMETRY clause above, with or without a "
+            f"photo - \"{name}\". " + placement_instruction +
             "Secondary label content (sub-lines, certification icons, fine print) does "
             "not need to be legible at this scale in this style; name and colour "
             "accuracy matter, secondary-text legibility does not. "
@@ -2960,6 +3034,20 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
         # Defense in depth for rule 7's productless mode: the prompt already says no
         # product may appear, but don't also hand the model reference photos of one.
         reference_images = (reference_images or []) if include_product else []
+        # Product cutout (2026-08-16): an EXTRA reference Part, alongside the product's
+        # own configured reference photos - every non-illustrated generate run, gated
+        # the same way (include_product) plus a style check. Illustrated is excluded
+        # for the same reason every other photographic reference is withheld there
+        # (see this function's own illustrated-register docstring section above) - a
+        # real photograph must not bleed its photographic register into a hand-drawn
+        # scene. resolved_style mirrors build_image_prompt's own precedence exactly
+        # (operator-supplied realism, else the reference's own observed production
+        # style) so the two functions can never disagree about which register this is.
+        resolved_style = (realism or "").strip() or (blueprint.get("production_style") or {}).get("style", "")
+        if include_product and resolved_style != "illustrated":
+            cutout_bytes = _fetch_product_cutout_bytes()
+            if cutout_bytes:
+                reference_images = reference_images + [cutout_bytes]
         competitor_part = None
         if edit_mode and competitor_image_bytes:
             competitor_part = genai_types.Part.from_bytes(

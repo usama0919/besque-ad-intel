@@ -52,6 +52,28 @@ def test_deconstruct_invalid_response_raises():
         deconstruct.deconstruct_from_response(bad)
 
 
+# ---- Bottle shape language filter (2026-08-16) - wired into deconstruct_from_response
+# itself, so every real deconstruct call gets it, not just a caller that remembers to ----
+
+def test_deconstruct_from_response_strips_bottle_shape_language():
+    payload = json.loads(_fake_claude_json())
+    payload["visual"]["subject"] = "a tall cylindrical amber bottle"
+    payload["product_category"] = {"category": "body_oil", "confidence": "high",
+                                    "signals": ["cylindrical applicator wand", "clear glass"]}
+    payload["layout_detail"] = {"product_count": 1,
+                                 "zone_positions": ["tall pump collar bottle mid-frame", "CTA bottom"]}
+    bp = deconstruct.deconstruct_from_response(json.dumps(payload))
+    assert bp["visual"]["subject"] == ""
+    assert bp["product_category"]["signals"] == ["clear glass"]
+    assert bp["layout_detail"]["zone_positions"] == ["CTA bottom"]
+
+
+def test_deconstruct_from_response_leaves_clean_blueprint_unchanged():
+    raw = _fake_claude_json()
+    bp = deconstruct.deconstruct_from_response(raw)
+    assert bp["visual"]["subject"] == "woman"
+
+
 def test_build_prompt_inserts_values():
     prompt = deconstruct.build_prompt("AD1", "PageX", "2026-01-01", "https://x.com")
     assert "AD1" in prompt and "PageX" in prompt

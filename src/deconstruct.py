@@ -3,6 +3,7 @@ import os
 import json
 import base64
 import logging
+import re
 import time
 from pathlib import Path
 
@@ -109,12 +110,121 @@ class BlueprintValidationError(ValueError):
         self.validation_error = validation_error
 
 
+# BOTTLE SHAPE LANGUAGE FILTER (2026-08-16): the Besque bottle's geometry is now a single
+# fixed, hardcoded fact (generate_image_prompt._bottle_geometry_clause) - no blueprint
+# field may ever be allowed to compete with it by describing a product's shape or
+# proportions, since blueprint describes the COMPETITOR reference ad and its own product
+# geometry has repeatedly leaked into the SUBSTITUTED Besque bottle (see CLAUDE.md's
+# 2026-08-15 _bottle_geometry_source_clause note: "the rendered bottle changed silhouette,
+# height, width, and proportions between ads - tracking each reference ad's OWN product
+# geometry instead of Besque's"). Structural fix, not a prompt clause - the standing
+# lesson this whole codebase keeps re-learning: strip the language at its SOURCE (here,
+# once, at deconstruct time) rather than ask every downstream prompt-assembly site not to
+# use it.
+#
+# Scoped to exactly the three blueprint fields TRACED to actually reach assembled prompt
+# text as free text (not every field that merely exists):
+#   - product_category.signals[] - quoted VERBATIM into _competitor_props_clause's
+#     removal instruction when a signal also matches a PROP_KEYWORD.
+#   - visual.subject - the ONE place this field is read at all in prompt construction
+#     (_competitor_props_clause again); every other consumer deliberately avoids it.
+#   - layout_detail.zone_positions[] - folded into _scene_composition_facts' "OBSERVED
+#     SCENE COMPOSITION" sentence (product ADD placement) and drift_check's product zone
+#     bbox - both meant to be POSITION-only, per deconstruct's own field description
+#     ("short phrases locating each element"), never a shape word riding along.
+# scene_elements[].element/.role is deliberately NOT filtered here: that field's own
+# classifier instruction already excludes the product entirely ("every element OTHER
+# THAN the product"), and its usual content (props, surfaces, background objects) can
+# legitimately contain words like "round" or "curved" with nothing to do with bottle
+# geometry - blanket-filtering it would discard real prop detail for no traced benefit.
+#
+# Deliberately narrow, unambiguous geometry vocabulary - NOT generic adjectives like
+# "tall"/"wide"/"narrow" that legitimately describe camera framing or a person in
+# visual.subject ("a tall woman", "a wide shot") and would false-positive constantly.
+# Every term here is a bottle/container-anatomy or dimension word with no ordinary
+# non-geometry reading in this context.
+_BOTTLE_SHAPE_KEYWORDS = (
+    "silhouette", "cylindrical", "cylinder", "cylinders", "tapered", "taper",
+    "hourglass", "teardrop", "bulbous", "straight-sided", "straight sided",
+    "collar", "pump", "neck", "shoulder", "proportion", "proportions",
+    "dimension", "dimensions", "height-to-width", "body-width", "body width",
+)
+_BOTTLE_SHAPE_PATTERN = re.compile(
+    r"\b(?:" + "|".join(re.escape(kw) for kw in _BOTTLE_SHAPE_KEYWORDS) + r")\b",
+    re.IGNORECASE,
+)
+
+# The exact field paths this filter touches - named once here so deconstruct_image's
+# caller (and anyone auditing this) can report/log precisely what was filtered, rather
+# than a vague "some fields."
+BOTTLE_SHAPE_FILTERED_FIELDS = (
+    "product_category.signals[]", "visual.subject", "layout_detail.zone_positions[]",
+)
+
+
+def _contains_bottle_shape_language(text):
+    return bool(_BOTTLE_SHAPE_PATTERN.search(text or ""))
+
+
+def strip_bottle_shape_language(blueprint):
+    """Drops (never edits-in-place-and-mangles) any value in the three fields named by
+    BOTTLE_SHAPE_FILTERED_FIELDS that contains bottle/container geometry language - a
+    list entry is dropped whole (never partially word-scrubbed, which risks leaving a
+    grammatically broken fragment); visual.subject is blanked to "" (still schema-valid -
+    a required string, not a required NON-EMPTY string) rather than the key removed.
+    Returns (blueprint, filtered) where filtered is a dict {field_path: [dropped
+    values]} - empty dict when nothing matched, so a caller can log exactly what
+    happened without guessing. Operates on a shallow copy of the blueprint and its
+    mutated sub-dicts/lists only - the caller's original object is never mutated."""
+    blueprint = dict(blueprint or {})
+    filtered = {}
+
+    product_category = dict(blueprint.get("product_category") or {})
+    signals = list(product_category.get("signals") or [])
+    kept_signals = [s for s in signals if not _contains_bottle_shape_language(s)]
+    dropped_signals = [s for s in signals if _contains_bottle_shape_language(s)]
+    if dropped_signals:
+        product_category["signals"] = kept_signals
+        blueprint["product_category"] = product_category
+        filtered["product_category.signals[]"] = dropped_signals
+
+    visual = dict(blueprint.get("visual") or {})
+    subject = visual.get("subject") or ""
+    if _contains_bottle_shape_language(subject):
+        visual["subject"] = ""
+        blueprint["visual"] = visual
+        filtered["visual.subject"] = [subject]
+
+    layout_detail = dict(blueprint.get("layout_detail") or {})
+    zone_positions = list(layout_detail.get("zone_positions") or [])
+    kept_zones = [z for z in zone_positions if not _contains_bottle_shape_language(z)]
+    dropped_zones = [z for z in zone_positions if _contains_bottle_shape_language(z)]
+    if dropped_zones:
+        layout_detail["zone_positions"] = kept_zones
+        blueprint["layout_detail"] = layout_detail
+        filtered["layout_detail.zone_positions[]"] = dropped_zones
+
+    return blueprint, filtered
+
+
 def deconstruct_from_response(raw_text: str) -> dict:
-    """Parse and validate a blueprint from a raw model response. Raises if invalid."""
+    """Parse and validate a blueprint from a raw model response. Raises if invalid.
+
+    Bottle-shape language is stripped AFTER validation (2026-08-16, strip_bottle_shape_
+    language) - schema validity is checked against what Claude actually returned, never
+    against a version this function has already edited, and the strip only ever
+    narrows a list or blanks one string, never invalidates a blueprint that was
+    already valid. Any field actually filtered is logged by name and value so a
+    stripped ad stays diagnosable from the run log, the same discipline this codebase
+    already applies to every other silently-defaulted field."""
     blueprint = parse_blueprint(raw_text)
     err = validator.validation_error(blueprint)
     if err:
         raise BlueprintValidationError(f"Blueprint failed schema validation: {err}", err)
+    blueprint, filtered = strip_bottle_shape_language(blueprint)
+    if filtered:
+        log.info("deconstruct: stripped bottle-shape language for ad %s: %s",
+                  blueprint.get("ad_id", "?"), filtered)
     return blueprint
 
 # ---- Live Claude vision call (wired at kickoff) ----

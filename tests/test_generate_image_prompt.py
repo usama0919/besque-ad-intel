@@ -1307,20 +1307,25 @@ def test_bottle_integration_clause_pump_orientation_follows_scene_not_reference(
 def test_bottle_geometry_source_clause_names_competitor_as_style_only():
     clause = generate_image_prompt._bottle_geometry_source_clause()
     assert "supplies RENDERING STYLE ONLY" in clause
-    assert "not its silhouette or body shape" in clause
-    assert "not its height-to-width ratio or proportions" in clause
-    assert "not its neck, shoulder, or base geometry" in clause
-    assert "not its pump or collar hardware design" in clause
-    assert "not its label's shape, placement, border, or content" in clause
-    assert "not the label's scale relative to the bottle" in clause
+    assert "It supplies NOTHING about the Besque bottle's own shape" in clause
 
 
-def test_bottle_geometry_source_clause_names_product_photos_as_the_only_geometry_source():
+def test_bottle_geometry_source_clause_defers_to_bottle_geometry_clause_not_photos():
+    """2026-08-16: this clause no longer re-enumerates geometry categories (silhouette,
+    height-to-width ratio, neck/shoulder/base, pump/collar hardware) or names product
+    reference photos as a geometry source - a second, differently-worded geometry
+    statement nearer the point of use is exactly the contradiction shape this file's
+    guardrails note warns about. It defers entirely to _bottle_geometry_clause's fixed
+    numbers, and reference photos are now scoped to identity (colour/label/hardware
+    finish) only, never shape."""
     clause = generate_image_prompt._bottle_geometry_source_clause()
-    assert "Besque's OWN product reference photo(s)" in clause
-    assert "are the ONLY source for every one of those geometry facts" in clause
-    assert "regardless of what shape, proportions, or hardware the competitor's OWN " \
-           "product in the reference ad happens to show" in clause
+    assert "stated exactly, once, in the BOTTLE GEOMETRY clause above" in clause
+    assert "may override, adjust, or re-derive them" in clause
+    assert "confirm colour, label, and hardware finish only" in clause
+    # None of the old per-category enumeration survives.
+    assert "height-to-width ratio" not in clause
+    assert "neck, shoulder, or base" not in clause
+    assert "pump or collar hardware design" not in clause
 
 
 def test_bottle_geometry_source_clause_reaches_edit_mode_prompt_when_product_shown():

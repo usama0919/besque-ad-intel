@@ -1742,7 +1742,10 @@ def test_edit_mode_instruction_illustrated_never_points_at_photo_for_rendering_s
     assert "regardless" in instruction.lower()
     # The genuine no-photo fallback wording must still exist for a product with zero
     # configured reference images - not removed, only no longer the unconditional case.
-    assert "work from silhouette, colour, and" in instruction.lower()
+    # No longer names "silhouette" here (2026-08-16): shape is always fixed by
+    # _bottle_geometry_clause, with or without a photo - only colour/name are ever
+    # derived from "no photo attached".
+    assert "work from colour and" in instruction.lower()
 
 
 def test_edit_mode_instruction_illustrated_names_product_by_name():
