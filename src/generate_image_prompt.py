@@ -5,7 +5,7 @@ import math
 import os
 import re
 from PIL import Image, ImageDraw
-from src import assets, generate_image_prompt_writer, compliance
+from src import assets, generate_image_prompt_writer
 from src.compliance_rules import COMPLIANCE_RULES
 
 IMAGE_MODEL = os.getenv("IMAGE_MODEL", "placeholder-image-model")
@@ -424,9 +424,8 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
              if effective_include_product else "") +
             _operator_instruction_clause(operator_instruction) +
             _critic_feedback_clause(critic_feedback) +
-            _scene_elements_clause(blueprint.get("scene_elements")) +
+            _objects_clause(blueprint.get("objects")) +
             _semantic_split_clause(blueprint.get("semantic_split")) +
-            _illustrated_elements_clause(blueprint.get("scene_elements"), resolved_style) +
             # include_product here is the RAW operator toggle - identical to
             # effective_include_product since the 2026-08-07 reference usability gate
             # reversal (reference_has_product no longer forces effective_include_product
@@ -442,14 +441,11 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
                                    substance_colour=(product or {}).get("substance_colour"),
                                    style=resolved_style,
                                    scene_lighting=scene_lighting,
-                                   typography_zones=blueprint.get("typography_zones"),
-                                   structural_zones=blueprint.get("structural_zones"),
                                    cta_text=cta_text, product_name=(product or {}).get("name"),
                                    panel_copy=panel_copy, testimonial=testimonial,
                                    certifications=(product or {}).get("certifications"),
                                    competitor_props_clause=_competitor_props_clause(blueprint),
                                    face_present=blueprint.get("face_present"),
-                                   testimonial_zones=blueprint.get("testimonial_zones"),
                                    clone_mode=clone_mode) +
             # product_clause already omits its own PLACEMENT sentence when
             # already_placed_by_substitution (edit_mode and reference_has_product) is
@@ -473,9 +469,8 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
              if effective_include_product else "") +
             _operator_instruction_clause(operator_instruction) +
             _critic_feedback_clause(critic_feedback) +
-            _scene_elements_clause(blueprint.get("scene_elements")) +
+            _objects_clause(blueprint.get("objects")) +
             _semantic_split_clause(blueprint.get("semantic_split")) +
-            _illustrated_elements_clause(blueprint.get("scene_elements"), resolved_style) +
             creative_description.strip() + " "
             + product_clause
             + _bottle_fixed_clause() + _bottle_register_clause(scene_lighting, resolved_style) +
@@ -490,9 +485,8 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
              if effective_include_product else "") +
             _operator_instruction_clause(operator_instruction) +
             _critic_feedback_clause(critic_feedback) +
-            _scene_elements_clause(blueprint.get("scene_elements")) +
+            _objects_clause(blueprint.get("objects")) +
             _semantic_split_clause(blueprint.get("semantic_split")) +
-            _illustrated_elements_clause(blueprint.get("scene_elements"), resolved_style) +
             f"A premium skincare advertisement image for Besque, a natural body-oil brand for women 40+. "
             f"Composition and setting: {layout}. (If this implies a person, render them per compliance "
             f"rule C1 - a generic, non-identifiable model, never the specific individual described - "
@@ -779,49 +773,91 @@ def _critic_feedback_clause(critic_feedback=None):
     )
 
 
-def _scene_elements_clause(scene_elements=None):
-    """Item 9 consumption (2026-08-11): deconstruct's scene_elements inventory
-    (schema/blueprint.schema.json), injected as a positive MUST-INCLUDE list - only
-    entries flagged essential=true, each named individually with its own role, never a
-    blanket "keep everything" instruction that would just restate the reproduce-
-    faithfully language already above it in edit mode, and would have nothing to attach
-    to at all in generate mode. Phrased as inclusion, not prohibition, per instruction:
-    this tells the model what must be IN the output, not what to avoid.
+_OBJECT_CLOSURE_SENTENCE = (
+    "The scene contains these objects and no others. Do not add any object, "
+    "body part, hair, hand, garment or prop that is not listed above."
+)
 
-    depicts_competitor_category (2026-08-13, item 2 redesign) EXCLUDED here even when
-    essential=true - those entries are the SUBSTITUTE list now, handled by
-    _illustrated_elements_clause instead of the KEEP list here. Before this field
-    existed, an essential element that happened to visually depict the competitor's
-    product category (a drawn steak, a spoon of powder) had no way to be told apart
-    from a register-neutral essential element (a hand, a towel) - both were named as
-    MUST-INCLUDE here, with nothing anywhere saying the former should be substituted
-    instead of kept. The two filters are a strict partition on the SAME field
-    (depicts_competitor_category), so no single entry can ever satisfy both at once -
-    an object named here is never also named by _illustrated_elements_clause, and vice
-    versa, by construction rather than by convention.
 
-    Fixed position, same reasoning as _operator_instruction_clause/_critic_feedback_
-    clause: called identically in all three build_image_prompt branches (edit mode,
-    writer/creative_description, flat template), right after critic feedback and before
-    whatever supplies the scene text - so a reference's essential elements are never lost
-    to whichever branch happens to fire. Returns "" when scene_elements is empty or has
-    nothing flagged essential-and-neutral, so a blueprint from before this field
-    existed, or one where every essential element is competitor-category, produces
-    byte-for-byte the same prompt as before this existed (in the latter case, because
-    the SUBSTITUTE clause below carries those elements instead - never silently
-    dropped from both)."""
-    essential = [e for e in (scene_elements or []) if e.get("essential") and not e.get("depicts_competitor_category")]
-    if not essential:
+def _objects_clause(objects=None):
+    """2026-08-17: REPLACES _scene_elements_clause/_illustrated_elements_clause -
+    deconstruct.py no longer produces scene_elements at all (schema/blueprint.schema.json),
+    every visually distinct thing in the reference is now one entry in blueprint.objects,
+    each carrying its own disposition (substitute/keep/drop) already mechanically resolved
+    by deconstruct.resolve_disposition BEFORE this function ever sees it - this function
+    never re-judges ownership/brand-marking itself, it only phrases whatever disposition
+    is already on the object.
+
+    One line per object, grouped by disposition into a single STRICT clause, followed
+    UNCONDITIONALLY by _OBJECT_CLOSURE_SENTENCE verbatim, last - the direct fix for
+    generation adding objects the reference never had (a floating hair wisp, extra
+    faces): previously nothing in this prompt ever stated the object list was COMPLETE,
+    only what to include/substitute, which left "is there anything else I could add"
+    open by omission.
+
+    - keep: reproduced exactly as shown, unchanged - the analogue of the old
+      MUST-INCLUDE list, but for every object the resolved disposition says to keep,
+      not only ones flagged essential.
+    - substitute, kind=="product": explicitly deferred to BOTTLE IDENTITY/BOTTLE
+      GEOMETRY above rather than restating this object's own colours/shape - the same
+      "identity comes from the fixed clauses, never from what the reference itself
+      shows" principle _bottle_geometry_source_clause already establishes, applied at
+      the object level so a competitor's own product proportions can never leak in via
+      this clause instead.
+    - substitute, any other kind: a deliberately GENERIC instruction - replace with
+      Besque's own equivalent content, never inventing a new claim. This schema has no
+      zone-type-specific taxonomy (offer/badge/certification/testimonial/price/
+      disclaimer are no longer distinct types) - the old _structural_zones_clause's
+      per-type substitution business logic (fill an offer badge with offer_text, a
+      certification badge with real certifications, a testimonial with a real review,
+      remove an award badge unconditionally, etc.) has NO equivalent here. That
+      precision is a real, deliberate loss against the old system, not an oversight -
+      see CLAUDE.md/the handover report for this session.
+    - drop: named as ABSENT, not silently omitted - the object's own description is
+      quoted so the model knows exactly what must not appear, same "name what to
+      remove" pattern _competitor_props_clause already uses.
+
+    Returns "" when objects is empty/absent (a legacy blueprint predating this schema,
+    or a blueprint with a genuinely empty list, which schema validation should never
+    actually allow through in practice) - never a fabricated object list."""
+    objects = objects or []
+    if not objects:
         return ""
-    bullets = " ".join(
-        f"({i}) {e.get('element', '')} - {e.get('role', '')}"
-        for i, e in enumerate(essential, start=1)
-    )
+    lines = []
+    for obj in objects:
+        obj = obj or {}
+        disposition = obj.get("disposition")
+        description = (obj.get("description") or obj.get("object_id") or "object").strip()
+        role = obj.get("role") or ""
+        if disposition == "keep":
+            lines.append(f"KEEP: {description} ({role}) - reproduce exactly as shown, unchanged.")
+        elif disposition == "substitute":
+            if obj.get("kind") == "product":
+                lines.append(
+                    "SUBSTITUTE: this position held a competitor product - place the "
+                    "Besque product here instead, at the same position and scale. Its "
+                    "identity (shape, proportions, colours, label) comes ONLY from the "
+                    "BOTTLE IDENTITY and BOTTLE GEOMETRY clauses above, never from this "
+                    "object's own colours or description."
+                )
+            else:
+                lines.append(
+                    f"SUBSTITUTE: replace this {obj.get('kind') or 'object'} "
+                    f"(\"{description}\") with Besque's own equivalent content, in the "
+                    f"same position - aligned with this ad's authorised copy/offer "
+                    f"elsewhere in this prompt where relevant, never inventing a new claim."
+                )
+        elif disposition == "drop":
+            lines.append(
+                f"ABSENT: the {description} that appeared here is REMOVED - it must not "
+                f"appear anywhere in the output; close the space naturally with the "
+                f"surrounding surface and lighting."
+            )
+    if not lines:
+        return ""
+    bullets = " ".join(f"({i}) {line}" for i, line in enumerate(lines, start=1))
     return (
-        f"SCENE ELEMENTS TO INCLUDE (STRICT): the reference's own composition depends on "
-        f"the following elements - each one MUST appear in the output, named individually "
-        f"with the role it plays here, not merely implied by the setting or left to chance: "
-        f"{bullets} "
+        f"SCENE OBJECTS (STRICT, COMPLETE INVENTORY): {bullets} {_OBJECT_CLOSURE_SENTENCE} "
     )
 
 
@@ -862,111 +898,6 @@ def _semantic_split_clause(semantic_split=None):
         f"concern, on the SAME subject: {after}. Rendering the same skin condition on "
         f"both sides is a failure - the contrast between them is the entire point of "
         f"this format. "
-    )
-
-
-def _illustrated_elements_clause(scene_elements=None, style=None):
-    """Item 2 REDESIGN (2026-08-13): repointed at deconstruct's scene_elements
-    inventory (schema/blueprint.schema.json), filtered to depicts_competitor_category
-    entries - NOT a separate top-level illustrated_elements field. That field was built
-    and wired (a228539/d57134c) but left permanently unpopulated (no schema, no
-    deconstruct extraction), and the same-day audit that found it inert also found
-    _scene_elements_clause had no style gate and fires on essential=true alone, with
-    nothing reconciling it against a separately-populated illustrated_elements list -
-    the same drawn steak could be named MUST-INCLUDE by one clause and MUST-SUBSTITUTE
-    by the other, with no shared field to tell them apart. depicts_competitor_category
-    makes this ONE list with one boolean instead of two independently-populated ones:
-    _scene_elements_clause keeps essential-and-NOT-depicts_competitor_category
-    (register-neutral); this substitutes every depicts_competitor_category entry,
-    essential or not - an incidental drawn steak argues "protein supplement" just as
-    much as an essential one, so essential is not a gate here. The partition is
-    structural (one shared field, mutually exclusive filters), not a convention either
-    function could silently drift from.
-
-    Live finding this answers: on illustrated references, generation correctly
-    rewrites the TEXT to Besque but clones these drawn elements unchanged (a steak, a
-    spoon of collagen powder, a hair strand) - the illustration still visually argues
-    the competitor's product category (a protein supplement) while the words say body
-    oil. Same reasoning as _scene_elements_clause/_competitor_props_clause: a bare
-    "match the reference" instruction has nothing concrete to act on; naming each
-    element and its role gives generation something to actually substitute.
-
-    Deliberately does NOT name a specific replacement ingredient/visual per element -
-    inventing "a drop of vitamin E" or similar with no basis in the product's real
-    ingredients would itself be a fabricated product fact (compliance C3). Also
-    deliberately does NOT suggest identifiable produce (a citrus slice, a flower) as
-    an example substitute (removed 2026-08-13, same audit that added this redesign) -
-    a drawn, nameable ingredient is ITSELF an implied ingredient claim, the same class
-    of fabrication compliance C3 already forbids and the same reason products.
-    description was trimmed of mechanism claims earlier this session. Names only an
-    oil droplet or an abstract botanical FORM (a plain leaf/petal shape, never a
-    specific named flower or fruit) as acceptable substitutes - visual categories with
-    no specific-ingredient claim attached, drawn NATIVELY in the reference's own
-    illustrated style at the same position - never the literal off-brand item redrawn
-    unchanged, and never a photographic/photorealistic insert into a drawing.
-
-    UNGATED from style == "illustrated" (2026-08-13, live audit): what an object
-    DEPICTS is independent of HOW it is drawn - a chain-and-padlock metaphor prop
-    argues the same competitor claim whether it's a flat illustration, a photograph of
-    a real physical prop, or a 3D render. The old style=="illustrated" gate meant a
-    photographic or 3D-rendered reference had NO clause covering these objects at all:
-    _competitor_props_clause's PROP_KEYWORDS matches none of chain/padlock/donut/
-    weight-label, and the general product-substitution instructions only ever address
-    the PRODUCT itself, never a symbolic prop beside it. Now fires on ANY register
-    whenever a depicts_competitor_category entry exists; only the DRAWING instruction
-    for the replacement stays register-conditional - native illustrated style when
-    style=="illustrated", photorealistic integration into the scene otherwise (the
-    same photographic-vs-illustrated distinction _bottle_register_clause/
-    _register_lighting_only_clause already draw for the product itself, applied here
-    to a prop instead).
-
-    Checked for contradiction with _competitor_props_clause (PROP_KEYWORDS, matched
-    against product_category.signals/visual.subject free text) before finalising this
-    ungating: that clause says REMOVE, never redraw; this one says SUBSTITUTE with a
-    replacement. For the concrete objects this fix was written for (chain, padlock,
-    donut, weight-loss label) there is no overlap - none match PROP_KEYWORDS - but a
-    future object could match both (e.g. an "eye-diagram", which contains "diagram").
-    Rather than try to deduplicate two inputs with no shared identity key (a keyword
-    hit in free text vs. a structured scene_elements entry), _competitor_props_clause
-    now states an explicit precedence: if the same element is also named in THIS
-    clause's own SUBSTITUTE list, that instruction governs instead of plain removal -
-    see its own docstring/text for the added sentence.
-
-    Fixed position, same reasoning as _scene_elements_clause: called identically in
-    all three build_image_prompt branches. Returns "" when nothing is flagged
-    depicts_competitor_category, so a blueprint from before this field existed
-    produces byte-for-byte the same prompt as before this existed."""
-    competitor_elements = [e for e in (scene_elements or []) if e.get("depicts_competitor_category")]
-    if not competitor_elements:
-        return ""
-    bullets = " ".join(
-        f"({i}) \"{e.get('element', '')}\" ({e.get('role', '')})"
-        for i, e in enumerate(competitor_elements, start=1)
-    )
-    if style == "illustrated":
-        drawing_instruction = (
-            "Draw the replacement NATIVELY in this scene's own illustrated style - "
-            "same line weight, shading, and position as the original - never a "
-            "photograph or photorealistic element composited into the drawing. "
-        )
-    else:
-        drawing_instruction = (
-            "Render the replacement photorealistically, integrated into this scene "
-            "exactly as the object it replaces was - same position, scale, and "
-            "lighting as the original - never a flat illustration or drawn element "
-            "composited into a photographic or 3D-rendered scene. "
-        )
-    return (
-        f"COMPETITOR ELEMENTS TO SUBSTITUTE (STRICT): the reference's own scene includes these "
-        f"elements, none of which are Besque's - {bullets}. Each one exists to make "
-        f"the COMPETITOR's argument (an ingredient, prop, symbol, or metaphor specific "
-        f"to what they sell), not a body oil - keeping any of them unchanged leaves "
-        f"the scene arguing a different product even after the text is rewritten to "
-        f"Besque. Replace EACH with a generic, on-brand oil-adjacent visual - an oil "
-        f"droplet, or an abstract botanical form (a plain leaf or petal shape, never a "
-        f"specific, identifiable, nameable flower or fruit) - never a specific named "
-        f"ingredient not in this product's real ingredient list, and never the "
-        f"reference's own item redrawn or re-photographed unchanged. " + drawing_instruction
     )
 
 
@@ -1186,32 +1117,15 @@ def _suppressed_container_exception(suppressing_text, suppressing_offer, suppres
 # because its removal carries an extra rule the others don't (any pointing asterisk/
 # footnote marker must go with it - 2026-08-06, Grüns GLP-1 leak).
 
-# SUBSTITUTION AS ONE RULE, badge/pill/price/callout rows (2026-08-07, generalised same
-# day after two real two-bottle references both lost their offer pill and their award tag
-# entirely): whatever tag, badge, pill, price block, or callout the REFERENCE happens to
-# contain is reproduced IN PLACE - same position, shape, size, typography, read straight
-# off that zone's own `position`/`container`/`detail` fields, never a hardcoded position or
-# layout - filled with a genuine Besque counterpart, or removed and healed if none exists.
-# Never a silent vanish, never a floating element appearing somewhere the reference didn't
-# have one (see the OFFER prose clause below, which this doesn't replace - it's a fallback
-# for a reference where structural_zones didn't capture the container explicitly).
-#
-# A badge's own `detail` decides which counterpart, if any, applies - checked in this
-# order, first match wins:
-#   1. AWARD_BADGE_KEYWORDS (award/editorial/third-party endorsement, e.g. "Allure Best of
-#      Beauty Award Winner") - NO Besque counterpart, ALWAYS removed. Checked first so it
-#      wins any ambiguity - never substitute a cert icon for an award Besque hasn't won.
-#   2. OFFER_BADGE_KEYWORDS (a discount/price/promo badge, e.g. "%-off roundel") - the
-#      operator's own offer_text is the counterpart, substituted ONLY when offer_text was
-#      actually supplied this run; no offer_text means no authorised Besque offer exists,
-#      so it removes, same as the OFFER prose clause's own container rule.
-#   3. CERT_BADGE_KEYWORDS (a certification/seal) - Besque's own real certifications are
-#      the counterpart, substituted ONLY when certifications is non-empty.
-#   4. anything else (a star rating, a "NEW" flag, an unrecognised badge) - removed, no
-#      guessed counterpart.
-AWARD_BADGE_KEYWORDS = ("award", "winner", "best of", "editor", "reader's choice",
-                        "as seen in", "featured in", "recommended by")
-
+# OFFER_BADGE_KEYWORDS (2026-08-07): still live via _structural_zones_have_offer/
+# reference_has_offer_zone below (pipeline.py's clone_mode offer-carrying decision) -
+# _is_award_shaped_badge/_is_cert_shaped_badge/_is_stat_shaped_zone and the per-zone-type
+# badge substitution logic that used to consume this alongside them were deleted
+# 2026-08-17 with _structural_zones_clause (schema/blueprint.schema.json no longer has
+# structural_zones at all; blueprint.objects replaces it, see _objects_clause) - that
+# per-zone-type precision (award vs. offer vs. certification badge, each substituted or
+# removed by its own rule) has no equivalent in the objects model, a real, deliberate
+# loss of capability; see the handover report for this session.
 OFFER_BADGE_KEYWORDS = ("%", "off", "save", "discount", "sale", "deal", "promo", "price")
 
 # Word-boundary matching (2026-08-11) - plain substring matching on OFFER_BADGE_KEYWORDS
@@ -1223,425 +1137,19 @@ _OFFER_BADGE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-CERT_BADGE_KEYWORDS = ("certif", "seal", "organic", "cruelty", "vegan", "natural",
-                       "eco", "dermat", "accredit", "approved", "clinically tested")
-
-
-def _is_award_shaped_badge(detail):
-    detail_lower = (detail or "").lower()
-    return any(kw in detail_lower for kw in AWARD_BADGE_KEYWORDS)
-
 
 def _is_offer_shaped_zone(detail):
     return bool(_OFFER_BADGE_PATTERN.search(detail or ""))
 
 
-def _is_cert_shaped_badge(detail):
-    detail_lower = (detail or "").lower()
-    return any(kw in detail_lower for kw in CERT_BADGE_KEYWORDS)
-
-
-# Stat-shaped zone detection (2026-08-11, product_callout): a callout whose OWN reference
-# content is a numeric/percentage/ratio/timescale claim ("94% saw visible results", "9 out
-# of 10 customers agree", "3x faster", "results in just 7 days") has no Besque counterpart
-# to substitute - Besque did not run the study that produced THAT number, so putting our
-# product name in a container shaped for someone else's statistic isn't a substitution,
-# it's noise wearing the shape of one. Deliberately reuses compliance.py's own numeric-
-# claim patterns rather than a new regex written for this - NUMERIC_CLAIM_PATTERN/
-# RATIO_CLAIM_PATTERN/TIMESCALE_CLAIM_PATTERN already detect the SHAPE of a stat claim
-# generally (any percentage, any "N out of M", any "Nx more/faster/better", any "in N
-# days/weeks/hours"), never a specific number - same "match the shape, not a list of known
-# values" principle _is_award_shaped_badge already uses for award names.
-STAT_CLAIM_PATTERNS = (
-    compliance.NUMERIC_CLAIM_PATTERN, compliance.RATIO_CLAIM_PATTERN, compliance.TIMESCALE_CLAIM_PATTERN,
-)
-
-
-def _is_stat_shaped_zone(detail):
-    detail_text = detail or ""
-    return any(p.search(detail_text) for p in STAT_CLAIM_PATTERNS)
-
-
-def _structural_zones_clause(structural_zones, zone_copy_text=None, cta_text=None, panel_copy=None,
-                              testimonial=None, certifications=None, offer_text=None,
-                              testimonial_zones=None, callout_copy=None):
-    """Wires blueprint.structural_zones (2026-08-06 schema addition) into edit mode - every
-    zone type gets a real substitute-or-remove decision now, read from what THIS reference
-    actually shows, never a hardcoded position or layout:
-    - brand_wordmark: ALWAYS substituted with BESQUE, same position/container, never
-      removed - its absence is the single biggest reason a clone reads as unbranded next
-      to the reference, so this doesn't wait on text_in_image the way the others do.
-    - sub_line / body_copy: substituted with text matching THIS zone specifically -
-      panel_copy (generate_copy.text_zone_targets' per-zone output) wins by exact
-      position-string match when given; zone_copy_text is the fallback, used for every
-      such zone when panel_copy is absent or doesn't cover this position. Callers must
-      pass None for both (not the raw subtext) when text_in_image is off - otherwise these
-      fall to REMOVAL, same as the container-removal exception already does for
-      headline/subtext - never left showing the reference's own words.
-    - cta: substituted with cta_text when supplied, same button shape/position - same
-      None-when-suppressed rule as above.
-    - badge (2026-08-07, SUBSTITUTION AS ONE RULE, generalised same day): checked in order
-      - award/editorial/endorsement (see _is_award_shaped_badge) ALWAYS removes, no Besque
-      counterpart exists; offer/discount-shaped (see _is_offer_shaped_zone) substitutes
-      with offer_text when supplied, else removes; certification-shaped (see
-      _is_cert_shaped_badge) substitutes with certifications when non-empty, else removes;
-      anything else (a star rating, a "NEW" flag) removes. Never a guessed counterpart.
-    - price_anchor (2026-08-07, generalised): substituted with offer_text in the SAME
-      position/shape/size when supplied - a price zone IS an offer zone, whatever its own
-      currency/amount said, that's the competitor's price, not Besque's. Removed when
-      offer_text is falsy, same as any other suppressed-offer container.
-    - product_callout (REVERSED 2026-08-12, Item 2 - was substituted with the bare
-      product_name, unconditionally, on EVERY callout zone found; confirmed live, ad
-      1576971893931336: four callout zones with four genuinely distinct reference
-      details - "Flame & Burns"/thermogenic, "Energy", "Tight Skin", "Nail & Hair" - all
-      four rendered the identical string "Besque Magic Body Oil", because nothing ever
-      gave each zone its OWN copy). Now substituted with callout_copy_by_position's
-      entry for THIS zone's own position (see callout_copy below) - a genuine Besque
-      benefit or property per zone, never the product name repeated across several
-      callouts. A zone with no matching callout copy is REMOVED, not filled with a
-      repeated fallback string - this is the actual fix, not a smaller duplicate.
-      Checked FIRST, same precedence as award-shaped badges (2026-08-11): a stat-shaped
-      callout (see _is_stat_shaped_zone) ALWAYS removes regardless of callout copy - a
-      callout whose reference content is a numeric/percentage/ratio/timescale claim has
-      no Besque counterpart; repeating a benefit phrase in that container isn't a
-      substitution either.
-    - disclaimer: always REMOVED, same as above, but a legal/regulatory/medical disclaimer
-      belonging to the reference brand is never Besque's for ANY product - the removal
-      instruction also explicitly takes any pointing asterisk/footnote marker with it, so
-      no dangling reference is left behind (2026-08-06, Grüns GLP-1 leak).
-    - social_proof (2026-08-06, fabricated-testimonials fix): a single_quote zone is
-      substituted with `testimonial` ONLY when a real one was supplied (a REAL customer
-      review, selected from dedupe.get_reviews_for_product - see
-      pipeline.select_testimonial_review) - rendered verbatim, never reworded or invented.
-      No real review available, or an aggregate_bar (review-count/star-average - held
-      pending approval, see CLAUDE.md), or any other/unrecognised social_proof_kind: ALWAYS
-      REMOVED, never left for the general reproduce-faithfully instruction to govern -
-      that was the actual bug (Gemini invented a plausible-sounding customer quote to fill
-      a testimonial-shaped space it had nothing real to put there).
-
-    Returns (clause_text, substituted_zone_types) - the second value lets the TEXT
-    clause's "entire text budget" ban adjust itself so it never bans a category this
-    function is simultaneously authorising, the same class of writer/rule6 contradiction
-    this codebase has already hit more than once.
-
-    panel_copy (2026-08-06, Grüns GLP-1 leak: a two-panel before/after joke rendered the
-    SAME headline text in both panels; generalised 2026-08-11 to ANY count of sub_line/
-    body_copy zones, not just 2+) is a list of {"position", "text"} dicts, one per zone,
-    keyed by the EXACT position string generate_copy.text_zone_targets echoed back from
-    this same structural_zones list - see generate_copy._text_zone_copy_clause. Before
-    this existed, every sub_line/body_copy zone got the SAME zone_copy_text regardless of
-    how many there were or what each one's own detail described; this routes each zone to
-    its OWN text instead, by position, and falls back to zone_copy_text only for a
-    position panel_copy doesn't cover (or when panel_copy is absent entirely - every
-    existing single-panel blueprint sees byte-for-byte the same behaviour as before).
-
-    testimonial, when given, is {"quote": str, "attribution": str} - a single real review,
-    already selected and length-filtered by the caller (pipeline.py); this function never
-    picks or rewrites it, only decides whether to render it here or remove the zone.
-
-    testimonial_zones (Item 1, 2026-08-12 - deconstruct.py's schema field, previously
-    unread anywhere) supplies PLACEMENT/STYLING detail ONLY for the social_proof
-    substitution above - never content. `testimonial` (select_testimonial_review's real
-    review) stays the sole content source; testimonial_zones' own text_verbatim/
-    attribution (the COMPETITOR's testimonial content) is never read here at all. Matched
-    to a social_proof/single_quote zone by ORDINAL position among such zones encountered
-    in structural_zones, not by string-matching testimonial_zones.placement against
-    structural_zones.position - those are two independently-worded free-text fields, and
-    the common case is exactly one testimonial per ad, where ordinal matching is exact
-    and a string-similarity match would only add a way to guess wrong. None (absent, or
-    exhausted before this zone) reproduces the byte-for-byte prior behaviour - the
-    zone's own container/position still govern, just without the extra styling detail.
-
-    callout_copy (Item 2, 2026-08-12) is the SAME shape as panel_copy - a list of
-    {"position", "text"} dicts, generate_copy.text_zone_targets/_text_zone_copy_clause
-    now covering product_callout zones too (_PANEL_COPY_ZONE_TYPES) - but passed as its
-    OWN parameter, deliberately NOT merged into panel_copy: panel_copy is gated by
-    text_in_image at the caller (_edit_mode_instruction), because sub_line/body_copy
-    zones are genuinely part of the same in-image TEXT BUDGET as headline/subtext (rule
-    6's own wording already lists "additional body copy" in that budget). A
-    product_callout is a self-contained visual element with an icon and a short label -
-    the same category as badge/price_anchor/certifications above, none of which are
-    gated by text_in_image - so callout_copy is passed UNGATED, and product_callout
-    keeps working exactly like badge/price_anchor do regardless of the operator's
-    text_in_image choice."""
-    substituted_zone_types = set()
-    testimonial_zones = testimonial_zones or []
-    testimonial_zone_index = 0
-    if not structural_zones:
-        return "", substituted_zone_types
-
-    panel_copy_by_position = {
-        p.get("position"): p.get("text") for p in (panel_copy or [])
-        if isinstance(p, dict) and p.get("position") and p.get("text")
-    }
-    callout_copy_by_position = {
-        p.get("position"): p.get("text") for p in (callout_copy or [])
-        if isinstance(p, dict) and p.get("position") and p.get("text")
-    }
-
-    substitute_lines = []
-    remove_lines = []
-    disclaimer_lines = []
-    social_proof_remove_lines = []
-    # testimonial_placed (2026-08-12, double-rendering regression): the loop below had
-    # no cap on how many social_proof/single_quote zones it would substitute the SAME
-    # real review into - a reference with TWO such zones (e.g. a speech-bubble quote
-    # AND a caption block reiterating it) got the identical quote+attribution rendered
-    # twice. There is exactly ONE real review per run (select_testimonial_review picks
-    # a single one) - it renders in the FIRST qualifying zone only; any further
-    # social_proof/single_quote zone falls to REMOVE, same as "no real review at all",
-    # since there is genuinely nothing left to put there without inventing a second,
-    # different review (which the existing REMOVE wording already forbids).
-    testimonial_placed = False
-    for z in structural_zones:
-        zt = z.get("zone_type")
-        pos = z.get("position") or "its shown position"
-        container = z.get("container") or "none"
-        if zt == "brand_wordmark":
-            substitute_lines.append(
-                f"- brand_wordmark at {pos} (container: {container}): replace its content "
-                f"with BESQUE - same position, same container shape, never removed."
-            )
-            substituted_zone_types.add(zt)
-        elif zt in ("sub_line", "body_copy"):
-            panel_text = panel_copy_by_position.get(z.get("position"))
-            if panel_text:
-                substitute_lines.append(
-                    f"- {zt} at {pos} (container: {container}): replace its wording with "
-                    f"\"{panel_text}\" - same position, same container, matching the "
-                    f"reference's own line count for this zone where possible, our words only."
-                )
-                substituted_zone_types.add(zt)
-            elif zone_copy_text:
-                # No distinct panel copy for this position - it would otherwise fall
-                # back to re-quoting the same subtext already stated by rule 6's TEXT
-                # POLICY and by _edit_mode_instruction's own TEXT branch, producing a
-                # third literal occurrence of the identical string (2026-08-13 live
-                # finding). Reference that authorisation instead of re-quoting it.
-                substitute_lines.append(
-                    f"- {zt} at {pos} (container: {container}): replace its wording with "
-                    f"the same supporting text already authorised above (TEXT POLICY) - "
-                    f"same position, same container, matching the reference's own line "
-                    f"count for this zone where possible, never a different string."
-                )
-                substituted_zone_types.add(zt)
-            else:
-                remove_lines.append(f"- {zt} at {pos} (container: {container})")
-        elif zt == "cta":
-            if cta_text:
-                substitute_lines.append(
-                    f"- cta at {pos} (container: {container}): replace its label with "
-                    f"\"{cta_text}\" - same button shape and position, our words only."
-                )
-                substituted_zone_types.add(zt)
-            else:
-                remove_lines.append(f"- cta at {pos} (container: {container})")
-        elif zt == "badge":
-            detail = z.get("detail") or ""
-            # Checked in order - first match wins, never a guessed counterpart:
-            # award/editorial (no Besque counterpart, ALWAYS removes) > offer/discount
-            # (operator's offer_text) > certification (Besque's real certifications) >
-            # anything else (removed).
-            if _is_award_shaped_badge(detail):
-                remove_lines.append(f"- badge at {pos} (container: {container})")
-            elif offer_text and _is_offer_shaped_zone(detail):
-                substitute_lines.append(
-                    f"- badge at {pos} (container: {container}): this reads as an "
-                    f"offer/discount badge (\"{detail}\") - replace its content with "
-                    f"this run's authorised offer: \"{offer_text}\" - same shape and "
-                    f"position, never a different number or term."
-                )
-                substituted_zone_types.add(zt)
-            elif certifications and _is_cert_shaped_badge(detail):
-                cert_list = ", ".join(certifications)
-                substitute_lines.append(
-                    f"- badge at {pos} (container: {container}): this reads as a "
-                    f"certification badge (\"{detail}\") - replace its content with "
-                    f"Besque's own real certifications: {cert_list} - same shape and "
-                    f"position, never a certification Besque doesn't actually hold."
-                )
-                substituted_zone_types.add(zt)
-            else:
-                remove_lines.append(f"- badge at {pos} (container: {container})")
-        elif zt == "price_anchor":
-            if offer_text:
-                substitute_lines.append(
-                    f"- price_anchor at {pos} (container: {container}): replace its "
-                    f"content with this run's authorised offer: \"{offer_text}\" - same "
-                    f"position, shape, and size, never the competitor's own price/amount."
-                )
-                substituted_zone_types.add(zt)
-            else:
-                remove_lines.append(f"- price_anchor at {pos} (container: {container})")
-        elif zt == "product_callout":
-            detail = z.get("detail") or ""
-            # Checked first, same reasoning as award-shaped badges above: a stat-shaped
-            # callout has no Besque counterpart at all - a benefit phrase is not a
-            # substitute for someone else's numeric claim, so this wins regardless of
-            # whether callout copy is available.
-            if _is_stat_shaped_zone(detail):
-                remove_lines.append(f"- product_callout at {pos} (container: {container})")
-            else:
-                # REVERSED 2026-08-12 (Item 2): was `elif product_name:` - substituted
-                # the bare product name into EVERY callout zone found, unconditionally.
-                # Confirmed live: 4 distinct reference callouts (thermogenic/energy/
-                # skin-tightening/nail-and-hair) all rendered the identical "Besque
-                # Magic Body Oil". Now keyed by THIS zone's own position into
-                # callout_copy_by_position (generate_copy.py's per-zone panel_copy,
-                # ungated by text_in_image - see this function's own docstring) - a
-                # zone with no matching callout copy is REMOVED, never filled with a
-                # repeated fallback string.
-                text_for_zone = callout_copy_by_position.get(z.get("position"))
-                if text_for_zone:
-                    substitute_lines.append(
-                        f"- product_callout at {pos} (container: {container}): replace "
-                        f"its content with \"{text_for_zone}\" - a genuine Besque "
-                        f"benefit or property specific to THIS callout, same position "
-                        f"and shape, never the product name and never the same text "
-                        f"as any other callout in this image."
-                    )
-                    substituted_zone_types.add(zt)
-                else:
-                    remove_lines.append(f"- product_callout at {pos} (container: {container})")
-        elif zt == "disclaimer":
-            disclaimer_lines.append(f"- disclaimer at {pos} (container: {container})")
-        elif zt == "social_proof":
-            kind = z.get("social_proof_kind")
-            if kind == "single_quote" and testimonial and testimonial.get("quote") and not testimonial_placed:
-                attribution = testimonial.get("attribution") or "a verified customer"
-                # testimonial_zones supplies PLACEMENT/STYLING only (see this function's
-                # own docstring) - matched by ordinal position among social_proof/
-                # single_quote zones, never by string-matching two independently-worded
-                # free-text fields. Exhausted/absent leaves styling_instruction empty -
-                # byte-for-byte the prior wording, just without the extra detail.
-                styling_zone = (testimonial_zones[testimonial_zone_index]
-                                if testimonial_zone_index < len(testimonial_zones) else None)
-                testimonial_zone_index += 1
-                styling_instruction = ""
-                if styling_zone and styling_zone.get("styling"):
-                    styling_instruction = (
-                        f" Match this reference's own styling for the card/container "
-                        f"itself (never its wording, which comes only from the real "
-                        f"review above): {styling_zone['styling']}"
-                    )
-                    if styling_zone.get("placement"):
-                        styling_instruction += f" Position it at {styling_zone['placement']}."
-                    # Account chrome carve-out (2026-08-13 evening, rule C9 extended): a
-                    # live draft carried an identifiable-looking avatar face AND,
-                    # separately, a real Instagram handle verbatim into a Besque draft -
-                    # "match this reference's own styling for the card" said nothing about
-                    # WHOSE account the card belongs to, so it read as license to
-                    # reproduce both. Stated here, at the exact point of use, not as a
-                    # separate rule stated further away - the same "closer wins" lesson
-                    # this codebase has already learned about competing instructions.
-                    styling_instruction += (
-                        " This styling covers LAYOUT ONLY (card shape, avatar placement, "
-                        "handle text position, verified tick, follow button) - it is "
-                        "NEVER license to reproduce WHOSE account this is. If the "
-                        "reference shows an avatar, @handle, username, or display name, "
-                        "that account identity is never the reference's own: render "
-                        "Besque's own account identity if one is supplied above, or "
-                        "remove it entirely (compliance rule C9) - never the competitor's "
-                        "or any other real account's identity. Any face rendered inside "
-                        "that avatar is a depicted person like any other in this image, "
-                        "never decorative UI furniture exempt from anything: it is bound "
-                        "by compliance rule C1 (never a real individual's likeness, always "
-                        "a generic non-identifiable stand-in) and rule 10 (must read 45-60, "
-                        "never younger) exactly the same as this ad's primary subject."
-                    )
-                substitute_lines.append(
-                    f"- social_proof (single_quote) at {pos} (container: {container}): "
-                    f"replace with this REAL customer review, rendered EXACTLY as given, "
-                    f"never reworded, shortened, or invented: \"{testimonial['quote']}\" "
-                    f"— attributed to {attribution}. No star rating, age, or timeframe "
-                    f"unless the review text itself states one."
-                    + styling_instruction
-                )
-                substituted_zone_types.add(zt)
-                testimonial_placed = True
-            else:
-                social_proof_remove_lines.append(
-                    f"- social_proof ({kind or 'unspecified kind'}) at {pos} (container: {container})"
-                )
-        # else: an unrecognised zone_type - no instruction either way.
-
-    parts = []
-    if substitute_lines:
-        parts.append(
-            "STRUCTURAL ZONES - SUBSTITUTE (STRICT): the following zones are kept exactly "
-            "as positioned, their content replaced with ours, never the reference's own "
-            "words and never invented: " + " ".join(substitute_lines)
-        )
-    if remove_lines:
-        parts.append(
-            "STRUCTURAL ZONES - REMOVE (STRICT): no Besque value exists for these zones "
-            "yet - each container is removed entirely, not left as an empty shape, and "
-            "the composition rebalanced into the freed space: " + " ".join(remove_lines)
-        )
-    if disclaimer_lines:
-        parts.append(
-            "STRUCTURAL ZONES - REMOVE, DISCLAIMER (STRICT): a legal, regulatory, or medical "
-            "disclaimer belonging to the reference brand is NEVER Besque's, whatever product "
-            "is being advertised and whatever the reference sells - remove the container "
-            "entirely, not left as an empty shape. Any asterisk or footnote marker elsewhere "
-            "in the frame (on a headline, subtext, or badge) that points to this disclaimer "
-            "must be removed with it - a dangling asterisk with no referent left behind is "
-            "its own defect, just as bad as the disclaimer text itself: "
-            + " ".join(disclaimer_lines)
-        )
-    if social_proof_remove_lines:
-        parts.append(
-            "STRUCTURAL ZONES - REMOVE, SOCIAL PROOF (STRICT): no real, approved customer "
-            "review or review count/rating exists for this run - remove these containers "
-            "entirely, not left as an empty shape. NEVER invent a customer quote, name, "
-            "star rating, or review count to fill this space - a fabricated testimonial is "
-            "a compliance violation, not a stylistic choice: "
-            + " ".join(social_proof_remove_lines)
-        )
-    clause = (" ".join(parts) + " ") if parts else ""
-    return clause, substituted_zone_types
-
-
-def _typography_zones_clause(typography_zones):
-    """PART B3b (2026-08-06): per-zone typographic TREATMENT, not just per-zone content.
-    The TEXT clause below already says "same size, position, weight, casing, and text
-    colour" as ONE blanket instruction covering whichever zone gets the headline/subtext -
-    fine when the reference has one typographic level, but a real reference with four
-    distinct levels (a large serif headline, a gold small-caps accent line with a pipe
-    divider, small sans body copy, a CTA button label) produced a draft with only two
-    (serif headline, plain white body) - nothing named the other two levels explicitly, so
-    Gemini defaulted to applying one style everywhere.
-
-    Content substitution - which words land in which zone, and whether a zone survives at
-    all - is governed elsewhere (rule 6, TEXT, OFFER, the container-removal exception
-    above); this clause states HOW each zone that DOES survive is dressed, so distinct
-    levels can't collapse into one by default. blueprint.typography_zones is optional
-    (schema addition, 2026-08-06) - blueprints without it (every one deconstructed before
-    this existed) produce "" here, same as every other optional clause in this module."""
-    if not typography_zones:
-        return ""
-    lines = []
-    for z in typography_zones:
-        parts = [
-            f"{z.get('typeface_class') or '?'} typeface", f"{z.get('weight') or '?'} weight",
-            f"{z.get('case') or '?'} case", f"{z.get('letter_spacing') or '?'} letter-spacing",
-            f"colour {z.get('colour') or '?'}", f"{z.get('size_relative') or '?'} relative to the frame",
-        ]
-        deco = z.get("decorative_elements") or []
-        if deco:
-            parts.append("with " + ", ".join(deco))
-        lines.append(f"- {z.get('zone') or 'unnamed zone'}: {', '.join(parts)}, "
-                     f"{z.get('line_count') if z.get('line_count') is not None else '?'} line(s)")
-    zone_list = " ".join(lines)
-    return (
-        f"TYPOGRAPHIC LEVELS (STRICT): the reference has {len(typography_zones)} distinct "
-        f"typographic level(s) below, each with its OWN treatment - reproduce every one of "
-        f"them exactly as described, never collapsing two into one and never rendering "
-        f"every zone in the same style. Whatever wording each zone actually receives is "
-        f"governed by the rules above (TEXT/OFFER) - this only states HOW that zone is "
-        f"dressed, for whichever zones survive: {zone_list} "
-    )
-
+# _structural_zones_clause and _typography_zones_clause DELETED 2026-08-17: their sole
+# input fields (structural_zones, typography_zones) no longer exist in
+# schema/blueprint.schema.json - blueprint.objects replaces both (see _objects_clause
+# above). The zone-type-specific substitution business logic they carried (offer/badge/
+# certification/price/testimonial/disclaimer, each substituted or removed by its own
+# rule, reproduced with a real customer review or Besque's own real certifications) has
+# NO equivalent in the objects model - a real, deliberate loss of capability, not an
+# oversight. See the handover report for this session.
 
 def _bottle_fixed_clause():
     return (
@@ -2089,11 +1597,10 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
                             reference_has_text_zone=True, layout_detail=None, visual=None,
                             retheme_colours=True, palette=None,
                             substance_colour=None, style=None, scene_lighting=None,
-                            typography_zones=None,
-                            structural_zones=None, cta_text=None, product_name=None,
+                            cta_text=None, product_name=None,
                             panel_copy=None, testimonial=None, certifications=None,
                             competitor_props_clause="", face_present=None,
-                            testimonial_zones=None, clone_mode=False):
+                            clone_mode=False):
     """EDIT MODE (2026-08-01): Gemini receives the competitor's own ad as an input image
     Part, not just a text description of it - the reference image IS the creative brief,
     so no template scene/layout/palette description is assembled here (see
@@ -2229,24 +1736,21 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
     # pattern this codebase has repeatedly found unreliable (see the top of CLAUDE.md).
     # On a reference with no real offer-shaped zone, Gemini invented one - a live "20%
     # OFF" badge with nothing in the reference to substitute into. When clone_mode is on,
-    # offer_text is only EFFECTIVELY present here if this reference actually has a real
-    # offer-shaped zone (_structural_zones_have_offer - the SAME structural check
-    # reference_has_offer_zone/pipeline.py's own upstream suppression already use, not a
-    # second independent judgment that could disagree with it) - never Gemini's own
-    # visual call. Computed ONCE, here, so suppressing_offer (governs the container-
-    # removal exception wording below) and the OFFER clause itself can never disagree
-    # about whether an offer is actually being rendered this call - the exact demand-and-
-    # forbid shape that produced artifact 1136's fabricated testimonials, on a different
-    # input. clone_mode=False (the default) is unaffected: offer_text's own truthiness is
-    # the only gate, byte-for-byte today's behaviour. _structural_zones_clause's own
-    # badge/price_anchor substitution (elsewhere in this function) is NOT changed to use
-    # this - it already only ever acts on a zone that genuinely exists in structural_zones,
-    # so it never had this vulnerability; only the prose OFFER clause asked Gemini to look
-    # for something that might not be there at all.
-    effective_offer_text = (
-        offer_text if (not clone_mode or _structural_zones_have_offer(structural_zones))
-        else None
-    )
+    # offer_text used to be EFFECTIVELY present here only if this reference actually had a
+    # real offer-shaped structural_zones entry (_structural_zones_have_offer).
+    #
+    # ORPHANED 2026-08-17: structural_zones no longer exists (schema/blueprint.schema.json
+    # - blueprint.objects replaces it) and this function no longer receives it as a
+    # parameter, so that check has no signal to read for a new blueprint. Rather than
+    # guess an equivalent from `objects` (no field here maps cleanly to "is this
+    # specifically an offer-shaped zone"), this now ALWAYS resolves to False under
+    # clone_mode - a real behaviour change: clone_mode's offer carry-through is
+    # unconditionally suppressed now, never just when the reference lacks an offer zone.
+    # Deliberately the SAFER direction (never renders an offer that might not be
+    # authorised) rather than a guessed heuristic that could reintroduce the exact
+    # invented-offer-badge bug this mechanism exists to prevent. clone_mode=False (the
+    # default) is unaffected: offer_text's own truthiness is still the only gate.
+    effective_offer_text = offer_text if not clone_mode else None
     suppressing_offer = not effective_offer_text
     # Always True: the EFFICACY CLAIMS clause below bans efficacy-claim wording
     # unconditionally (no approved_claims threading to images exists), so an
@@ -2532,63 +2036,31 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
         )
 
     eff_headline, eff_subtext = effective_authorised_text(text_in_image, headline, subtext)
-    # structural_zones' sub_line/body_copy/cta substitution must never be offered when
-    # text_in_image itself is off - same gating headline/subtext already use, so these
-    # zones fall to REMOVAL below instead of showing the reference's own words when the
-    # operator asked for no baked-in text this run.
-    zone_copy_text = eff_subtext if text_in_image else None
-    zone_cta_text = cta_text if text_in_image else None
-    zone_panel_copy = panel_copy if text_in_image else None
-    # testimonial is deliberately NOT gated by text_in_image (UNGATED 2026-08-12, Item 1
-    # - was `testimonial if text_in_image else None`, matching sub_line/body_copy/cta).
-    # That gate was a category error: text_in_image decides whether HEADLINE/SUBTEXT
-    # bake into the image pixels or render as a separate HTML overlay - a testimonial
-    # CARD (avatar, name, quote, reaction bar) is not headline text competing for that
-    # same overlay slot, it's a self-contained visual element, the same category as
-    # badge/price_anchor/product_callout/certifications below, none of which are gated
-    # by text_in_image either. Confirmed live: ad 1354698976158962 had a real review
-    # ready to substitute (select_testimonial_review found one) and a genuine
-    # social_proof/single_quote zone, but text_in_image=False on that run silently
-    # dropped it anyway - the zone was never actually short of content, it was gated on
-    # the wrong flag. The "no real review -> remove, never invent" rule inside
-    # _structural_zones_clause is the ONLY gate the testimonial zone needs.
-    zone_testimonial = testimonial
-    # certifications is deliberately NOT gated by text_in_image - a cert badge is a
-    # brand/product graphic element baked into the base image regardless of whether
-    # headline/subtext render separately as an HTML overlay, the same treatment
-    # brand_wordmark already gets (also unconditional), not sub_line/cta's treatment.
-    structural_clause, substituted_zone_types = _structural_zones_clause(
-        structural_zones, zone_copy_text=zone_copy_text, cta_text=zone_cta_text,
-        panel_copy=zone_panel_copy, testimonial=zone_testimonial, certifications=certifications,
-        offer_text=offer_text, testimonial_zones=testimonial_zones,
-        # callout_copy (Item 2, 2026-08-12): the RAW panel_copy, NOT zone_panel_copy -
-        # product_callout is a self-contained visual element (icon + label), the same
-        # category as badge/price_anchor/certifications above, none of which are gated
-        # by text_in_image - see _structural_zones_clause's own docstring.
-        callout_copy=panel_copy,
-    )
+    # cta_text/panel_copy/testimonial/certifications (2026-08-17): ORPHANED parameters,
+    # kept on this function's signature only because build_image_prompt/generate_image/
+    # pipeline.py still pass real values through for them - removing them here would
+    # cascade into those callers' own signatures for no benefit. They are UNUSED below.
+    # Their sole consumer was _structural_zones_clause's per-zone-type substitution
+    # logic (fill an offer badge with offer_text, a certification badge with real
+    # certifications, a social_proof/single_quote zone with a real testimonial review,
+    # a sub_line/body_copy/cta zone with panel_copy) - deleted along with
+    # structural_zones/typography_zones (schema/blueprint.schema.json no longer has
+    # them; blueprint.objects replaces them, see _objects_clause). That per-zone-type
+    # precision (offer vs. certification vs. testimonial vs. price vs. disclaimer, each
+    # substituted or removed by its own rule) has NO equivalent in the objects model -
+    # a real, deliberate loss of capability, not an oversight; see the handover report
+    # for this session.
     if eff_headline:
         # The exact headline/subtext wording is stated ONCE, by rule 6's TEXT POLICY
         # above - this function must reference that authorisation, never re-quote the
         # string itself, or the same text ends up stated twice (2026-08-13 live finding:
         # the literal string appeared 2-3x in one assembled prompt across rule 6, this
-        # TEXT branch, and STRUCTURAL ZONES' sub_line/body_copy fallback).
-        # The "entire text budget" ban must never contradict STRUCTURAL ZONES below by
-        # banning a category that clause is simultaneously authorising (2026-08-06) - the
-        # same writer/rule6 contradiction shape this codebase has already hit more than
-        # once. Default (no structural_zones substitution active) is BYTE-FOR-BYTE the
-        # original wording - every blueprint without structural_zones, and every one
-        # where none of sub_line/body_copy/cta apply, sees no change here at all.
-        if substituted_zone_types & {"sub_line", "body_copy", "cta"}:
-            budget_ban = (
-                "no ingredient list or mechanism/benefit paragraph may ALSO be rendered "
-                "beyond what STRUCTURAL ZONES below explicitly authorises"
-            )
-        else:
-            budget_ban = (
-                "no ingredient list, mechanism or benefit paragraph, additional body "
-                "copy, or CTA sentence may ALSO be rendered"
-            )
+        # TEXT branch, and STRUCTURAL ZONES' sub_line/body_copy fallback - the latter no
+        # longer exists, but the single-statement discipline still matters).
+        budget_ban = (
+            "no ingredient list, mechanism or benefit paragraph, additional body "
+            "copy, or CTA sentence may ALSO be rendered"
+        )
         # Item 9 (2026-08-12): the highest-risk failure is split-screen/before-after/
         # multi-panel layouts each receiving their OWN copy of the same headline/subtext -
         # stated once here, ahead of both text sub-branches below, since duplication risk
@@ -2655,8 +2127,6 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             f"headline, or competitor wording rendered there either. That space will be "
             f"filled later as a separate HTML overlay. "
         )
-    base += _typography_zones_clause(typography_zones)
-    base += structural_clause
     if effective_offer_text:
         base += (
             f"OFFER: if the reference shows an offer, discount, price, or CTA badge, "
@@ -3527,6 +2997,22 @@ def build_targeted_edit_instruction(descriptor, operation, new_value, blueprint=
         f"EXACTLY ONE change: {change}. Every other pixel in the image - {preservation_list} "
         "- must be reproduced EXACTLY as it appears in the attached image, completely unchanged."
         + _brand_wordmark_protection_clause(blueprint)
+    )
+
+
+def build_object_removal_instruction(description):
+    """Stage 4 (2026-08-17): the fixed delta every per-object remove control sends -
+    a standalone template, NOT built from build_targeted_edit_instruction's generic
+    change-list machinery (_PRESERVATION_TERMS/_TARGET_EXCLUDED_PRESERVATION_TERMS,
+    the "attached image is FINAL and CORRECT" framing, wordmark protection). The exact
+    wording is fixed by design, not assembled per-call - same "pre-authored, no
+    field-text construction" discipline src/realism_deltas.py already established for
+    the bottle-realism edit control, applied here to object removal. `description` is
+    edit_capability._object_remove_controls' own current_value (the object's plain-
+    English description), the only thing this template ever substitutes."""
+    return (
+        f"Remove the {description} entirely and close the space naturally with the "
+        f"surrounding surface and lighting. Everything else in the image is unchanged."
     )
 
 

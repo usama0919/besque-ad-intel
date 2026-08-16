@@ -33,9 +33,15 @@ FULL_ARTIFACT = {
             {"zone_type": "cta", "position": "bottom", "container": "banner", "detail": "d"},
         ],
         "face_present": {"has_face": True, "prominence": "primary", "location": "centre"},
-        "scene_elements": [
-            {"element": "wooden shelf", "role": "backdrop prop", "essential": False, "depicts_competitor_category": False},
-            {"element": "model's hand", "role": "holding bottle", "essential": True, "depicts_competitor_category": False},
+        "objects": [
+            {"object_id": "obj_01", "kind": "prop", "description": "wooden shelf",
+             "bbox": [0, 0.6, 1, 0.4], "colours": ["brown"], "ownership": "generic",
+             "role": "environment", "carries_brand_mark": False,
+             "persuasive_function": "backdrop prop", "disposition": "keep"},
+            {"object_id": "obj_02", "kind": "person", "description": "model's hand",
+             "bbox": [0.3, 0.4, 0.2, 0.2], "colours": [], "ownership": "person",
+             "role": "supporting_prop", "carries_brand_mark": False,
+             "persuasive_function": "holding bottle", "disposition": "keep"},
         ],
         "layout_detail": {
             "product_count": 1, "background_type": "bathroom counter",
@@ -67,8 +73,11 @@ def test_full_artifact_has_every_control_category():
     assert ("typography", "style") in targets
     assert ("badge", "corner_badge") in targets
     assert ("banner", "bottom_banner") in targets
-    assert ("prop", "wooden shelf") in targets
-    assert ("person_body", "model's hand") in targets
+    # Stage 4 (2026-08-17): one remove control per blueprint.objects row - REPLACES
+    # scene_elements' prop/person_body routing (deleted; objects has no kind-based
+    # target split any more, every object gets target="object").
+    assert ("object", "obj_01") in targets
+    assert ("object", "obj_02") in targets
 
 
 def test_full_artifact_current_values_come_from_copy_columns_not_blueprint():
@@ -79,18 +88,17 @@ def test_full_artifact_current_values_come_from_copy_columns_not_blueprint():
     assert offer["current_value"] == "Free shipping over £40"
 
 
-def test_essential_scene_element_carries_warning_but_still_allows_remove():
-    controls = derive_edit_capabilities(FULL_ARTIFACT)
-    hand = find_control(controls, "person_body", "model's hand")
-    assert hand["essential"] is True
-    assert "warning" in hand and "essential" in hand["warning"].lower()
-    assert "remove" in hand["allowed_ops"]
+# essential/warning DELETED 2026-08-17 along with scene_elements: the objects schema
+# (schema/blueprint.schema.json) has no `essential` field at all - _object_remove_
+# controls is deliberately remove-only for every object uniformly, with no
+# essential-flagged-extra-warning distinction the old scene_elements-based controls had.
 
-
-def test_non_essential_prop_has_no_warning():
+def test_object_remove_control_is_remove_only_with_description_as_label():
     controls = derive_edit_capabilities(FULL_ARTIFACT)
-    shelf = find_control(controls, "prop", "wooden shelf")
-    assert "warning" not in shelf
+    shelf = find_control(controls, "object", "obj_01")
+    assert shelf["allowed_ops"] == ["remove"]
+    assert shelf["label"] == "wooden shelf"
+    assert shelf["current_value"] == "wooden shelf"
 
 
 # ---- Fixture 2: minimal/empty artifact - fail-closed, nothing derivable ----
@@ -134,8 +142,11 @@ PARTIAL_ARTIFACT = {
         "text_purpose": [{"text_verbatim": "x", "purpose": "cta", "placement": "bottom"}],
         "structural_zones": [],
         "face_present": {"has_face": False, "prominence": "none", "location": ""},
-        "scene_elements": [
-            {"element": "bare hand", "role": "applying oil", "essential": False, "depicts_competitor_category": False},
+        "objects": [
+            {"object_id": "obj_01", "kind": "person", "description": "bare hand",
+             "bbox": [0.4, 0.5, 0.2, 0.2], "colours": [], "ownership": "person",
+             "role": "supporting_prop", "carries_brand_mark": False,
+             "persuasive_function": "applying oil", "disposition": "keep"},
         ],
         "layout_detail": {"product_count": 2},
     },
@@ -150,8 +161,7 @@ def test_partial_artifact_no_headline_no_face_but_has_cta_and_product():
     assert ("person_face", "expression") not in targets
     assert ("cta", "text") in targets
     assert ("product", "placement") in targets
-    assert ("person_body", "bare hand") in targets  # hand routed to person_body, not prop
-    assert ("prop", "bare hand") not in targets
+    assert ("object", "obj_01") in targets  # one remove control per objects row
 
 
 def test_offer_empty_string_yields_no_offer_control():
@@ -373,23 +383,35 @@ def test_headline_shaped_purpose_with_text_in_image_true_yields_control():
 
 # ---- Never target the brand wordmark ----
 
-def test_brand_wordmark_scene_element_never_becomes_a_control():
+def test_object_remove_controls_have_no_wordmark_exclusion_by_design():
+    """2026-08-17: unlike the deleted scene_elements-based _scene_element_controls (which
+    excluded any entry naming the wordmark/logo), _object_remove_controls has no such
+    exclusion - see its own docstring for why: blueprint.objects describes the
+    COMPETITOR reference, never the drafted image, so Besque's own wordmark is never
+    one of these rows to begin with (it is ADDED by brand_rules() rule 9, not tracked
+    here). A competitor logo object gets a remove control exactly like any other
+    object - there is nothing dangerous about offering to remove IT, only about
+    removing BESQUE's, which structurally cannot appear in this list."""
     artifact = {
         "generated_copy": {}, "offer_text": None, "text_in_image": False,
         "blueprint": {
-            "text_purpose": [], "structural_zones": [],
-            "scene_elements": [
-                {"element": "BESQUE wordmark", "role": "brand identity", "essential": True, "depicts_competitor_category": False},
-                {"element": "wooden shelf", "role": "prop", "essential": False, "depicts_competitor_category": False},
-            ],
             "face_present": {"has_face": False}, "layout_detail": {},
+            "objects": [
+                {"object_id": "obj_01", "kind": "logo", "description": "competitor wordmark",
+                 "bbox": [0, 0, 0.2, 0.1], "colours": [], "ownership": "competitor_branded",
+                 "role": "secondary", "carries_brand_mark": True,
+                 "persuasive_function": "names the advertiser", "disposition": "drop"},
+                {"object_id": "obj_02", "kind": "prop", "description": "wooden shelf",
+                 "bbox": [0, 0.6, 1, 0.4], "colours": [], "ownership": "generic",
+                 "role": "environment", "carries_brand_mark": False,
+                 "persuasive_function": "backdrop prop", "disposition": "keep"},
+            ],
         },
     }
     controls = derive_edit_capabilities(artifact)
     targets = {(c["target"], c["attribute"]) for c in controls}
-    assert ("prop", "BESQUE wordmark") not in targets
-    assert ("person_body", "BESQUE wordmark") not in targets
-    assert ("prop", "wooden shelf") in targets
+    assert ("object", "obj_01") in targets
+    assert ("object", "obj_02") in targets
 
 
 def test_get_brand_wordmark_zone_finds_it_by_zone_type():

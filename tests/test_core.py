@@ -13,16 +13,19 @@ def _valid_blueprint():
         "awareness_stage": "problem",
         "claims": ["efficacy", "sensory"],
         "visual": {"layout": "centered", "subject": "bottle", "palette_mood": "warm", "text_placement": "top"},
+        "background": {"surface": "plain backdrop", "colour": "white", "light": "soft even light"},
         "cta": "Shop Now",
         "destination_url": "https://example.com",
-        "structural_zones": [],
+        "objects": [
+            {"object_id": "obj_01", "kind": "product", "description": "competitor bottle",
+             "bbox": [0.2, 0.2, 0.4, 0.6], "colours": ["blue"], "ownership": "competitor_branded",
+             "role": "hero", "carries_brand_mark": True,
+             "persuasive_function": "hero product", "disposition": "substitute"},
+        ],
         "production_style": {"style": "ugc", "confidence": "high", "signals": ["handheld framing"]},
         "body_area_shown": "none",
         "face_present": {"has_face": False, "prominence": "none", "location": ""},
         "semantic_split": {"is_split": False, "split_axis": None, "left_or_before": "", "right_or_after": ""},
-        "scene_elements": [],
-        "testimonial_zones": [],
-        "text_purpose": [],
     }
 
 
@@ -58,11 +61,27 @@ def test_bad_enum_value_fails():
     assert validator.is_valid(bp) is False
 
 
-def test_missing_structural_zones_fails():
-    """structural_zones is now a required field (schema/blueprint.schema.json) - an ad
-    with no zones must return an explicit empty array, not omit the key entirely."""
+def test_missing_objects_fails():
+    """objects is required (schema/blueprint.schema.json, 2026-08-17) - REPLACES
+    test_missing_structural_zones_fails/test_missing_scene_elements_fails/
+    test_missing_testimonial_zones_fails/test_missing_text_purpose_fails, all of which
+    deleted a key _valid_blueprint() no longer even has (those five fields were
+    replaced by objects, and _valid_blueprint() was updated to match)."""
     bp = _valid_blueprint()
-    del bp["structural_zones"]
+    del bp["objects"]
+    assert validator.is_valid(bp) is False
+
+
+def test_missing_background_fails():
+    """background is required (schema/blueprint.schema.json, 2026-08-17)."""
+    bp = _valid_blueprint()
+    del bp["background"]
+    assert validator.is_valid(bp) is False
+
+
+def test_empty_objects_array_fails():
+    bp = _valid_blueprint()
+    bp["objects"] = []
     assert validator.is_valid(bp) is False
 
 
@@ -91,24 +110,6 @@ def test_missing_face_present_fails():
 def test_missing_semantic_split_fails():
     bp = _valid_blueprint()
     del bp["semantic_split"]
-    assert validator.is_valid(bp) is False
-
-
-def test_missing_scene_elements_fails():
-    bp = _valid_blueprint()
-    del bp["scene_elements"]
-    assert validator.is_valid(bp) is False
-
-
-def test_missing_testimonial_zones_fails():
-    bp = _valid_blueprint()
-    del bp["testimonial_zones"]
-    assert validator.is_valid(bp) is False
-
-
-def test_missing_text_purpose_fails():
-    bp = _valid_blueprint()
-    del bp["text_purpose"]
     assert validator.is_valid(bp) is False
 
 

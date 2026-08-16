@@ -56,6 +56,48 @@ def test_edit_capabilities_endpoint_404_when_missing(monkeypatch):
     assert resp.status_code == 404
 
 
+# ---- Stage 5 (2026-08-17): is_legacy/legacy_scene_summary - a blueprint with no
+# `objects` key predates the objects schema and gets a read-only text summary instead
+# of erroring or silently showing nothing ----
+
+def test_edit_capabilities_endpoint_flags_legacy_blueprint_with_scene_summary(monkeypatch):
+    # _artifact()'s default blueprint has no `objects` key at all - the legacy shape.
+    monkeypatch.setattr(dedupe, "get_artifact_by_id", lambda aid: _artifact(
+        blueprint={
+            "format": "hero", "face_present": {"has_face": False}, "layout_detail": {},
+            "scene_elements": [{"element": "wooden tray", "role": "staging",
+                                "essential": True, "depicts_competitor_category": False}],
+            "structural_zones": [{"zone_type": "brand_wordmark", "position": "top-left",
+                                  "container": "none", "detail": ""}],
+        },
+    ))
+    resp = _client().get("/artifact/42/edit-capabilities")
+    body = resp.json()
+    assert body["is_legacy"] is True
+    assert any("wooden tray" in line for line in body["legacy_scene_summary"])
+    assert any("brand_wordmark" in line for line in body["legacy_scene_summary"])
+
+
+def test_edit_capabilities_endpoint_not_legacy_when_objects_present(monkeypatch):
+    monkeypatch.setattr(dedupe, "get_artifact_by_id", lambda aid: _artifact(
+        blueprint={
+            "format": "hero", "face_present": {"has_face": False}, "layout_detail": {},
+            "objects": [
+                {"object_id": "obj_01", "kind": "prop", "description": "wooden tray",
+                 "bbox": [0, 0.5, 1, 0.5], "colours": [], "ownership": "generic",
+                 "role": "environment", "carries_brand_mark": False,
+                 "persuasive_function": "staging", "disposition": "keep"},
+            ],
+        },
+    ))
+    resp = _client().get("/artifact/42/edit-capabilities")
+    body = resp.json()
+    assert body["is_legacy"] is False
+    assert body["legacy_scene_summary"] == []
+    targets = {(c["target"], c["attribute"]) for c in body["controls"]}
+    assert ("object", "obj_01") in targets
+
+
 def test_edit_endpoint_rejects_unknown_control(monkeypatch):
     monkeypatch.setattr(dedupe, "get_artifact_by_id", lambda aid: _artifact())
     logged = {}
@@ -374,6 +416,61 @@ def test_edit_endpoint_realism_rejects_unknown_value(monkeypatch):
     })
     assert resp.status_code == 400
     assert resp.json()["ok"] is False
+
+
+# ---- Stage 4 (2026-08-17): per-object remove control end-to-end - the fixed
+# build_object_removal_instruction delta, and a removal_zone drift check ----
+
+def test_edit_endpoint_object_removal_sends_fixed_delta_and_uses_removal_zone(monkeypatch):
+    monkeypatch.setattr(dedupe, "get_artifact_by_id", lambda aid: _artifact(
+        blueprint={
+            "format": "hero", "face_present": {"has_face": False}, "layout_detail": {},
+            "objects": [
+                {"object_id": "obj_02", "kind": "prop", "description": "a wooden tray",
+                 "bbox": [0.25, 0.25, 0.25, 0.25], "colours": [], "ownership": "generic",
+                 "role": "environment", "carries_brand_mark": False,
+                 "persuasive_function": "staging", "disposition": "keep"},
+            ],
+        },
+    ))
+    monkeypatch.setattr(dedupe, "insert_edit_event", lambda **k: 9)
+    monkeypatch.setattr(dedupe, "update_edit_event_result", lambda *a, **k: None)
+    monkeypatch.setattr(dedupe, "insert_edit_artifact", lambda **k: 55)
+    monkeypatch.setattr(dedupe, "get_angle", lambda aid: None)
+    monkeypatch.setattr(dashboard, "_read_artifact_image_bytes",
+                         lambda art, ad_id: (b"draft-bytes", "AD123_draft.png"))
+
+    captured = {}
+    def fake_apply(source_bytes, instruction, reference_images=None):
+        captured["instruction"] = instruction
+        return b"new-image-bytes"
+    monkeypatch.setattr(generate_image_prompt, "apply_targeted_edit", fake_apply)
+
+    drift_calls = []
+    def fake_check_drift(source_bytes, result_bytes, descriptor, blueprint):
+        drift_calls.append((descriptor, blueprint))
+        return {"method": "removal_zone", "checked": True, "drift_flag": False,
+                "inside_pct": 5.0, "outside_pct": 0.1, "scatter_pct": None, "bbox": (0, 0, 1, 1)}
+    monkeypatch.setattr(drift_check, "check_drift", fake_check_drift)
+
+    resp = _client().post("/artifact/42/edit", json={
+        "target": "object", "attribute": "obj_02", "operation": "remove",
+    })
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["drift_method"] == "removal_zone"
+
+    assert captured["instruction"] == (
+        "Remove the a wooden tray entirely and close the space naturally with the "
+        "surrounding surface and lighting. Everything else in the image is unchanged."
+    )
+    # The exact fixed template - never build_targeted_edit_instruction's generic
+    # "attached image is FINAL and CORRECT... preservation list" wrapper.
+    assert "FINAL and CORRECT" not in captured["instruction"]
+    assert len(drift_calls) == 1
+    assert drift_calls[0][0]["target"] == "object"
+    assert drift_calls[0][0]["attribute"] == "obj_02"
 
 
 # ---- Step 4: drift check + one automatic retry, then stop ----

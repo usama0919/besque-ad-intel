@@ -15,16 +15,19 @@ def _fake_claude_json():
         "awareness_stage": "solution",
         "claims": ["efficacy", "social_proof"],
         "visual": {"layout": "portrait", "subject": "woman", "palette_mood": "warm", "text_placement": "lower third"},
+        "background": {"surface": "plain backdrop", "colour": "white", "light": "soft even light"},
         "cta": "Shop Now",
         "destination_url": "https://example.com",
-        "structural_zones": [],
+        "objects": [
+            {"object_id": "obj_01", "kind": "person", "description": "woman applying oil",
+             "bbox": [0.2, 0.1, 0.6, 0.8], "colours": [], "ownership": "person",
+             "role": "hero", "carries_brand_mark": False,
+             "persuasive_function": "demonstrates the product", "disposition": "substitute"},
+        ],
         "production_style": {"style": "ugc", "confidence": "high", "signals": ["handheld framing"]},
         "body_area_shown": "none",
         "face_present": {"has_face": False, "prominence": "none", "location": ""},
         "semantic_split": {"is_split": False, "split_axis": None, "left_or_before": "", "right_or_after": ""},
-        "scene_elements": [],
-        "testimonial_zones": [],
-        "text_purpose": [],
     })
 
 
@@ -116,100 +119,31 @@ def test_build_prompt_includes_new_creative_fields_without_format_error():
     assert "frame_division" in prompt
 
 
-def test_build_prompt_includes_typography_zones_without_format_error():
-    """PART B3b (2026-08-06): typography_zones was added to BLUEPRINT_PROMPT, itself run
-    through .format() in build_prompt() - same KeyError risk as the Part B fields above if
-    a literal brace in the new text weren't escaped."""
+# ---- typography_zones/scene_elements/structural_zones prompt sections DELETED
+# 2026-08-17: blueprint.objects replaces all of them (see schema/blueprint.schema.json,
+# deconstruct.py's BLUEPRINT_PROMPT, generate_image_prompt._objects_clause). The tests
+# that used to assert those sections' exact wording (typography_zones format-safety,
+# "OMIT it entirely" zone-absence wording, depicts_competitor_category classifier
+# wording, scene_elements colour-neutrality wording) tested prompt text that no longer
+# exists - removed rather than left permanently failing. See test_objects_schema.py for
+# the new `objects` array's own coverage (resolve_disposition, the closure sentence,
+# legacy-blueprint read safety).
+
+def test_build_prompt_instructs_objects_never_folded_into_background():
+    """The direct replacement for the old scene_elements colour-neutrality tests above:
+    the new `objects` section's own explicit instruction that anything with an
+    identity is an object row, never background prose."""
     prompt = deconstruct.build_prompt("AD1", "PageX", "2026-01-01")
-    assert "typography_zones" in prompt
-    assert "letter_spacing" in prompt
-    assert "decorative_elements" in prompt
-    assert "line_count" in prompt
+    assert "objects" in prompt
+    assert "never folded into this field's prose" in prompt
+    assert "MULTIPLE INSTANCES OF THE SAME PRODUCT ARE SEPARATE ROWS" in prompt
 
 
-def test_deconstruct_response_with_typography_zones_passes_schema():
-    """Optional field (2026-08-06 schema addition) - present and well-formed must validate."""
-    payload = json.loads(_fake_claude_json())
-    payload["typography_zones"] = [
-        {"zone": "headline upper-right", "typeface_class": "serif", "weight": "bold",
-         "case": "title", "letter_spacing": "normal", "colour": "white",
-         "size_relative": "large", "decorative_elements": [], "line_count": 2},
-    ]
-    bp = deconstruct.deconstruct_from_response(json.dumps(payload))
-    assert bp["typography_zones"][0]["zone"] == "headline upper-right"
-
-
-def test_deconstruct_response_without_typography_zones_still_passes_schema():
-    """Optional means optional - every blueprint deconstructed before this field existed
-    must still validate with no typography_zones key at all."""
-    raw = _fake_claude_json()
-    assert "typography_zones" not in json.loads(raw)
-    bp = deconstruct.deconstruct_from_response(raw)
-    assert "typography_zones" not in bp
-
-
-def test_build_prompt_instructs_omitting_absent_zones_never_describing_absence():
-    """A real live case (CeraVe, 2026-08-06): the model returned a sub_line entry whose
-    detail read 'No explicit sub-line; headline stands alone' - an entry describing its
-    own absence still reads downstream as a zone that EXISTS, which the generator would
-    then try to substitute into. The prompt must say explicitly: omit the zone entirely,
-    never add a placeholder entry explaining that it's missing."""
+def test_build_prompt_background_reduced_to_surface_colour_light():
     prompt = deconstruct.build_prompt("AD1", "PageX", "2026-01-01")
-    assert "OMIT it entirely" in prompt
-    assert "do not add an entry for it just to say it is absent" in prompt
-
-
-# ---- depicts_competitor_category classifier sharpened (2026-08-13 evening): live
-# evidence it was wrong in both directions. Under-flagged: a chain-and-padlock graphic
-# whose own recorded role was "visual metaphor for 'locked' fat... central symbolic
-# element of the ad" was marked false - the old criterion ("is this the competitor's
-# product category") missed metaphor/symbol props that carry the argument without
-# being the product itself. Over-flagged: a distressed 3D human character was marked
-# true - substituting a person with a botanical form is never correct; a person is the
-# separate PERSON path's job, never this field's. ----
-
-def test_build_prompt_depicts_competitor_category_judges_by_argument_function():
-    prompt = deconstruct.build_prompt("AD1", "PageX", "2026-01-01")
-    assert "EXISTS TO MAKE THE COMPETITOR'S ARGUMENT" in prompt
-    assert "chain-and-padlock" in prompt
-    assert "metaphor or symbolic prop is not exempt just because it is not literally the product category" in prompt
-
-
-def test_build_prompt_depicts_competitor_category_excludes_human_figures_always():
-    prompt = deconstruct.build_prompt("AD1", "PageX", "2026-01-01")
-    assert "EXCLUDED, ALWAYS false regardless of role: any human figure, face, or body part" in prompt
-
-
-# ---- Item 5 (2026-08-13 build): competitor palette inherited - a live blueprint had
-# "lavender-purple to salmon-pink gradient background" recorded as essential:true, so
-# _scene_elements_clause's "MUST appear in the output" demanded the colour survive,
-# directly contradicting retheme_colours' "every hue... re-maps to Besque's palette".
-# Fixed at deconstruct (the element phrase must never encode colour), not by editing
-# _scene_elements_clause or string-stripping colour words from what comes back. ----
-
-def test_build_prompt_scene_element_forbids_colour_in_the_noun_phrase():
-    prompt = deconstruct.build_prompt("AD1", "PageX", "2026-01-01")
-    assert "NEVER its colour" in prompt
-    assert '"background gradient", NOT "lavender-purple to salmon-pink gradient background"' in prompt
-    assert "palette substitution governs colour separately downstream" in prompt
-
-
-def test_build_prompt_scene_element_example_no_longer_bakes_in_a_colour():
-    """The pre-existing "a folded white towel" example itself encoded a colour - fixed
-    to a colour-neutral equivalent, not just banned in the abstract."""
-    prompt = deconstruct.build_prompt("AD1", "PageX", "2026-01-01")
-    assert '"a folded white towel" is WRONG for this reason' in prompt
-    assert 'write "a folded towel" instead' in prompt
-    assert "even one that is central to the ad's argument or is itself the metaphor" in prompt
-    assert "never by this field, with no exception" in prompt
-
-
-def test_build_prompt_depicts_competitor_category_applies_in_every_register():
-    """2026-08-13: no longer framed as an illustrated-only concern - a photographic or
-    3D-rendered competitor-argument prop needs this flag exactly as much as a drawn
-    one, now that generate_image_prompt's substitution clause fires on any register."""
-    prompt = deconstruct.build_prompt("AD1", "PageX", "2026-01-01")
-    assert "Applies in EVERY register, not only illustrated/drawn scenes" in prompt
+    assert '"surface"' in prompt
+    assert '"colour"' in prompt
+    assert '"light"' in prompt
 
 
 def test_deconstruct_image_scraped_ad_copy_with_braces_does_not_raise(monkeypatch):
@@ -238,14 +172,14 @@ def test_deconstruct_image_scraped_ad_copy_with_braces_does_not_raise(monkeypatc
     assert bp["ad_id"] == "AD123"
 
 
-def test_deconstruct_image_missing_structural_zones_retries_once_then_raises(monkeypatch):
-    """structural_zones is now required (schema/blueprint.schema.json). A response that
+def test_deconstruct_image_missing_objects_retries_once_then_raises(monkeypatch):
+    """objects is required (schema/blueprint.schema.json, 2026-08-17). A response that
     omits it fails schema validation, not JSON parsing, so it should retry once with the
     validator's own message appended as a correction instruction, not the JSON-escaping
-    nudge. If the retry still comes back without structural_zones, raise - and the vision
-    call must have been made exactly twice, never a third time."""
+    nudge. If the retry still comes back without objects, raise - and the vision call
+    must have been made exactly twice, never a third time."""
     payload = json.loads(_fake_claude_json())
-    del payload["structural_zones"]
+    del payload["objects"]
     bad_json = json.dumps(payload)
 
     call_count = {"n": 0}

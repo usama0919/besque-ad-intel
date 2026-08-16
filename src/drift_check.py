@@ -189,6 +189,45 @@ def _parse_position_to_bbox(position, width, height):
     return (int(x0), int(y0), int(x1), int(y1))
 
 
+# Stage 4 (2026-08-17): margin applied to an object's OWN recorded bbox for a removal
+# edit - "a removal legitimately changes pixels around the removed object as the scene
+# closes" (the task's own words). Reused, not independently calibrated: this is the
+# same order of magnitude as _ZONE_PAD_FRACTION (0.12) used for parsed-position zones,
+# rounded up because a removal's healing/inpainting effect plausibly reaches further
+# than a text-zone edit's does - NOT measured against a real removal edit yet. Flag for
+# calibration once a real object-removal artifact exists to measure against, the same
+# way CONTAINMENT_SCATTER_THRESHOLD_PCT/MIN_COMPONENT_SIZE_PX were calibrated against
+# real edits rather than guessed and left.
+OBJECT_REMOVAL_MARGIN_FRACTION = 0.20
+
+
+def _object_bbox_pixels_with_margin(blueprint, object_id, width, height,
+                                     margin_fraction=OBJECT_REMOVAL_MARGIN_FRACTION):
+    """The removal drift zone for target="object": the object's OWN recorded bbox
+    (blueprint.objects[].bbox, normalised [x, y, w, h]) expanded by margin_fraction on
+    each side (of the box's own width/height), converted to pixel coordinates and
+    clamped to the frame - NOT the product zone (_product_zone_position) and NOT a
+    free-text position parse (_parse_position_to_bbox). Returns None if object_id isn't
+    found in blueprint.objects, or the matching entry has no valid 4-element bbox -
+    callers fall through to containment in that case, never a fabricated box."""
+    for obj in blueprint.get("objects") or []:
+        obj = obj or {}
+        if obj.get("object_id") != object_id:
+            continue
+        bbox = obj.get("bbox")
+        if not bbox or len(bbox) != 4:
+            return None
+        x, y, w, h = bbox
+        pad_x = w * margin_fraction
+        pad_y = h * margin_fraction
+        x0 = max(0.0, x - pad_x)
+        y0 = max(0.0, y - pad_y)
+        x1 = min(1.0, x + w + pad_x)
+        y1 = min(1.0, y + h + pad_y)
+        return (int(x0 * width), int(y0 * height), int(x1 * width), int(y1 * height))
+    return None
+
+
 def expected_change_region(descriptor, blueprint, width, height):
     """Pixel bbox (x0, y0, x1, y1) for the edited target's zone, or None if this
     target has no recorded position - callers use None to select the containment
@@ -328,6 +367,14 @@ def check_drift(source_bytes, result_bytes, descriptor, blueprint):
     method="zone" - a position was recorded for this target; inside_pct/outside_pct
     populated, scatter_pct None; drift_flag = outside_pct > DRIFT_OUTSIDE_ZONE_THRESHOLD_PCT.
 
+    method="removal_zone" (Stage 4, 2026-08-17, target="object" only) - the removed
+    object's OWN recorded bbox, padded by OBJECT_REMOVAL_MARGIN_FRACTION on each side
+    (see _object_bbox_pixels_with_margin) - never the product zone and never a
+    free-text position parse. Same inside_pct/outside_pct/drift_flag shape as "zone";
+    a distinct method name so a removal's containment-shaped need doesn't get
+    conflated with either "zone" (parsed from free text) or "containment" (no
+    recorded position at all) when read back from edit_events.
+
     method="containment" - no position recorded (product/prop/person_body/offer/
     banner, or any zone-eligible target lacking one this time); scatter_pct populated,
     inside_pct/outside_pct None; drift_flag = scatter_pct > CONTAINMENT_SCATTER_THRESHOLD_PCT.
@@ -340,6 +387,19 @@ def check_drift(source_bytes, result_bytes, descriptor, blueprint):
 
     a = Image.open(io.BytesIO(source_bytes)).convert("RGB")
     width, height = a.size
+
+    if target == "object":
+        removal_bbox = _object_bbox_pixels_with_margin(
+            blueprint or {}, descriptor.get("attribute"), width, height)
+        if removal_bbox is not None:
+            inside_pct, outside_pct = _pixel_diff_stats(source_bytes, result_bytes, removal_bbox)
+            drift_flag = outside_pct > DRIFT_OUTSIDE_ZONE_THRESHOLD_PCT
+            return {"method": "removal_zone", "checked": True, "drift_flag": drift_flag,
+                    "inside_pct": inside_pct, "outside_pct": outside_pct,
+                    "scatter_pct": None, "bbox": removal_bbox}
+        # No bbox found for this object_id - fall through to containment below,
+        # same as any other zone-eligible target lacking a recorded position.
+
     bbox = expected_change_region(descriptor, blueprint or {}, width, height)
     if bbox is not None:
         inside_pct, outside_pct = _pixel_diff_stats(source_bytes, result_bytes, bbox)

@@ -655,55 +655,15 @@ def test_text_purpose_clause_redacts_personal_name_from_text_verbatim():
     assert "Wendy P" not in prompt
 
 
-# ---- Item 1 (2026-08-13): _text_purpose_clause and _text_zone_copy_clause must not
-# independently commission copy for the SAME underlying reference text block - a
-# matching placement/position is a mechanical signal they describe the same block,
-# and the zone-copy clause (more specific) wins. ----
-
-def test_dedupe_text_purpose_against_zones_drops_matching_placement():
-    entries = [{"text_verbatim": "A go-to for vacation", "purpose": "testimonial", "placement": "bottom-left card"}]
-    zones = [{"zone_type": "body_copy", "position": "bottom-left card", "detail": "x"}]
-    assert generate_copy._dedupe_text_purpose_against_zones(entries, zones) == []
-
-
-def test_dedupe_text_purpose_against_zones_is_case_and_whitespace_insensitive():
-    entries = [{"text_verbatim": "x", "purpose": "other", "placement": "Bottom - Left  Card"}]
-    zones = [{"zone_type": "body_copy", "position": "bottom-left card", "detail": "x"}]
-    assert generate_copy._dedupe_text_purpose_against_zones(entries, zones) == []
-
-
-def test_dedupe_text_purpose_against_zones_keeps_entry_with_no_matching_zone():
-    entries = [{"text_verbatim": "Tired of dry skin?", "purpose": "problem_hook", "placement": "headline"}]
-    zones = [{"zone_type": "body_copy", "position": "bottom-left card", "detail": "x"}]
-    result = generate_copy._dedupe_text_purpose_against_zones(entries, zones)
-    assert result == entries
-
-
-def test_dedupe_text_purpose_against_zones_untouched_when_no_zones():
-    entries = [{"text_verbatim": "x", "purpose": "other", "placement": "anywhere"}]
-    assert generate_copy._dedupe_text_purpose_against_zones(entries, None) == entries
-    assert generate_copy._dedupe_text_purpose_against_zones(entries, []) == entries
-
-
-def test_build_copy_prompt_does_not_double_commission_same_block():
-    """The live incident this fixes: a reference's closing statement described by BOTH
-    a text_purpose entry (purpose: testimonial) and a body_copy structural zone at the
-    SAME placement/position must be commissioned ONCE (via TEXT ZONE COPY), never
-    independently a second time via COMMUNICATIVE PURPOSE."""
-    bp = {
-        "structural_zones": [
-            {"zone_type": "body_copy", "position": "bottom-left card",
-             "detail": "a personal recommendation about not feeling like garbage on vacation"},
-        ],
-        "text_purpose": [
-            {"text_verbatim": "This is my go-to for not feeling like garbage on vacation",
-             "purpose": "testimonial", "placement": "bottom-left card"},
-        ],
-    }
-    prompt = generate_copy.build_copy_prompt(bp)
-    assert "TEXT ZONE COPY" in prompt
-    assert "COMMUNICATIVE PURPOSE" not in prompt
-
+# ---- _dedupe_text_purpose_against_zones DELETED 2026-08-17 (per the task that
+# replaced structural_zones/text_purpose with blueprint.objects - the dedup existed
+# only to reconcile those two now-removed fields against each other). Its 4 direct
+# unit tests and test_build_copy_prompt_does_not_double_commission_same_block (which
+# asserted the dedup's downstream effect - COMMUNICATIVE PURPOSE suppressed when
+# TEXT ZONE COPY already covers the same placement) tested behaviour that no longer
+# exists, and were removed rather than left permanently failing.
+# test_build_copy_prompt_keeps_text_purpose_entry_with_no_matching_zone below is
+# unaffected - it never relied on the dedup firing, only on it correctly not firing. ----
 
 def test_build_copy_prompt_keeps_text_purpose_entry_with_no_matching_zone():
     bp = {

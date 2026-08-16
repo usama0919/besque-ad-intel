@@ -464,13 +464,26 @@ def api_edit_capabilities(artifact_id: int):
     """Dynamic Edit System, Step 2: the editable control set for ONE artifact, derived
     fresh from its own blueprint + copy columns on every call - never a fixed or cached
     list. See src/edit_capability.py for the derivation rules. Adding a new control kind
-    requires only a registry entry there, no change here and no UI change."""
+    requires only a registry entry there, no change here and no UI change.
+
+    is_legacy/legacy_scene_summary (Stage 5, 2026-08-17): a blueprint with no `objects`
+    key predates the objects schema (~300 existing rows, no backfill/migration) - the
+    modal shows its OLD scene_elements/structural_zones inventory as READ-ONLY text
+    (edit_capability.legacy_scene_summary) instead of erroring or silently showing
+    nothing, since _object_remove_controls only ever derives real controls when
+    `objects` is present."""
     art = dedupe.get_artifact_by_id(artifact_id)
     if art is None:
         return JSONResponse({"ok": False, "error": "artifact not found"}, status_code=404)
     from src import edit_capability
+    blueprint = art.get("blueprint") or {}
+    is_legacy = "objects" not in blueprint
     controls = edit_capability.derive_edit_capabilities(art)
-    return JSONResponse({"ok": True, "artifact_id": artifact_id, "controls": controls})
+    return JSONResponse({
+        "ok": True, "artifact_id": artifact_id, "controls": controls,
+        "is_legacy": is_legacy,
+        "legacy_scene_summary": edit_capability.legacy_scene_summary(blueprint) if is_legacy else [],
+    })
 
 
 @app.post("/artifact/{artifact_id}/edit")
@@ -611,6 +624,13 @@ async def api_apply_edit(artifact_id: int, request: Request):
                        f"{realism_deltas.REALISM_VALUES}")
             dedupe.update_edit_event_result(edit_event_id, None, outcome="rejected", reject_reason=reason)
             return JSONResponse({"ok": False, "error": reason}, status_code=400)
+    elif target == "object":
+        # Stage 4 (2026-08-17): per-object remove control - the fixed
+        # build_object_removal_instruction template, never build_targeted_edit_
+        # instruction's generic change-list machinery. descriptor['current_value'] is
+        # this object's own description (edit_capability._object_remove_controls).
+        instruction = generate_image_prompt.build_object_removal_instruction(
+            descriptor.get("current_value"))
     else:
         instruction = generate_image_prompt.build_targeted_edit_instruction(
             descriptor, operation, resolved_value, blueprint=blueprint)

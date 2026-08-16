@@ -27,33 +27,33 @@ The JSON must have exactly these fields:
 - angle (string): the core persuasive angle
 - awareness_stage (string): one of unaware, problem, solution, product, most_aware
 - claims (array): any of efficacy, sensory, ingredient, social_proof, offer
-- visual (object): {{ "layout": ..., "subject": ..., "palette_mood": ..., "text_placement": ..., "scene_lighting": {{ "light_direction": where the dominant light source actually falls in THIS image relative to the camera, e.g. "upper-left, slightly behind camera" or "overhead, direct", "hardness": "hard" (a distinct, sharp-edged shadow) or "soft" (a diffuse, low-contrast shadow), "colour_temperature": e.g. "warm/golden", "neutral daylight", "cool/blue-tinted fluorescent", "shadow_behaviour": where shadows actually fall and how strong they are, "grain": e.g. "clean, no visible grain" or "visible phone-camera noise/grain", "depth_of_field": e.g. "shallow, background softly blurred" or "deep, background in focus" }} - these six fields are OBSERVATIONS of what THIS reference image's own lighting actually looks like, exactly as a photographer describing an existing photo would, never a style label and never a description of what the lighting SHOULD be. }}
+- visual (object): {{ "layout": ..., "subject": ..., "palette_mood": ..., "text_placement": ... }}
+- background (object): REQUIRED - this key must ALWAYS be present. {{ "surface": what the scene is set on or against, e.g. "marble countertop", "sandy beach", "plain white studio backdrop", "colour": the background's OWN dominant colour, distinct from any object's colour, "light": one short phrase describing the scene's overall lighting character, e.g. "soft warm light from upper-left" or "flat even studio light, no visible shadow direction" }}. This is the ENVIRONMENT only - surface, colour, and light. Nothing with its own identity belongs here: a product, a person, a prop, a piece of text, a logo - ANYTHING a viewer could point at and name as a distinct thing - is an OBJECT (see `objects` below), never folded into this field's prose. If you find yourself describing what something IS rather than what the space around it looks like, it belongs in `objects`, not here.
 - cta (string): the call to action
 - destination_url (string): use the value "{destination_url}"
 - headline_verbatim (string): the exact main headline text in the image, or "" if none
 - offer (object): {{ "type": ..., "value": ..., "mechanic": ... }} or null if no offer
 - social_proof (object): {{ "type": ..., "owner": ... }} — owner is the brand/body the proof belongs to, or null
-- layout_detail (object): {{ "text_zone": ..., "product_count": number, "background_type": ..., "zone_positions": array of short phrases locating each element top to bottom (e.g. ["headline top-center", "product mid-frame", "CTA bottom-full-width"]), "has_bottom_banner": true/false, "has_corner_badge": true/false, "frame_division": short description of how the frame splits (e.g. "three stacked horizontal bands" or "single uninterrupted gradient ground, no hard divisions") }}
+- layout_detail (object): {{ "text_zone": ..., "product_count": number, "zone_positions": array of short phrases locating each element top to bottom (e.g. ["headline top-center", "product mid-frame", "CTA bottom-full-width"]), "has_bottom_banner": true/false, "has_corner_badge": true/false, "frame_division": short description of how the frame splits (e.g. "three stacked horizontal bands" or "single uninterrupted gradient ground, no hard divisions") }}
 - legibility_notes (string): whether in-image text is readable at feed size
 - body_area_shown (string): REQUIRED - this key must ALWAYS be present in your JSON output. if a human subject appears in the image, name the specific body region shown or emphasised (e.g. "legs", "arms", "torso", "hands", "neck and décolletage"); if NO human subject appears at all (e.g. a product-only shot, an illustration/diagram, or text-only creative), use exactly "none". This is read downstream to decide whether a per-run body-area instruction may be applied to this reference at all - do not guess a body part onto a productless or human-less image.
 - face_present (object): REQUIRED - this key must ALWAYS be present. {{ "has_face": true/false, "prominence": one of primary/incidental/none, "location": free-text description of where in the frame the face sits (e.g. "centre-frame, close-up, looking directly at camera") }}. has_face is false and prominence is exactly "none" when no face is visible anywhere in the image - location is "" in that case, never a guess at where a face would be. prominence "primary" means the face is the compositional focus (e.g. a close-up beauty shot); "incidental" means a person is visible but the face is not what the ad is about (e.g. a wide lifestyle shot, a person shown from behind or cropped above the shoulders, a hands-only shot with a face barely visible in the background).
 - creative_objective (string): the ad's primary strategic goal in one short phrase, e.g. "drive urgency around a limited-time offer" or "build trust via a testimonial"
 - target_audience (string): who this ad is speaking to, in one short phrase, e.g. "women 40+ concerned about skin texture and firmness"
-- typography (object): {{ "headline_face": typeface style e.g. serif/sans/script, "headline_weight": e.g. bold/light/regular, "hierarchy_levels": array of short phrases describing each distinct text tier top to bottom (e.g. ["large bold serif headline", "medium sans subhead", "small CTA button label"]), "case_treatment": e.g. "all caps headline, sentence case body" }}
-- typography_zones (array): one entry PER DISTINCT TEXT ZONE in the image (brand logo, headline, sub-copy, offer/CTA, badge text - every zone that carries its own visible text, not just the headline). This is PER-ZONE detail; the `typography`/`hierarchy_levels` fields above describe the ad's typography in general prose - this field must actually enumerate each zone so the treatment isn't lost. Each entry: {{ "zone": short label matching a zone_positions phrase above (e.g. "headline upper-right"), "typeface_class": serif/sans/script, "weight": e.g. bold/light/regular, "case": upper/title/sentence, "letter_spacing": tight/normal/wide, "colour": this zone's OWN text colour - distinct from the scene's overall palette_mood, e.g. "gold" or "white", "size_relative": e.g. large/medium/small relative to the frame, "decorative_elements": array of short phrases for anything attached to the zone (a pipe divider, a rule, an underline, a bullet mark) or [] if none, "line_count": number of lines this zone actually occupies }}. A reference commonly has THREE OR FOUR distinct typographic levels (e.g. a large serif headline, a small-caps accent line with wide letter-spacing, small body copy, a button label) - give each its own entry; never collapse two visually distinct levels into one, and never omit a zone just because its text is short.
-- structural_zones (array): REQUIRED - this key must ALWAYS be present in your JSON output, never omitted, regardless of how many zones the ad actually has. Every occurrence of these NINE structural zone types. Described by what each type IS STRUCTURALLY, never by which brand happens to be in front of you right now - this must generalise to any ad, any category, any layout. Zero, one, or several entries of the same zone_type are all valid: if a type doesn't appear at all, it simply has no entries; if an ad has two badges, return two entries with zone_type "badge". An ad with none of these nine zones returns structural_zones as an explicit empty array [] - the key is still present, it is simply empty; do not force a fit and do not drop the key itself. If a zone_type is NOT present, OMIT it entirely - do not add an entry for it just to say it is absent (e.g. never write a sub_line entry whose detail says "no explicit sub-line"). An entry in this array means the zone EXISTS; anything downstream that reads this array will treat every entry as real and try to act on it, so a placeholder entry describing an absence would be read as a zone that is actually there. Each entry: {{ "zone_type": one of brand_wordmark/sub_line/body_copy/cta/price_anchor/product_callout/badge/social_proof/disclaimer, "position": short phrase locating it (e.g. "top-center", "bottom-right banner"), "container": one of none/oval/rect/banner/ribbon/other - the shape holding it, "detail": a short structural description specific to what this zone_type needs (see below), "social_proof_kind": one of aggregate_bar/single_quote - ONLY set when zone_type is social_proof, omit or null otherwise }}.
-    brand_wordmark = the advertiser's own logo or name mark, distinct from a product's own printed label if a product is shown
-    sub_line = a short accent line below the headline (e.g. a tagline, a small-caps line with wide letter-spacing) - a DISTINCT in-scene text zone from the headline itself, not a second name for it
-    body_copy = a paragraph or multi-line block of supporting text rendered IN the image itself - NEVER the scraped ad_text/primary_text supplied separately as a text block above; that is off-image Facebook copy, not part of the visual, and must never be reported here
-    cta = a call-to-action button or label rendered in the image as its own zone (the ad's own `cta` field above names the ACTION being asked for; this names the zone/container it appears in, if any)
-    price_anchor = a price shown as its own graphic element - detail should say whether it's a single price or a struck-through original/new pair, and must transcribe the exact currency symbol and amount shown in the reference - never assume, convert, or default to any one currency or region's format
-    product_callout = a small card or panel calling out a specific product/variant (e.g. a "New Scent" card) - detail should say exactly what it carries: a name, a descriptor line, a colour swatch, a thumbnail image, any combination of these
-    badge = a discrete graphic badge, seal, or roundel - detail should name its actual content (e.g. "reads NEW", "star rating icon", "%-off roundel", "award/certification seal")
-    social_proof = a testimonial or aggregate-review element rendered in the image - social_proof_kind distinguishes an AGGREGATE BAR (a review count + star average, e.g. "Trustpilot · Over 30,000 · ★★★★★") from a SINGLE QUOTE (one customer's words plus attribution), since these need different treatment downstream; set social_proof_kind for every social_proof entry, never leave it unset when this zone_type is used
-    disclaimer = fine-print or footnote text (e.g. "*T&Cs apply", a small legal line)
-- scene_elements (array): REQUIRED - this key must ALWAYS be present, [] when there is genuinely nothing beyond the product itself to inventory. Every element in the scene OTHER THAN the product: hands, skin, props, background objects, secondary figures, surfaces the product rests on - anything visually present that a faithful reproduction of this reference would need to include. Each entry: {{ "element": short noun phrase describing WHAT the element is and its STRUCTURE only - NEVER its colour (e.g. "wooden bathroom shelf", NOT "honey-toned wooden shelf"; "background gradient", NOT "lavender-purple to salmon-pink gradient background"; "a second person's hand", NOT "a pale hand"; "a folded white towel" is WRONG for this reason - write "a folded towel" instead). Colour is never part of an element's identity here: palette substitution governs colour separately downstream, and a colour word baked into this phrase would read as demanding that exact colour survive - describe the STRUCTURE (what it is, its shape/material/role) and let colour be decided elsewhere, "role": what it is doing in the scene (e.g. "product rests on it", "applying the product to skin", "softly blurred in the background"), "essential": true if omitting it would change what the ad is communicating, false if it is incidental set-dressing, "depicts_competitor_category": true if this element EXISTS TO MAKE THE COMPETITOR'S ARGUMENT - a prop, symbol, metaphor, or diagram element that carries or illustrates the ad's persuasive claim, even when it is not a literal depiction of the competitor's product category itself. Judge by FUNCTION in the argument, not just literal resemblance: a chain-and-padlock illustrating "locked" fat the product claims to unlock counts exactly as much as a steak or a spoon of powder for a protein supplement, a strand of hair for a haircare product, or an eye-diagram for an eye treatment - a metaphor or symbolic prop is not exempt just because it is not literally the product category. EXCLUDED, ALWAYS false regardless of role: any human figure, face, or body part - even one that is central to the ad's argument or is itself the metaphor (e.g. a distressed human character dramatising the problem). A person is handled entirely by the separate person-substitution path (face_present/PERSON below) - never by this field, with no exception. false otherwise for anything register-neutral that would suit any brand's ad (a hand, a towel, a shelf, a background wall, generic scenery) - a hand/body part is false for two independent reasons here (register-neutral AND a body part), never a case where the two tests could disagree. REQUIRED on every entry - this key must ALWAYS be present, never omitted, even when the answer is false. This is a DIFFERENT question from essential: an element can be essential AND register-neutral (keep it, unchanged), essential AND competitor-specific (keep the ROLE, substitute the content), or incidental either way. Applies in EVERY register, not only illustrated/drawn scenes - a photographic or 3D-rendered prop that exists to make the competitor's argument (a chain, a padlock, a donut, a weight-loss label) needs this exactly as much as a drawn one; how it gets substituted (natively in the reference's own style vs. photorealistically) is a separate, register-dependent decision made downstream of this flag, not a reason to withhold it here. }}. An incomplete inventory here means those elements get silently dropped when this reference is cloned - list everything visible, not just the obviously important pieces.
-- testimonial_zones (array): REQUIRED - this key must ALWAYS be present, [] when the ad carries no testimonial. Every customer-testimonial-shaped text element in the image - distinct from structural_zones' social_proof entries above, which record WHERE/HOW it is contained; this records the actual testimonial CONTENT. Each entry: {{ "text_verbatim": the exact testimonial text as it appears in the image, "attribution": the name/initial/handle it is attributed to, verbatim, or "" if unattributed, "placement": short phrase locating it (e.g. "bottom-left card"), "styling": how it is visually presented (e.g. "quote marks, no card", "5-star rating above the quote inside a white rounded card") }}.
-- text_purpose (array): REQUIRED - this key must ALWAYS be present, [] when the image carries no text at all. One entry per distinct text block in the image - this classifies EVERY text block by function, at a finer grain than the fields above. Each entry: {{ "text_verbatim": the exact text, "purpose": one of offer/testimonial/efficacy_claim/problem_hook/product_description/cta/other, "placement": short phrase locating it }}. purpose describes what the text is DOING - the job it performs in the ad's argument - never what it literally says; this is what drives what the REPLACEMENT copy must accomplish when this reference is cloned, so classify by function even when the wording itself doesn't obviously announce its purpose (e.g. a rhetorical question is still a problem_hook, not "other").
+- typography (object): {{ "headline_face": typeface style e.g. serif/sans/script, "headline_weight": e.g. bold/light/regular, "hierarchy_levels": array of short phrases describing each distinct text tier top to bottom (e.g. ["large bold serif headline", "medium sans subhead", "small CTA button label"]), "case_treatment": e.g. "all caps headline, sentence case body" }} - general prose about the ad's typography; per-zone text detail belongs in `objects` (kind "text") below, not here.
+- objects (array): REQUIRED - this key must ALWAYS be present, and must NEVER be empty - every ad has at least one object (at minimum, the product or the headline). ONE ENTRY PER VISUALLY DISTINCT THING in the reference ad - every product, every person, every discrete text block (headline, sub-line, body copy, CTA button, badge, price, disclaimer, testimonial quote - each is its OWN entry, never bundled), every logo/wordmark, every prop, every surface the product or a person interacts with directly (not the general background - see `background` above for the environment itself), and every other graphic element (an icon, a badge shape, a decorative flourish). MULTIPLE INSTANCES OF THE SAME PRODUCT ARE SEPARATE ROWS, each with its own object_id - two bottles in frame is two entries, not one entry noting a count. Anything with an identity - anything a viewer could point at and name - is an object row; it is NEVER acceptable to fold an identifiable thing into `background` prose instead of listing it here. An incomplete inventory here means that object gets silently reproduced unchanged (if omitted) or invented from nothing (if the model believes the scene is otherwise empty) when this reference is cloned - list everything visible, not just the obviously important pieces. Each entry:
+    {{
+      "object_id": stable string identifier, "obj_01", "obj_02", ... "obj_NN", assigned in the order you list them, never reused within this blueprint,
+      "kind": one of product/person/text/logo/prop/surface/graphic - product = a sellable item in its packaging; person = a human figure (the whole figure, not per-body-part); text = one discrete text block; logo = a brand mark/wordmark distinct from a product's own printed label; prop = a physical object that isn't the product, a surface, or a person; surface = a distinct physical surface the product/a person rests on or touches (a tray, a towel, a countertop the bottle sits on specifically - not the general environment); graphic = a non-text graphic element (an icon, a badge shape, a decorative flourish),
+      "description": what it plainly is, e.g. "amber glass body-oil bottle with pump", "customer testimonial quote with 5-star rating", "brand wordmark top-left" - structure and content only, describe what it IS, not its colour (colour goes in `colours` below),
+      "bbox": [x, y, w, h], the object's bounding box as fractions of the FULL IMAGE (0.0 to 1.0), x/y measured from the top-left corner, w/h as fractions of image width/height - your best estimate of where this object sits and how much of the frame it occupies,
+      "colours": array of this object's OWN colours only, e.g. ["amber", "gold"] - never the scene's overall palette (that's `visual.palette_mood`) and never another object's colour,
+      "ownership": one of competitor_branded/generic/besque/person - competitor_branded = this specific item visibly belongs to or names the advertiser/competitor (their product, their logo, their packaging, their own on-image copy); generic = register-neutral, could belong to any brand's ad (a hand, a towel, a plain surface, unbranded scenery); besque = do not use this value at deconstruct time, it does not apply to a competitor reference; person = a human figure, handled by its own substitution rules rather than the brand-ownership question,
+      "role": one of hero/secondary/supporting_prop/environment - hero = the main subject the ad is built around; secondary = a supporting element with real presence (a sub-line, a second product); supporting_prop = minor set-dressing; environment = part of the setting rather than a foregrounded thing,
+      "carries_brand_mark": true/false - true if this object itself visibly shows a reproducible brand mark, logo, or wordmark (even if its `kind` isn't "logo" - e.g. a product bottle with the competitor's name printed on its own label carries a brand mark too), false otherwise,
+      "persuasive_function": what this object exists to DO in the ad's argument, in one short phrase, e.g. "the hero product being sold", "proves social validation via a real customer's words", "names the advertiser",
+      "disposition": one of substitute/keep/drop - your best judgement of whether this object should be replaced with a Besque equivalent, kept as-is, or removed entirely when this reference is cloned for Besque. This is a STARTING POINT only - a separate mechanical check overrides this for any competitor-owned or brand-marked object regardless of what you choose here, so judge honestly rather than trying to predict the override.
+    }}
 - semantic_split (object): REQUIRED - this key must ALWAYS be present. {{ "is_split": true/false, "split_axis": "vertical" or "horizontal" or null, "left_or_before": free text describing what that side/panel depicts, "right_or_after": free text describing what the other side/panel depicts }}. is_split is true whenever the image is visually divided into two comparable panels or halves - a before/after, a side-by-side comparison, a split-screen. When is_split is false, split_axis is null and both left_or_before and right_or_after are "". For a genuine before/after ad, the two sides MUST be described as materially DIFFERENT states (e.g. left_or_before: "dry, crepey skin with visible fine lines"; right_or_after: "smooth, hydrated skin with visible firmness") - recording both sides as showing the same condition is a failure, since the contrast between them is the entire point of the format.
 - production_style (object): REQUIRED - this key must ALWAYS be present. {{ "style": one of {production_style_options}, "confidence": high/medium/low, "signals": array of short phrases justifying the choice }}
     ugc = handheld or phone-camera framing, uncontrolled or available lighting (window light, room light, natural daylight - never a lighting rig), imperfect composition (off-centre, tilted, awkwardly cropped), a domestic or non-studio setting (bathroom, bedroom, kitchen, car, outdoors), visible grain or motion blur, a selfie or arm's-length POV. These are OBSERVABLE SIGNALS in the pixels, not a vibe - two or more present means ugc.
@@ -207,6 +207,95 @@ def strip_bottle_shape_language(blueprint):
     return blueprint, filtered
 
 
+# OBJECT DISPOSITION ENFORCEMENT (2026-08-17): mechanical, not prompt-only. The vision
+# prompt above already asks the model to judge substitute/keep/drop for itself ("a
+# STARTING POINT only - a separate mechanical check overrides this... judge honestly
+# rather than trying to predict the override") - but per this codebase's own repeated,
+# proven finding (see CLAUDE.md's guardrails note at the top of this repo: "the model
+# does not reliably obey a text instruction about what NOT to render"), a prompt telling
+# the model what its own disposition field SHOULD resolve to has no better track record
+# than any other prompt-only rule. resolve_disposition is the function that actually
+# decides, run over every object AFTER the vision call, unconditionally overriding
+# whatever the model wrote.
+def resolve_disposition(obj):
+    """Mechanical override of one object's `disposition` - never trusts the model's own
+    guess for a competitor-owned or brand-marked object.
+
+    ownership == "competitor_branded" (this specific item visibly belongs to the
+    competitor - their product, their logo, their own packaging or on-image copy) OR
+    carries_brand_mark == True (this object shows a reproducible brand mark regardless
+    of its `kind`) can NEVER resolve to "keep": a competitor's own branded content
+    surviving into a Besque draft is exactly the compliance/trademark exposure this
+    codebase's rule 9 (brand_rules) already treats as the single most-proven failure
+    class. Of those, a product-kind object SUBSTITUTES - Besque has a real product to
+    put in its place. Every other kind (a competitor's logo, a competitor-branded prop,
+    a block of the competitor's own on-image copy) DROPS - there is no Besque
+    equivalent for a logo or a rival's own sentence to substitute in, only remove.
+
+    "maps to a Besque product" (the task's own phrasing for the substitute condition)
+    is resolved here as `kind == "product"` - this pipeline runs against exactly one
+    product category at a time (the operator's selected product for the run), so any
+    product-kind object in a same-category reference is assumed substitutable; there is
+    no per-object category-matching signal in this schema to check more precisely than
+    that, and this function deliberately takes only `obj` - no blueprint, product
+    table, or DB lookup - so it stays a pure, unit-testable function.
+
+    Every other object (ownership in generic/besque/person, not brand-mark-carrying)
+    passes through with whatever disposition the model assigned, completely unchanged -
+    this function only ever narrows a competitor-owned object AWAY from "keep", never
+    invents a "keep" the model didn't already choose, and never touches an object that
+    was never a compliance risk to begin with."""
+    ownership = obj.get("ownership")
+    carries_brand_mark = bool(obj.get("carries_brand_mark"))
+    if ownership == "competitor_branded" or carries_brand_mark:
+        if obj.get("kind") == "product":
+            return "substitute"
+        return "drop"
+    return obj.get("disposition")
+
+
+def _resolve_object_dispositions(blueprint):
+    """Runs resolve_disposition over every entry in blueprint["objects"], overwriting
+    each object's disposition in place (on a copy - the caller's own blueprint dict is
+    never mutated, same discipline as strip_bottle_shape_language). Returns the updated
+    blueprint. Safe to call on a blueprint with no `objects` key or an empty list -
+    returns the blueprint unchanged in that case; schema validation is what actually
+    guarantees `objects` is present and non-empty by the time this runs in the real
+    pipeline (deconstruct_from_response calls this AFTER validation)."""
+    objects = blueprint.get("objects")
+    if not isinstance(objects, list):
+        return blueprint
+    blueprint = dict(blueprint)
+    blueprint["objects"] = [
+        {**obj, "disposition": resolve_disposition(obj)} if isinstance(obj, dict) else obj
+        for obj in objects
+    ]
+    return blueprint
+
+
+def _assert_no_competitor_branded_object_kept(blueprint):
+    """Defence-in-depth self-check, not the primary enforcement mechanism -
+    resolve_disposition's own logic already guarantees this invariant by construction
+    (it never returns "keep" for a competitor_branded or brand-mark-carrying object), so
+    this should never actually fire in practice. It exists anyway because "prompt-only
+    rules have never bound on the image path" (this file's own standing lesson) applies
+    exactly as much to a bug in OUR OWN enforcement code as to a model instruction - if
+    resolve_disposition is ever changed in a way that reintroduces this exact gap, this
+    raises loudly at deconstruct time rather than letting a competitor-branded object
+    quietly reach image generation with disposition="keep"."""
+    for obj in blueprint.get("objects") or []:
+        if not isinstance(obj, dict):
+            continue
+        is_branded = obj.get("ownership") == "competitor_branded" or bool(obj.get("carries_brand_mark"))
+        if is_branded and obj.get("disposition") == "keep":
+            raise BlueprintValidationError(
+                f"Object {obj.get('object_id', '?')!r} is competitor-branded but resolved "
+                f"to disposition='keep' - this must never happen; resolve_disposition has "
+                f"a bug.",
+                "competitor_branded object resolved to keep",
+            )
+
+
 def deconstruct_from_response(raw_text: str) -> dict:
     """Parse and validate a blueprint from a raw model response. Raises if invalid.
 
@@ -216,7 +305,15 @@ def deconstruct_from_response(raw_text: str) -> dict:
     narrows a list or blanks one string, never invalidates a blueprint that was
     already valid. Any field actually filtered is logged by name and value so a
     stripped ad stays diagnosable from the run log, the same discipline this codebase
-    already applies to every other silently-defaulted field."""
+    already applies to every other silently-defaulted field.
+
+    Object disposition is resolved AFTER that (2026-08-17, resolve_disposition) - order
+    doesn't matter between the two (shape-stripping touches product_category.signals/
+    visual.subject/layout_detail.zone_positions; disposition resolution touches
+    objects[].disposition; the two never touch the same field), kept sequential rather
+    than merged into one pass so each stays independently testable. Raises if the
+    post-resolution invariant is somehow violated (see
+    _assert_no_competitor_branded_object_kept) - this should never actually trigger."""
     blueprint = parse_blueprint(raw_text)
     err = validator.validation_error(blueprint)
     if err:
@@ -225,6 +322,8 @@ def deconstruct_from_response(raw_text: str) -> dict:
     if filtered:
         log.info("deconstruct: stripped bottle-shape language for ad %s: %s",
                   blueprint.get("ad_id", "?"), filtered)
+    blueprint = _resolve_object_dispositions(blueprint)
+    _assert_no_competitor_branded_object_kept(blueprint)
     return blueprint
 
 # ---- Live Claude vision call (wired at kickoff) ----

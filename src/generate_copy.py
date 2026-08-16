@@ -406,43 +406,13 @@ def _used_copy_clause(used_headlines):
 
 
 def _normalize_position(position):
-    """Lowercase/whitespace-collapse a position/placement string for comparison -
-    text_purpose[].placement and structural_zones[].position are both free-text phrases
-    describing WHERE the same underlying text sits, extracted independently by
-    deconstruct.py, and _text_zone_copy_clause's own docstring already establishes that
-    position strings are meant to match verbatim across fields sharing one blueprint.
-    Used by _dedupe_text_purpose_against_zones (item 1, 2026-08-13) - a normalized
-    match, not fuzzy similarity, since these two fields are meant to describe the SAME
-    positional vocabulary, not merely similar-sounding ones."""
+    """Lowercase/whitespace-collapse a position/placement string for comparison. Its
+    only caller, _dedupe_text_purpose_against_zones, was DELETED 2026-08-17 (see
+    _text_purpose_clause's docstring - text_purpose and structural_zones, the two
+    fields it reconciled, no longer exist). Left in place as a small, self-contained,
+    still-correct utility in case a future position-matching need reaches for it again,
+    rather than deleted and potentially rewritten from scratch."""
     return re.sub(r"[\s\-_]+", " ", (position or "").strip().lower())
-
-
-def _dedupe_text_purpose_against_zones(entries, zones):
-    """Drop any text_purpose entry whose placement matches a structural_zones position
-    already covered by _text_zone_copy_clause (item 1, 2026-08-13): text_purpose and
-    structural_zones are two INDEPENDENT blueprint fields (see deconstruct.py's own
-    schema) that can both describe the same underlying reference text block from a
-    different angle - one by FUNCTION (text_purpose), one by ZONE (structural_zones).
-    With no coordination between them, both clauses could independently commission new
-    Besque copy for the same underlying idea, landing in two different output fields
-    (primary_text/image_subtext vs panel_copy) that both get baked into the final
-    image - a live draft rendered the same closing statement twice, in different
-    wording, this way. A matching position is a strong MECHANICAL signal (not a guess
-    at semantic similarity) that the two entries are the SAME text block: when one
-    exists, text_zone_targets's own per-zone instruction is more specific (it names an
-    exact position and container), so the zone-copy clause wins and the overlapping
-    text_purpose entry is dropped here rather than separately re-commissioned. An entry
-    whose placement doesn't match any zone position is untouched - text_purpose is the
-    ONLY signal for content with no dedicated structural zone at all (e.g. a
-    problem_hook in body copy with no sub_line/body_copy/product_callout zone drawn
-    around it), and dropping those would silently lose the one clause that names them."""
-    if not zones:
-        return entries
-    zone_positions = {_normalize_position(z.get("position", "")) for z in zones}
-    zone_positions.discard("")
-    if not zone_positions:
-        return entries
-    return [e for e in entries if _normalize_position(e.get("placement", "")) not in zone_positions]
 
 
 def _text_purpose_clause(blueprint, zones=None):
@@ -462,18 +432,19 @@ def _text_purpose_clause(blueprint, zones=None):
     blueprint from before this field existed produces byte-for-byte the same prompt as
     before this existed.
 
-    zones (2026-08-13, item 1) is build_copy_prompt's own text_zone_targets(blueprint)
-    result, passed in so this clause can drop any entry _dedupe_text_purpose_against_
-    zones identifies as the SAME underlying text block _text_zone_copy_clause already
-    covers - see that function's own docstring for why. None/[] (no zones, or a caller
-    that predates this) leaves every text_purpose entry exactly as before.
+    zones (2026-08-13, item 1) used to be build_copy_prompt's own text_zone_targets
+    (blueprint) result, passed in so this clause could drop any entry the now-deleted
+    _dedupe_text_purpose_against_zones identified as the SAME underlying text block
+    _text_zone_copy_clause already covers (2026-08-17: both text_purpose and
+    structural_zones, the two fields that dedup reconciled, no longer exist in
+    schema/blueprint.schema.json - blueprint.objects replaces them). Parameter kept,
+    now unused, so this function's signature doesn't change for its one caller.
 
     text_verbatim is redacted via _redact_personal_attribution (item 2, sharpened) -
     the reference's own wording can carry a personal-name-shaped construct (an
     "attributed to X"/em-dash signature) inline, independent of testimonial_zones'
     dedicated attribution field."""
     entries = (blueprint or {}).get("text_purpose") or []
-    entries = _dedupe_text_purpose_against_zones(entries, zones)
     if not entries:
         return ""
     lines = "\n".join(

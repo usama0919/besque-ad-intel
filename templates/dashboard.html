@@ -431,6 +431,30 @@ async function openDynEditModal(artifactId){
     const d = await r.json();
     if(!d.ok){ document.getElementById('dynEditStatus').textContent = 'Failed: ' + (d.error||'unknown'); return; }
     renderDynControls(d.controls);
+    // Stage 5 back-compat (2026-08-17): a blueprint with no `objects` key predates the
+    // objects schema - show its old scene_elements/structural_zones inventory as
+    // READ-ONLY text instead of silently showing nothing for it. Rendered ABOVE the
+    // (possibly empty) live controls, never replacing them - a legacy blueprint can
+    // still have real headline/subtext/offer controls alongside this read-only note.
+    if(d.is_legacy && (d.legacy_scene_summary||[]).length){
+      const legacyBox = document.createElement('div');
+      legacyBox.className = 'dyn-group';
+      const heading = document.createElement('div');
+      heading.className = 'dyn-group-title';
+      heading.textContent = 'legacy scene inventory (read-only)';
+      legacyBox.appendChild(heading);
+      const note = document.createElement('div');
+      note.className = 'dyn-static-value';
+      note.textContent = 'This artifact predates per-object editing - shown for reference only, not editable here.';
+      legacyBox.appendChild(note);
+      d.legacy_scene_summary.forEach(line => {
+        const row = document.createElement('div');
+        row.className = 'dyn-static-value';
+        row.textContent = '- ' + line;
+        legacyBox.appendChild(row);
+      });
+      document.getElementById('dynEditControls').prepend(legacyBox);
+    }
     document.getElementById('dynEditStatus').textContent = d.controls.length ? '' : 'No editable controls for this artifact.';
   } catch(e) {
     document.getElementById('dynEditStatus').textContent = 'Failed: ' + e;

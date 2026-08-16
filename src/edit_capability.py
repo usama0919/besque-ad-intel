@@ -22,37 +22,12 @@ import re
 
 from src import realism_deltas
 
-# Scene_elements entries matching one of these (case-insensitive, WORD-boundary - never a
-# raw substring test) are body-part shaped, not props - they route to a "person_body"
-# control instead of a "prop" control, per the explicit rule: face_present.has_face==false
-# must still surface a hand/skin control from scene_elements, never silently drop the
-# element or mis-file it as a prop. Word-boundary matching is load-bearing, not cosmetic:
-# a live artifact's own scene_elements carried the string "rocky shoreline visible in
-# BACKGROUND" - plain substring containment misrouted it to person_body purely because
-# "back" sits inside "background", with no actual body part depicted at all.
-# per the explicit rule: face_present.has_face==false must still surface a hand/skin
-# control from scene_elements, never silently drop the element or mis-file it as a prop.
-# Deliberately excludes "face" itself - a face is governed exclusively by face_present
-# (the person_face age/expression controls below), never by a scene_elements entry, so a
-# stray "face" element string here would otherwise create a redundant second control.
-HUMAN_BODY_KEYWORDS = (
-    "hand", "hands", "arm", "arms", "leg", "legs", "torso", "skin", "body", "neck",
-    "shoulder", "shoulders", "waist", "hip", "hips", "thigh", "thighs", "foot", "feet",
-    "finger", "fingers", "hair", "back", "stomach", "abdomen", "chest", "wrist", "wrists",
-    "ankle", "ankles", "knee", "knees", "elbow", "elbows",
-)
-
-_HUMAN_BODY_PATTERN = re.compile(
-    r"\b(?:" + "|".join(HUMAN_BODY_KEYWORDS) + r")\b", re.IGNORECASE
-)
-
-
-def _is_human_body_element(element):
-    """Word-boundary match against HUMAN_BODY_KEYWORDS - never plain substring
-    containment (`kw in element.lower()`), which false-positives on ordinary words
-    that merely CONTAIN a keyword ("background" contains "back", "chip" would contain
-    nothing here but the principle is the same risk for "hip"/"arm"/etc.)."""
-    return bool(_HUMAN_BODY_PATTERN.search(element or ""))
+# HUMAN_BODY_KEYWORDS/_is_human_body_element DELETED 2026-08-17: both existed only to
+# route a scene_elements entry to target="person_body" vs target="prop" in
+# _scene_element_controls (below, also deleted) - scene_elements no longer exists
+# (schema/blueprint.schema.json - blueprint.objects replaces it with a real, structured
+# `kind` field, e.g. "person", instead of a keyword guess against free text). See
+# _object_remove_controls for the replacement.
 
 # Rule 10's own floor (generate_image_prompt._RULE_10_SUBJECT_AGE): 45-60 bracket, grey/
 # silver hair, visible facial lines, mature skin texture required. The edit engine (Step
@@ -95,28 +70,22 @@ def _structural_zone_types(blueprint):
     return {(z or {}).get("zone_type") for z in (blueprint.get("structural_zones") or [])}
 
 
-# Never target the brand wordmark rule (2026-08-14): on artifact 1251, a headline edit
-# whose "current value" didn't actually exist in the pixels (see _has_headline_shaped_
-# text_purpose's comment) caused Gemini to overwrite the BESQUE wordmark region instead -
-# an edit must never be able to touch the wordmark, directly or as a side effect.
-_WORDMARK_KEYWORDS = ("wordmark", "logo", "brand mark", "brandmark", "besque")
-_WORDMARK_PATTERN = re.compile(r"\b(?:" + "|".join(_WORDMARK_KEYWORDS) + r")\b", re.IGNORECASE)
-
-
-def _is_brand_wordmark_element(element):
-    """Excludes any scene_elements entry that names the brand wordmark/logo from ever
-    becoming its own editable prop/person_body control - defense in depth alongside the
-    delta-instruction-level protection in generate_image_prompt.build_targeted_edit_
-    instruction. No control in this registry targets "wordmark" directly today, but this
-    stops a future scene_elements entry describing it from silently becoming editable."""
-    return bool(_WORDMARK_PATTERN.search(element or ""))
-
-
 def get_brand_wordmark_zone(blueprint):
     """The structural_zones entry with zone_type=="brand_wordmark", or None. Used by the
     edit engine (generate_image_prompt.build_targeted_edit_instruction) to name the
     wordmark's own position in the ALWAYS-ON protection clause every targeted edit
-    carries, regardless of what's being edited."""
+    carries, regardless of what's being edited.
+
+    ORPHANED 2026-08-17: structural_zones no longer exists for a blueprint deconstructed
+    under the new objects schema (schema/blueprint.schema.json) - this always returns
+    None for a new blueprint, same as it already did for any legacy blueprint with no
+    brand_wordmark zone. Not rewired to blueprint.objects: a competitor logo object
+    there is never Besque's own wordmark position (see _object_remove_controls's own
+    docstring - blueprint.objects describes the reference, never the drafted image;
+    Besque's wordmark is ADDED by brand_rules() rule 9, never tracked as an object
+    here), so there is no equivalent signal to read instead. The protection clause this
+    feeds degrades to its own generic wording with no specific position named -
+    graceful, not a crash."""
     for z in blueprint.get("structural_zones") or []:
         if (z or {}).get("zone_type") == "brand_wordmark":
             return z
@@ -224,39 +193,38 @@ def _person_face_controls(blueprint):
     return []
 
 
-def _scene_element_controls(blueprint):
-    """One control per scene_elements entry, labelled with that entry's OWN `element`
-    string - never a generic grouped control. Human-body-shaped entries (see
-    HUMAN_BODY_KEYWORDS) route to target="person_body" instead of target="prop"; both
-    still get their own descriptor per entry, one each, same as every other entry.
-    essential==true entries keep "remove" in allowed_ops (removal isn't blocked - the
-    operator may have a good reason) but carry an explicit warning, surfaced by the UI,
-    never silently allowed through as if it were any other prop."""
+def _object_remove_controls(blueprint):
+    """Stage 4 (2026-08-17): one REMOVE-only control per object row in blueprint.objects
+    - no hardcoded list, derived fresh from the artifact's own blueprint every call, the
+    same pattern every other control in this module already follows. REPLACES
+    _scene_element_controls (scene_elements no longer exists - blueprint.objects
+    replaces it, see deconstruct.py/generate_image_prompt._objects_clause).
+
+    Deliberately REMOVE-only, never "change" - the task this control was built for asks
+    for a remove control per object, not a rename/re-describe operation; changing an
+    object's own identity is a different, unspecified capability this does not attempt.
+
+    No wordmark/brand-mark exclusion, unlike the old scene_elements-based
+    _scene_element_controls: blueprint.objects describes the COMPETITOR reference,
+    never the drafted image - Besque's own wordmark is never one of these rows (it is
+    ADDED to the draft by brand_rules() rule 9, never tracked as an object here), so
+    there is no "accidentally target Besque's own wordmark" risk this needs to guard
+    against the way the old prop/person_body controls did. object_id is the stable
+    identifier the delta instruction and drift_check's removal zone both key off -
+    entries missing either object_id or description are skipped rather than offered
+    with a blank label, fail-closed by the same convention every other control here uses."""
     controls = []
-    for entry in blueprint.get("scene_elements") or []:
-        entry = entry or {}
-        element = entry.get("element")
-        if not element:
+    for obj in blueprint.get("objects") or []:
+        obj = obj or {}
+        object_id = obj.get("object_id")
+        description = obj.get("description")
+        if not object_id or not description:
             continue
-        if _is_brand_wordmark_element(element):
-            continue
-        is_human = _is_human_body_element(element)
-        essential = bool(entry.get("essential"))
-        descriptor = {
-            "target": "person_body" if is_human else "prop",
-            "attribute": element,
-            "label": element,
-            "current_value": entry.get("role") or element,
-            "allowed_ops": ["change", "remove"],
-            "blueprint_path": "scene_elements[].element",
-        }
-        if essential:
-            descriptor["essential"] = True
-            descriptor["warning"] = (
-                f"\"{element}\" is marked essential to this composition (scene_elements."
-                "essential=true) - removing it may substantially alter the ad."
-            )
-        controls.append(descriptor)
+        controls.append({
+            "target": "object", "attribute": object_id, "label": description,
+            "current_value": description, "allowed_ops": ["remove"],
+            "blueprint_path": "objects[].object_id",
+        })
     return controls
 
 
@@ -391,6 +359,33 @@ def _badge_banner_controls(blueprint):
     return controls
 
 
+def legacy_scene_summary(blueprint):
+    """Stage 5 back-compat (2026-08-17): a READ-ONLY text summary of the OLD
+    scene_elements/structural_zones inventory, for a blueprint deconstructed before the
+    objects schema existed - ~300 existing artifact rows have no `objects` key at all
+    (no backfill, no migration - see the task this was built for). This is display data
+    ONLY, never a control: _object_remove_controls is the only thing that ever offers a
+    real edit for scene/object content, and it only fires when `blueprint.objects` is
+    actually present. Returns [] when `objects` IS present (a current-schema blueprint
+    has nothing legacy to summarise) or when neither legacy field has anything in it -
+    the caller (dashboard.py) treats an empty list as "nothing to show", never an error."""
+    if blueprint.get("objects"):
+        return []
+    lines = []
+    for e in blueprint.get("scene_elements") or []:
+        e = e or {}
+        element = e.get("element")
+        if element:
+            role = e.get("role") or ""
+            lines.append(f"{element} - {role}" if role else element)
+    for z in blueprint.get("structural_zones") or []:
+        z = z or {}
+        zone_type = z.get("zone_type")
+        if zone_type:
+            lines.append(f"{zone_type} at {z.get('position') or 'unknown position'}")
+    return lines
+
+
 def derive_edit_capabilities(artifact):
     """The complete, dynamically-derived control set for ONE artifact. artifact is the
     dict shape dedupe.get_artifact_by_id returns (or any dict with the same keys - tests
@@ -419,7 +414,7 @@ def derive_edit_capabilities(artifact):
             controls.append(descriptor)
     controls.extend(_person_face_controls(blueprint))
     controls.extend(_badge_banner_controls(blueprint))
-    controls.extend(_scene_element_controls(blueprint))
+    controls.extend(_object_remove_controls(blueprint))
     return controls
 
 

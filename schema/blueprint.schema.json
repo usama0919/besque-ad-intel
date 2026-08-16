@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "CreativeBlueprint",
   "type": "object",
-  "required": ["ad_id", "source_page", "captured_at", "format", "hook", "awareness_stage", "claims", "visual", "cta", "structural_zones", "production_style", "body_area_shown", "face_present", "semantic_split", "scene_elements", "testimonial_zones", "text_purpose"],
+  "required": ["ad_id", "source_page", "captured_at", "format", "hook", "awareness_stage", "claims", "visual", "cta", "objects", "background", "production_style", "body_area_shown", "face_present", "semantic_split"],
   "properties": {
     "ad_id": { "type": "string" },
     "source_page": { "type": "string" },
@@ -32,16 +32,52 @@
         "layout": { "type": "string" },
         "subject": { "type": "string" },
         "palette_mood": { "type": "string" },
-        "text_placement": { "type": "string" },
-        "scene_lighting": {
-          "type": ["object", "null"],
-          "properties": {
-            "light_direction": { "type": "string" },
-            "hardness": { "type": "string", "enum": ["hard", "soft"] },
-            "colour_temperature": { "type": "string" },
-            "shadow_behaviour": { "type": "string" },
-            "grain": { "type": "string" },
-            "depth_of_field": { "type": "string" }
+        "text_placement": { "type": "string" }
+      }
+    },
+    "background": {
+      "type": "object",
+      "required": ["surface", "colour", "light"],
+      "properties": {
+        "surface": { "type": "string" },
+        "colour": { "type": "string" },
+        "light": { "type": "string" }
+      }
+    },
+    "objects": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["object_id", "kind", "description", "bbox", "colours", "ownership",
+                     "role", "carries_brand_mark", "persuasive_function", "disposition"],
+        "properties": {
+          "object_id": { "type": "string" },
+          "kind": {
+            "type": "string",
+            "enum": ["product", "person", "text", "logo", "prop", "surface", "graphic"]
+          },
+          "description": { "type": "string" },
+          "bbox": {
+            "type": "array",
+            "minItems": 4,
+            "maxItems": 4,
+            "items": { "type": "number", "minimum": 0, "maximum": 1 }
+          },
+          "colours": { "type": "array", "items": { "type": "string" } },
+          "ownership": {
+            "type": "string",
+            "enum": ["competitor_branded", "generic", "besque", "person"]
+          },
+          "role": {
+            "type": "string",
+            "enum": ["hero", "secondary", "supporting_prop", "environment"]
+          },
+          "carries_brand_mark": { "type": "boolean" },
+          "persuasive_function": { "type": "string" },
+          "disposition": {
+            "type": "string",
+            "enum": ["substitute", "keep", "drop"]
           }
         }
       }
@@ -69,7 +105,6 @@
       "properties": {
         "text_zone": { "type": "string" },
         "product_count": { "type": "number" },
-        "background_type": { "type": "string" },
         "zone_positions": { "type": "array", "items": { "type": "string" } },
         "has_bottom_banner": { "type": "boolean" },
         "has_corner_badge": { "type": "boolean" },
@@ -87,48 +122,6 @@
         "headline_weight": { "type": "string" },
         "hierarchy_levels": { "type": "array", "items": { "type": "string" } },
         "case_treatment": { "type": "string" }
-      }
-    },
-    "typography_zones": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "zone": { "type": "string" },
-          "typeface_class": { "type": "string" },
-          "weight": { "type": "string" },
-          "case": { "type": "string" },
-          "letter_spacing": { "type": "string" },
-          "colour": { "type": "string" },
-          "size_relative": { "type": "string" },
-          "decorative_elements": { "type": "array", "items": { "type": "string" } },
-          "line_count": { "type": "number" }
-        }
-      }
-    },
-    "structural_zones": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "zone_type": {
-            "type": "string",
-            "enum": [
-              "brand_wordmark", "sub_line", "body_copy", "cta", "price_anchor",
-              "product_callout", "badge", "social_proof", "disclaimer"
-            ]
-          },
-          "position": { "type": "string" },
-          "container": {
-            "type": "string",
-            "enum": ["none", "oval", "rect", "banner", "ribbon", "other"]
-          },
-          "detail": { "type": "string" },
-          "social_proof_kind": {
-            "type": ["string", "null"],
-            "enum": ["aggregate_bar", "single_quote", null]
-          }
-        }
       }
     },
     "production_style": {
@@ -156,48 +149,6 @@
         "split_axis": { "type": ["string", "null"], "enum": ["vertical", "horizontal", null] },
         "left_or_before": { "type": "string" },
         "right_or_after": { "type": "string" }
-      }
-    },
-    "scene_elements": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "required": ["element", "role", "essential", "depicts_competitor_category"],
-        "properties": {
-          "element": { "type": "string" },
-          "role": { "type": "string" },
-          "essential": { "type": "boolean" },
-          "depicts_competitor_category": { "type": "boolean" }
-        }
-      }
-    },
-    "testimonial_zones": {
-      "$comment": "NAMING CONSTRAINT: if generate_copy.py ever gains a testimonial output field, it must be named exactly \"testimonial\" to match TESTIMONIAL_FIELD_KEYS in src/compliance.py - that check only scans keys named in that tuple, and a differently-named field would silently bypass the fabricated-testimonial guard the same way an absent one does today.",
-      "type": "array",
-      "items": {
-        "type": "object",
-        "required": ["text_verbatim", "attribution", "placement", "styling"],
-        "properties": {
-          "text_verbatim": { "type": "string" },
-          "attribution": { "type": "string" },
-          "placement": { "type": "string" },
-          "styling": { "type": "string" }
-        }
-      }
-    },
-    "text_purpose": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "required": ["text_verbatim", "purpose", "placement"],
-        "properties": {
-          "text_verbatim": { "type": "string" },
-          "purpose": {
-            "type": "string",
-            "enum": ["offer", "testimonial", "efficacy_claim", "problem_hook", "product_description", "cta", "other"]
-          },
-          "placement": { "type": "string" }
-        }
       }
     },
     "creative_format": {

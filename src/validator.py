@@ -27,14 +27,6 @@ def production_styles() -> list[str]:
     )
 
 
-def structural_zone_types() -> list[str]:
-    """The structural_zones[].zone_type enum (2026-08-06), read from the schema for the
-    same reason as production_styles()/creative_formats() above - whatever eventually
-    consumes this (the generator is NOT wired to it yet, deliberately) must check its own
-    coverage against this list, not repeat the nine names as a separate literal."""
-    return list(_SCHEMA["properties"]["structural_zones"]["items"]["properties"]["zone_type"]["enum"])
-
-
 def creative_formats() -> list[str]:
     """The creative_format enum, read from the schema for the same reason as
     production_styles() above - generate_image_prompt_writer.py's TYPOGRAPHY_GUIDANCE
@@ -42,19 +34,45 @@ def creative_formats() -> list[str]:
     return list(_SCHEMA["properties"]["creative_format"]["enum"])
 
 
+def _duplicate_object_ids_error(blueprint: dict) -> str | None:
+    """Object-level uniqueness check the JSON schema itself cannot express: draft-07's
+    `uniqueItems` compares whole items, not one sub-field, so two `objects` entries
+    with identical `object_id` but different `description`/`bbox`/etc. would pass a
+    pure jsonschema check silently. Every downstream consumer (the edit modal's
+    per-object remove control, drift_check's removal-zone lookup) keys off object_id
+    alone, so a duplicate is not cosmetic - it makes "remove obj_03" ambiguous about
+    which of two objects is meant. Returns None when `objects` is missing/not a list
+    (the schema's own `required`/`type` checks already own that failure) - this check
+    only ever adds a NEW failure reason, never masks a different one."""
+    objects = blueprint.get("objects")
+    if not isinstance(objects, list):
+        return None
+    seen = set()
+    for obj in objects:
+        if not isinstance(obj, dict):
+            continue
+        object_id = obj.get("object_id")
+        if object_id is None:
+            continue
+        if object_id in seen:
+            return f"Duplicate object_id {object_id!r} in objects - every object_id must be unique."
+        seen.add(object_id)
+    return None
+
+
 def is_valid(blueprint: dict) -> bool:
     """Return True if the blueprint matches the schema, else False."""
-    try:
-        validate(instance=blueprint, schema=_SCHEMA)
-        return True
-    except ValidationError:
-        return False
+    return validation_error(blueprint) is None
 
 
 def validation_error(blueprint: dict) -> str | None:
-    """Return the error message if invalid, else None."""
+    """Return the error message if invalid, else None. Runs the jsonschema check
+    first (schema shape, required fields, bbox type/bounds) - only reaches the
+    duplicate-object_id check (see _duplicate_object_ids_error) once the blueprint is
+    already schema-valid, so that check never has to guard against `objects` being
+    absent or malformed itself."""
     try:
         validate(instance=blueprint, schema=_SCHEMA)
-        return None
     except ValidationError as e:
         return e.message
+    return _duplicate_object_ids_error(blueprint)

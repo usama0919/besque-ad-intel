@@ -248,3 +248,41 @@ def test_parse_position_unrecognized_falls_back_to_full_frame():
 
 def test_parse_position_empty_falls_back_to_full_frame():
     assert _parse_position_to_bbox("", 500, 500) == (0, 0, 500, 500)
+
+
+# ---- Stage 4 (2026-08-17): object-removal drift zone - the object's OWN bbox padded
+# by OBJECT_REMOVAL_MARGIN_FRACTION, never the product zone ----
+
+OBJECT_BLUEPRINT = {"objects": [
+    {"object_id": "obj_02", "kind": "prop", "description": "wooden tray",
+     "bbox": [0.25, 0.25, 0.25, 0.25]},
+]}
+OBJECT_DESCRIPTOR = {"target": "object", "attribute": "obj_02", "label": "wooden tray"}
+
+
+def test_object_removal_uses_removal_zone_method():
+    v1 = _png_bytes((10, 10, 10))
+    # change confined inside the padded object bbox: object is [50,50]-[100,100] on a
+    # 200x200 frame; with a 20% margin that's roughly [40,40]-[110,110].
+    v2 = _png_bytes((10, 10, 10), patch=(55, 55, 95, 95, (240, 240, 240)))
+    result = check_drift(v1, v2, OBJECT_DESCRIPTOR, OBJECT_BLUEPRINT)
+    assert result["method"] == "removal_zone"
+    assert result["drift_flag"] is False
+
+
+def test_object_removal_flags_change_outside_the_padded_bbox():
+    v1 = _png_bytes((10, 10, 10))
+    # a large change entirely in the opposite corner of the frame - well outside even
+    # a padded [40,40]-[110,110] zone.
+    v2 = _png_bytes((10, 10, 10), patch=(150, 150, 200, 200, (240, 240, 240)))
+    result = check_drift(v1, v2, OBJECT_DESCRIPTOR, OBJECT_BLUEPRINT)
+    assert result["method"] == "removal_zone"
+    assert result["drift_flag"] is True
+
+
+def test_object_removal_falls_back_to_containment_when_object_id_not_found():
+    v1 = _png_bytes((10, 10, 10))
+    v2 = _png_bytes((10, 10, 10), patch=(40, 40, 160, 160, (240, 240, 240)))
+    missing_descriptor = {"target": "object", "attribute": "obj_99", "label": "?"}
+    result = check_drift(v1, v2, missing_descriptor, OBJECT_BLUEPRINT)
+    assert result["method"] == "containment"
