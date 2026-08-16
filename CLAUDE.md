@@ -1626,3 +1626,151 @@ placement sentence) on the GENERATION path. Not changed in this session - flagge
 known weakness, not fixed. A future fix direction would mirror `_product_control`'s
 own shape: require positive confirmation (a real `product_count`) rather than treating
 "no data either way" as "yes."
+
+## 2026-08-16 — bottle-realism edit control, real product-zone drift check, fixed
+bottle geometry, deconstruct-time shape stripping
+
+**Committed on `feat/dynamic-edit-system`: `5bcc118`, `f69a787`, `25c3a08`** (still
+unmerged/undeployed, continuing directly from the 13-14 Aug Dynamic Edit System work
+above).
+
+### Bottle-realism-only edit control (`5bcc118`), superseding the 2026-08-15 version
+The 2026-08-15 product-realism control (`build_product_realism_edit_instruction`)
+dynamically ASSEMBLED its instruction from `target_style` + blueprint (wordmark
+protection, preservation list) and attached the product's own reference photos -
+exactly the "construct the delta from field text" shape this rebuild replaces.
+
+`src/realism_deltas.py` (new) now holds ONE pre-authored delta sentence per FIXED value
+- `ugc_native`, `high_spec`, `hybrid`, `illustrated` (`REALISM_VALUES`, `REALISM_DELTAS`)
+- independent of whatever `production_style.style` the schema currently allows or an
+older row still carries. Each delta names the bottle's render register only, states
+the label's content/wording/icons/proportions/position unchanged, states everything
+else in the image unchanged, and never restates label colour/typeface/wordmark -
+identity is `products.visual_description`'s job. `build_product_realism_edit_instruction`
+was deleted entirely, not left as dead code.
+
+`edit_capability._product_realism_control`'s descriptor now carries `options` straight
+from `realism_deltas.REALISM_VALUES`, so the modal and the delta text can never drift
+apart; `current_value` stays exactly as stored (e.g. a pre-rename `"ugc"` or `"hybrid"`),
+never coerced to `options[0]`.
+
+`POST /artifact/{id}/edit`'s realism branch now sends ONLY the v1 draft image plus the
+exact pre-authored sentence - no reference photos, no blueprint fields, no stored
+prompt. Unknown values are rejected with a 400 naming `REALISM_VALUES`.
+
+Modal (`templates/dashboard.html`): Product — Realism renders as a segmented picker
+over the four options (explicit Apply button; selecting a segment never fires the edit
+by itself); a stored value matching none of the four shows a `"current: <value>"` chip
+instead of silently preselecting the first option. Product (placement) renders as
+static read-only text - no textarea, no Apply button; no UI path edits product
+identity.
+
+Tests (`tests/test_realism_deltas.py`): no delta contains BESQUE/MAGIC/maroon/
+terracotta/serif/sans-serif/vegan/cruelty/cylindrical/collar/pump; every delta states
+the unchanged-elsewhere clause; applying a realism change creates a new artifact row
+without mutating v1; an unknown stored value's `current_value` stays outside `options`
+rather than being coerced to `options[0]` (the exact contract the chip-vs-preselect UI
+decision reads).
+
+### Real product-zone drift check, `drift_method` audit trail, server-side placement block (`f69a787`)
+Found live: on a realism apply, `target=product` had no recorded zone position, so
+`drift_check.check_drift` always fell back to CONTAINMENT - "is the changed region one
+coherent blob," never "did it land on the right part of the frame." A single
+contiguous edit relocated entirely to the wrong region of the image passed that check
+outright, since one blob is one blob regardless of where it sits.
+
+Fixed: `drift_check._product_zone_position` reads `layout_detail.zone_positions` - a
+real, already-populated deconstruct-time field (e.g. `"product mid-frame"`) - for a
+phrase naming "product" or "bottle", parsed into a bbox via the SAME
+`_parse_position_to_bbox` every other zone target already uses. When present, `product`
+edits now use the ZONE method (change inside vs. outside that region, threshold 1.0%);
+falls back to containment only when `zone_positions` has nothing product-shaped
+recorded - never a fabricated zone.
+
+`edit_events.drift_method` (new column, `CREATE` + explicit `ALTER TABLE ADD COLUMN IF
+NOT EXISTS` - the established self-migration pattern) records which method actually
+ran - `"zone"`/`"containment"`/`"skip"` - on EVERY apply, not just a drifted one, so a
+containment fallback is visible on the row itself rather than indistinguishable from a
+real zone pass just because both happened to report `drift_flag=false`.
+
+`POST /artifact/{id}/edit` now rejects `target=product, attribute=placement`
+unconditionally with a 400, checked BEFORE `edit_capability.find_control` so it's
+rejected even on an artifact where the control wouldn't otherwise be derived at all.
+The modal already rendered this field read-only, but that was a UI-only guarantee - a
+direct API call is now blocked server-side too.
+
+### Fixed bottle geometry clause + deconstruct-time shape-language stripping (`25c3a08`)
+`generate_image_prompt._bottle_geometry_clause()` is a single hardcoded constant - no
+arguments, no blueprint/artifact/DB reads - stating the Besque bottle's actual
+proportions in numbers (4.33x total-height-to-body-width; a 2.85-body-width
+straight-sided cylinder body; a 0.21-body-width shoulder; a 0.75x0.63-body-width gold
+collar; a 0.43-body-width pump stem; a 0.38-body-width lever overhang). Composed into
+all three `build_image_prompt` branches (edit-mode, writer, template), gated on
+`effective_include_product` same as its `_bottle_identity_clause`/`_bottle_integration_
+clause` siblings. Never composed into the realism-only targeted edit path
+(`src/realism_deltas.py`), which sends only its own pre-authored delta - the two
+systems' geometry handling is now deliberately disjoint, not merely non-overlapping by
+accident.
+
+Every other place that used to describe bottle shape/proportions in its OWN words was
+folded to defer to this one clause instead of re-stating it - the "second, differently-
+worded geometry statement nearer the point of use" contradiction shape this codebase
+keeps re-finding (see the 12 Aug central finding above): `_bottle_geometry_source_clause`
+no longer enumerates categories (silhouette, height-to-width ratio, neck/shoulder/base,
+pump/collar hardware, label shape) - it names nothing itself and points at the fixed
+clause; `_edit_mode_instruction`'s illustrated substitute/ADD branches no longer list
+"proportions" among what a reference photo may be used to "confirm" (shape is fixed
+regardless of whether a photo is attached, so nothing derives it from one); the
+"work from silhouette, colour, and the label name alone" no-photo fallback dropped
+"silhouette" for the same reason.
+
+**Deconstruct-time filter** (`src/deconstruct.py`, `strip_bottle_shape_language`):
+scrubs bottle/container geometry vocabulary from exactly the THREE blueprint fields
+traced to actually reach assembled prompt text as free text - `product_category.
+signals[]` and `visual.subject` (both quoted verbatim by `_competitor_props_clause`
+when they also match a `PROP_KEYWORD`) and `layout_detail.zone_positions[]` (folded into
+`_scene_composition_facts`' placement sentence, and now also the drift-check zone
+above). A matching list entry is dropped WHOLE (never partially word-scrubbed, which
+risks a grammatically broken fragment); `visual.subject` is blanked to `""` rather than
+the key removed (still schema-valid - a required string, not a required non-empty
+one). Wired into `deconstruct_from_response`, applied AFTER schema validation
+(narrowing a list or blanking a string never invalidates an already-valid blueprint),
+logged by field name whenever anything is actually dropped. `scene_elements` is
+deliberately NOT filtered - its own classifier instruction already excludes the product
+entirely ("every element OTHER THAN the product"), and blanket-filtering it would strip
+legitimate prop detail (a "round tray", a "curved mirror") with no traced benefit.
+
+**Product cutout**: `generate_image()` now fetches `product_assets/
+besque_magic_body_oil_cutout.png` from the asset bucket and attaches it as an EXTRA
+reference Part on every non-illustrated, `include_product=True` generate call -
+alongside the product's own configured reference photos, gated the same way
+(`include_product`) plus a style check mirroring `build_image_prompt`'s own
+operator-realism-else-observed-style precedence. Illustrated is excluded for the same
+reason every other photographic reference is withheld there. Result is cached
+process-wide (fetched once, success or failure, per process) so a slow GCS/ADC issue
+costs one hit, never one per generation call - measured live at ~4-5s per attempt
+uncached, which would otherwise have doubled `test_edit_mode.py`'s own runtime.
+**Uploaded to `gs://besque-ad-intel-assets/product_assets/besque_magic_body_oil_
+cutout.png`** the same night, after ADC was refreshed (it was expired earlier in the
+session - `RefreshError`, same class of failure this file's own "Operational
+gotchas" section already names) - confirmed via `gsutil ls -l` (529384 bytes, matching
+the local file exactly) and a direct `_fetch_product_cutout_bytes()` call returning
+real PNG bytes, never `None`.
+
+Tests: `tests/test_bottle_geometry.py` (new) - the clause is byte-identical across
+every realism value/scene type/product count and absent when `include_product=False`;
+no deleted competing phrase survives in any of the three branches; the realism-edit
+deltas contain neither the clause nor its distinctive numeric facts; a blueprint
+carrying shape language in the three filtered fields is proven clean end-to-end
+(`deconstruct.strip_bottle_shape_language` → `build_image_prompt`) while arrangement-
+only content survives untouched; the strip function is a no-op on already-clean input
+and never mutates the caller's original blueprint dict.
+
+### Standing rule added this session
+**Default test command is `python -m pytest tests/ -q`, scoped to the files a change
+actually touched - never the full suite unless explicitly asked.** A full `tests/` run
+takes ~18 minutes and reports 239 failures, every one of them `psycopg2.
+OperationalError` on port 5433 (connection refused), never a real regression - this
+machine's local Postgres 17 service runs on 5432 and is a dev DB, not the isolated test
+DB `tests/conftest.py` forces every test onto. Never background a test run - if a
+scoped run legitimately needs the full suite, run it in the foreground and wait.
