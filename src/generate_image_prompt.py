@@ -45,6 +45,32 @@ def resolve_product_count(reference_count, operator_count, default_count=1):
     return default_count, "default"
 
 
+def resolve_authorised_product_count(objects):
+    """The number of Besque bottles this scene authorises, computed in CODE from the
+    objects inventory - never left for a prose instruction to arbitrate (2026-08-18,
+    the OSEA two-bottle failure: rule 7's unconditional "exactly one" and two
+    independently-substituting SCENE OBJECTS product bullets disagreed in the same
+    prompt, and the model resolved the contradiction by substituting neither).
+
+    Defers entirely to deconstruct.resolve_product_group_dispositions for the actual
+    grouping/winner decision (same product differing only in size/format = every
+    instance substitutes; genuinely different products = exactly one substitutes,
+    the rest drop) - this function is just "how many of those survived as
+    substitute." Every clause that mentions bottle count - rule 7
+    (_rule7_product_policy), _edit_mode_instruction, product_clause's >1 branch -
+    must read THIS SAME value, so they can never disagree with each other again.
+
+    Returns None when there are no competitor-branded/brand-marked product objects
+    to reason about at all (a legacy blueprint predating the objects model, or a
+    genuinely productless reference) - callers fall back to the pre-existing
+    resolve_product_count(reference_count=layout_detail.product_count, ...) path in
+    that case, so nothing regresses for a blueprint this mechanism doesn't cover."""
+    dispositions = deconstruct.resolve_product_group_dispositions(objects)
+    if not dispositions:
+        return None
+    return sum(1 for v in dispositions.values() if v == "substitute")
+
+
 def reference_has_product(blueprint):
     """True when the reference blueprint shows a product in frame at all -
     layout_detail.product_count != 0 and product_category.category != "not_product",
@@ -271,9 +297,39 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
     # it there's no reference zone to substitute into or add alongside at all - generate
     # mode always "adds" from scratch, see build_image_prompt's own docstring).
     ref_has_text_zone = reference_has_text_zone(blueprint) if edit_mode else True
-    reference_product_count = layout_detail_bp.get("product_count")
+    # 2026-08-18 (three-voices product-count fix): the code-computed, per-object-aware
+    # count (resolve_authorised_product_count, deferring to deconstruct.resolve_
+    # product_group_dispositions) REPLACES the bare layout_detail.product_count number
+    # as the "reference" tier whenever there are competitor-branded/brand-marked
+    # product objects to reason about - resolve_product_count's own operator>reference>
+    # default precedence is otherwise unchanged, so an explicit per-run product_count
+    # override still wins outright. Falls back to the bare number (old behaviour,
+    # unchanged) only for a blueprint resolve_authorised_product_count can't reason
+    # about at all - a legacy row predating the objects model, or a genuinely
+    # productless reference.
+    authorised_from_objects = resolve_authorised_product_count(blueprint.get("objects"))
+    reference_product_count = (
+        authorised_from_objects if authorised_from_objects is not None
+        else layout_detail_bp.get("product_count")
+    )
     resolved_product_count, product_count_source = resolve_product_count(
         reference_product_count, product_count
+    )
+    if product_count_source == "reference" and authorised_from_objects is not None:
+        product_count_source = "objects"
+    # rule_authorised_product_count (2026-08-18): what rule 7 (_rule7_product_policy,
+    # via brand_rules) and _edit_mode_instruction are told is authorised - ONLY the
+    # "objects" source (deconstruct.resolve_product_group_dispositions actually
+    # confirmed a same_product_as chain) ever gets to state >1 here; every other
+    # source (operator override, the bare layout_detail number, or the default) has
+    # no evidence about same-vs-different products, so both of those clauses see 1,
+    # exactly the pre-existing 2026-08-12 "collapse to one" behaviour for anything
+    # this fix doesn't cover. Kept as a SEPARATE variable from resolved_product_count
+    # (which product_clause's own >1 branch still reads directly, gating on
+    # product_count_source itself) so there is one unambiguous value each clause
+    # reads for "how many bottles may I claim are authorised."
+    rule_authorised_product_count = (
+        resolved_product_count if product_count_source == "objects" else 1
     )
 
     if effective_include_product:
@@ -325,27 +381,66 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
         # product_clause was built purely from effective_include_product (intent), with
         # no awareness that a product had already been placed by substitution.
         already_placed_by_substitution = edit_mode and reference_has_product
-        if resolved_product_count and resolved_product_count > 1:
-            # REVERSED 2026-08-12 (live failure, ad with product_count=5): rule 7 above
-            # already states "exactly one bottle... NEVER add a second bottle... whether
-            # copied from the competitor ad or invented" - unconditionally, every branch.
-            # The clause below used to instruct "place {N} of the Besque product", which
-            # directly contradicted rule 7 in the SAME prompt - two authorities, same
-            # subject, opposite answers. The critic caught it as a HIGH violation and the
-            # actual output rendered 8 bottles. This is not a wording tweak, it is a
-            # structural fix: this branch can no longer construct a sentence asking for
-            # more than one Besque product - there is no code path left that does. What
-            # DOES still vary by count is the COMPOSITION instruction: the reference's
-            # multi-product layout (spacing, framing, negative space sized for several
-            # items) needs to be adapted around a single bottle, not reproduced with empty
-            # slots or a shrunken bottle standing in for a missing set. Kept as its own
-            # branch (rather than collapsing into the ==1 case below) only because that
-            # composition-adaptation instruction has nothing to say when the reference
-            # never had multiple products to adapt away from.
+        # GROUNDED (2026-08-18, three-voices product-count fix): resolved_product_count
+        # is only trustworthy as "N genuine instances of one product" when it came from
+        # resolve_authorised_product_count - i.e. deconstruct.resolve_product_group_
+        # dispositions actually inspected the objects inventory and confirmed a
+        # same_product_as chain. A count sourced from the bare layout_detail.
+        # product_count number (source="reference", no objects model available) or an
+        # operator override (source="operator") or the default carries NO evidence
+        # about same-vs-different products - collapsing to one remains the only safe
+        # default for those, exactly the pre-existing 2026-08-12 behaviour, UNCHANGED
+        # here (see test_build_image_prompt_product_count_above_one_still_yields_
+        # single_product_instruction, which locks this in for a legacy/no-objects
+        # blueprint). Only the "objects" source gets the new >1 treatment.
+        product_count_is_grounded = product_count_source == "objects"
+        if resolved_product_count and resolved_product_count > 1 and product_count_is_grounded:
+            # This branch states the count as a FACT, agreeing with rule 7
+            # (_rule7_product_policy, same resolved_product_count) and _edit_mode_
+            # instruction (same value, passed as authorised_product_count) rather than
+            # contradicting them - the exact three-way disagreement this fix closes.
+            # Deliberately NEVER suppressed by already_placed_by_substitution: unlike the
+            # ==1 branch's placement sentence below (which duplicates edit mode's own
+            # substitution and caused a real second-bottle bug), this sentence states a
+            # COUNT only, never a placement instruction of its own - safe to always
+            # include, and the task that introduced it explicitly requires it survive in
+            # edit mode.
             log.info(
-                "product_count resolved to %s (source=%s) - reference shows multiple "
-                "products, but exactly ONE Besque product renders per rule 7; composition "
-                "adapts around the single bottle instead of reproducing the count",
+                "product_count resolved to %s (source=%s) - %d Besque bottle(s) "
+                "authorised; exact position of each is governed by the SCENE OBJECTS "
+                "inventory",
+                resolved_product_count, product_count_source, resolved_product_count,
+            )
+            placement = (
+                f"This scene authorises exactly {resolved_product_count} Besque bottles - "
+                f"computed from the reference's own product objects (multiple instances of "
+                f"the SAME product differing only in size or format), matching the "
+                f"reference's own count. Render exactly that many, each the same real "
+                f"Besque product at its own size/scale - never a different SKU per "
+                f"instance, never fewer than this count, never more. WHICH reference "
+                f"position each one occupies is governed entirely by the SCENE OBJECTS "
+                f"inventory below; this sentence states the count only, never a placement "
+                f"instruction of its own. "
+            )
+            product_clause = placement + product_desc
+        elif resolved_product_count and resolved_product_count > 1:
+            # UNCHANGED since 2026-08-12 (live failure, ad with product_count=5): rule 7
+            # above states "exactly one bottle... NEVER add a second bottle... whether
+            # copied from the competitor ad or invented" unconditionally whenever this
+            # count isn't grounded in objects-model evidence (see product_count_is_
+            # grounded above) - so this branch must not construct a sentence asking for
+            # more than one Besque product either; there is no way to tell same-vs-
+            # different product without the objects model, so collapsing remains the
+            # only safe default. What DOES still vary by count is the COMPOSITION
+            # instruction: the reference's multi-product layout (spacing, framing,
+            # negative space sized for several items) needs to be adapted around a
+            # single bottle, not reproduced with empty slots or a shrunken bottle
+            # standing in for a missing set.
+            log.info(
+                "product_count resolved to %s (source=%s, ungrounded) - reference shows "
+                "multiple products, but exactly ONE Besque product renders per rule 7; "
+                "composition adapts around the single bottle instead of reproducing the "
+                "count",
                 resolved_product_count, product_count_source,
             )
             placement = (
@@ -423,7 +518,8 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
         # sets it on the generation config in generate_image, not in prompt text.
         prompt = (
             brand_rules(include_product=effective_include_product, text_in_image=text_in_image,
-                        headline=headline, subtext=subtext, edit_mode=True) +
+                        headline=headline, subtext=subtext, edit_mode=True,
+                        authorised_product_count=rule_authorised_product_count) +
             # _bottle_geometry_source_clause is edit-mode-only (2026-08-15) - this is the
             # ONE branch where a competitor reference image AND Besque's own product
             # reference photos are both attached at once, so it's the only place a
@@ -463,7 +559,8 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
                                    certifications=(product or {}).get("certifications"),
                                    objects=blueprint.get("objects"),
                                    face_present=blueprint.get("face_present"),
-                                   clone_mode=clone_mode) +
+                                   clone_mode=clone_mode,
+                                   authorised_product_count=rule_authorised_product_count) +
             # product_clause already omits its own PLACEMENT sentence when
             # already_placed_by_substitution (edit_mode and reference_has_product) is
             # true - see where product_clause is built above - so it is always safe to
@@ -481,7 +578,8 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
         # of what the writer wrote. The writer never controls the guardrails.
         prompt = (
             brand_rules(include_product=include_product, text_in_image=text_in_image,
-                        headline=headline, subtext=subtext) +
+                        headline=headline, subtext=subtext,
+                        authorised_product_count=rule_authorised_product_count) +
             # suppress_bottle_identity (2026-08-17): drops identity/geometry when Route
             # B compositing will paste the real cutout in after generation - integration
             # stays, scene composition around the product still applies either way.
@@ -501,7 +599,8 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
     else:
         prompt = (
             brand_rules(include_product=include_product, text_in_image=text_in_image,
-                        headline=headline, subtext=subtext) +
+                        headline=headline, subtext=subtext,
+                        authorised_product_count=rule_authorised_product_count) +
             # suppress_bottle_identity (2026-08-17): drops identity/geometry when Route
             # B compositing will paste the real cutout in after generation - integration
             # stays, scene composition around the product still applies either way.
@@ -616,11 +715,38 @@ def _rule6_text_policy(text_in_image=False, headline=None, subtext=None):
     )
 
 
-def _rule7_product_policy(include_product=True):
-    """Rule 7, PRODUCT POLICY. Default (include_product=True) is the original wording,
-    verbatim. include_product=False relaxes it entirely into a productless mode for
-    educational/illustrative ads (e.g. glp1) - no Besque bottle, label, or branding at
-    all, rather than the default's "exactly one bottle" framing."""
+def _rule7_product_policy(include_product=True, authorised_product_count=1):
+    """Rule 7, PRODUCT POLICY. Default (include_product=True, authorised_product_count=1)
+    is the original wording, verbatim. include_product=False relaxes it entirely into a
+    productless mode for educational/illustrative ads (e.g. glp1) - no Besque bottle,
+    label, or branding at all, rather than the default's "exactly one bottle" framing.
+
+    authorised_product_count (2026-08-18, three-voices product-count fix): the SAME
+    value resolve_authorised_product_count computed from the objects inventory -
+    passed in by build_image_prompt via brand_rules(), never recomputed here. This
+    rule used to state "exactly one bottle... NEVER add a second" unconditionally,
+    which directly contradicted a blueprint with two competitor product objects both
+    genuinely marked substitute (the OSEA "You'll Wish You Went Jumbo" reference -
+    two instances of the SAME product differing only in size). Rule 7 now states
+    WHATEVER count was actually authorised - still exactly one bottle for the
+    overwhelmingly common single-product case (byte-identical to the prior wording
+    when authorised_product_count<=1, see test_rule7_default_count_matches_prior_
+    wording_verbatim), but a genuine >1 for the same-product-multiple-instances case,
+    agreeing with product_clause's >1 branch and _edit_mode_instruction's own stated
+    count instead of forbidding what SCENE OBJECTS is simultaneously demanding."""
+    if include_product and authorised_product_count and authorised_product_count > 1:
+        return (
+            f"7) PRODUCT POLICY (STRICT): exactly {authorised_product_count} Besque bottles "
+            f"are authorised in this scene - computed from the reference's own objects "
+            f"inventory (multiple instances of the SAME product differing only in size or "
+            f"format), never from prose, and never overridden by anything else in this "
+            f"prompt. Render exactly that many, each the SAME real Besque product at its "
+            f"own size/scale matching the reference's own layout - never a different SKU "
+            f"invented per instance, never fewer than this count, never more. A "
+            f"competitor's own product must not survive anywhere in the image. See the "
+            f"SCENE OBJECTS inventory below for exactly which position each authorised "
+            f"bottle occupies. "
+        )
     if include_product:
         return (
             "7) PRODUCT POLICY (STRICT): the single product in the reference product photo is "
@@ -722,13 +848,20 @@ _RULE_11_SKIN_TEXTURE_REALISM = (
 )
 
 
-def brand_rules(include_product=True, text_in_image=False, headline=None, subtext=None, edit_mode=False):
+def brand_rules(include_product=True, text_in_image=False, headline=None, subtext=None,
+                 edit_mode=False, authorised_product_count=1):
     """The mechanically-enforced brand + compliance rules prepended to every image prompt.
-    Called with all defaults (include_product=True, text_in_image=False, edit_mode=False),
-    this reproduces the old flat BRAND_RULES constant character for character through rule
-    7 - see test_brand_rules_default_reproduces_prior_rules_verbatim. Rule 8, rule 9, rule
-    10, and the include_product/text_in_image/edit_mode conditionality are additive, not a
+    Called with all defaults (include_product=True, text_in_image=False, edit_mode=False,
+    authorised_product_count=1), this reproduces the old flat BRAND_RULES constant
+    character for character through rule 7 - see
+    test_brand_rules_default_reproduces_prior_rules_verbatim. Rule 8, rule 9, rule 10,
+    and the include_product/text_in_image/edit_mode conditionality are additive, not a
     rewrite of the existing default path.
+
+    authorised_product_count (2026-08-18, three-voices product-count fix): forwarded
+    straight to _rule7_product_policy - see that function's own docstring. build_image_
+    prompt passes the SAME resolve_authorised_product_count value here as it passes to
+    _edit_mode_instruction and uses in product_clause, so all three can never disagree.
 
     Rule 10 (SUBJECT AGE, 2026-08-11) and rule 11 (SKIN TEXTURE REALISM, 2026-08-12) are
     both unconditional - unlike rule 9, which is edit-mode-only, these must fire on every
@@ -740,7 +873,7 @@ def brand_rules(include_product=True, text_in_image=False, headline=None, subtex
     return (
         _RULES_1_TO_5
         + _rule6_text_policy(text_in_image, headline, subtext)
-        + _rule7_product_policy(include_product)
+        + _rule7_product_policy(include_product, authorised_product_count)
         + _RULE_8_LAYOUT_IS_COMPOSITION
         + (_RULE_9_SOURCE_IMAGE_IS_THE_COMPETITORS_AD if edit_mode else "")
         + _RULE_10_SUBJECT_AGE
@@ -804,7 +937,7 @@ _OBJECT_CLOSURE_SENTENCE = (
 )
 
 
-def _substitute_object_line(obj, kind, text_purpose, description, context):
+def _substitute_object_line(obj, kind, text_purpose, description, context, product_instance_count=1):
     """The SUBSTITUTE line for one object whose (re-)resolved disposition is
     "substitute" - dispatches on text_purpose (2026-08-17 restoration of the deleted
     _structural_zones_clause's per-zone-type rules) for a kind=="text" object with a
@@ -826,11 +959,42 @@ def _substitute_object_line(obj, kind, text_purpose, description, context):
     substitution with nothing to put there - never an empty or invented value.
     object_copy_by_id (this object's own generated line, keyed by object_id, built by
     build_image_prompt from generate_copy_live's `object_copy` field) is looked up by
-    THIS object's own object_id, never a shared value - see the fallback branch below."""
+    THIS object's own object_id, never a shared value - see the fallback branch below.
+
+    product_instance_count (2026-08-18, three-voices product-count fix): how many
+    kind=="product" objects TOTAL resolved to "substitute" this call (see
+    _objects_clause's own product_group_dispositions) - passed so this function can
+    tell whether THIS object is the sole authorised bottle or one of several genuine
+    instances of the same product. Fixes a real bug: two competitor product objects
+    both marked substitute previously produced BYTE-IDENTICAL SUBSTITUTE lines with
+    no bbox, no description, and no awareness of each other (the OSEA "standard vs
+    jumbo" reference) - the model had no way to tell these apart and substituted
+    neither. Every product line now names ITS OWN bbox/description, so two different
+    positions in the objects inventory are never worded identically again."""
     if kind == "product":
+        bbox = obj.get("bbox")
+        position_fact = (
+            f"at bbox {list(bbox)} (this object's own recorded position and scale)"
+            if isinstance(bbox, (list, tuple)) and len(bbox) == 4
+            else "at this object's own recorded position and scale"
+        )
+        if product_instance_count and product_instance_count > 1:
+            return (
+                f"SUBSTITUTE: this position held one instance of a competitor product "
+                f"the reference shows {product_instance_count} times, differing only in "
+                f"size or format (\"{description}\") - place a Besque bottle here "
+                f"instead, {position_fact}. Every other instance of this same product "
+                f"in this SCENE OBJECTS list substitutes too, each at its own recorded "
+                f"position - together they reproduce the reference's own "
+                f"{product_instance_count}-instance layout; this is not inventing an "
+                f"extra bottle, it is matching what the reference itself shows. Its "
+                f"identity (shape, proportions, colours, label) comes ONLY from the "
+                f"BOTTLE IDENTITY and BOTTLE GEOMETRY clauses above, never from this "
+                f"object's own colours or description."
+            )
         return (
-            "SUBSTITUTE: this position held a competitor product - place the "
-            "Besque product here instead, at the same position and scale. Its "
+            f"SUBSTITUTE: this position held a competitor product (\"{description}\") - "
+            f"place the Besque product here instead, {position_fact}. Its "
             "identity (shape, proportions, colours, label) comes ONLY from the "
             "BOTTLE IDENTITY and BOTTLE GEOMETRY clauses above, never from this "
             "object's own colours or description."
@@ -984,32 +1148,62 @@ def _objects_clause(objects=None, context=None, ad_id=None):
         )
         return ""
     context = context or {}
+    # product_group_dispositions (2026-08-18, three-voices product-count fix): resolved
+    # FRESH here, every call, never trusted from the stored per-object `disposition`
+    # field - see deconstruct.resolve_product_group_dispositions's own docstring for why
+    # (same-product-multiple-instances vs genuinely-different-products needs the WHOLE
+    # objects list at once, which a per-object stored value can never encode). Overrides
+    # first_pass's answer for exactly the kind=="product" objects it covers; every other
+    # object (including a product not competitor-branded/brand-marked, the rare case
+    # this doesn't cover) keeps its existing resolution path, unchanged.
+    product_group_dispositions = deconstruct.resolve_product_group_dispositions(objects)
+    product_instance_count = sum(1 for v in product_group_dispositions.values() if v == "substitute")
+    # testimonial_dispositions (2026-08-19, duplicate-testimonial guard restoration):
+    # same reasoning as product_group_dispositions immediately above - resolved FRESH
+    # here, every call, coordinating across the WHOLE objects list so at most one
+    # testimonial-purposed object ever resolves to "substitute" - see deconstruct.
+    # resolve_testimonial_dispositions's own docstring for the live bug this fixes
+    # (the identical review rendering in two boxes).
+    testimonial_dispositions = deconstruct.resolve_testimonial_dispositions(objects, context)
     first_pass = {}
     for obj in objects:
         obj = obj or {}
         kind = obj.get("kind")
+        object_id = obj.get("object_id")
         text_purpose = obj.get("text_purpose") if kind == "text" else None
-        first_pass[obj.get("object_id")] = (
-            deconstruct.resolve_disposition(obj, context) if text_purpose
-            else obj.get("disposition")
-        )
+        if kind == "product" and object_id in product_group_dispositions:
+            first_pass[object_id] = product_group_dispositions[object_id]
+        elif text_purpose == "testimonial" and object_id in testimonial_dispositions:
+            first_pass[object_id] = testimonial_dispositions[object_id]
+        elif text_purpose:
+            first_pass[object_id] = deconstruct.resolve_disposition(obj, context)
+        else:
+            first_pass[object_id] = obj.get("disposition")
     lines = []
     for obj in objects:
         obj = obj or {}
         kind = obj.get("kind")
         text_purpose = obj.get("text_purpose") if kind == "text" else None
         served_id = obj.get("serves_object_id")
-        if served_id:
+        object_id = obj.get("object_id")
+        if kind == "product" and object_id in product_group_dispositions:
+            disposition = product_group_dispositions[object_id]
+        elif text_purpose == "testimonial" and object_id in testimonial_dispositions:
+            disposition = testimonial_dispositions[object_id]
+        elif served_id:
             disposition = deconstruct.resolve_disposition(
                 obj, context, served_object_disposition=first_pass.get(served_id))
         else:
-            disposition = first_pass.get(obj.get("object_id"))
+            disposition = first_pass.get(object_id)
         description = (obj.get("description") or obj.get("object_id") or "object").strip()
         role = obj.get("role") or ""
         if disposition == "keep":
             lines.append(f"KEEP: {description} ({role}) - reproduce exactly as shown, unchanged.")
         elif disposition == "substitute":
-            lines.append(_substitute_object_line(obj, kind, text_purpose, description, context))
+            lines.append(_substitute_object_line(
+                obj, kind, text_purpose, description, context,
+                product_instance_count=product_instance_count if kind == "product" else 1,
+            ))
         elif disposition == "drop":
             lines.append(
                 f"ABSENT: the {description} that appeared here is REMOVED - it must not "
@@ -1994,7 +2188,7 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
                             cta_text=None, product_name=None,
                             panel_copy=None, testimonial=None, certifications=None,
                             objects=None, face_present=None,
-                            clone_mode=False):
+                            clone_mode=False, authorised_product_count=1):
     """EDIT MODE (2026-08-01): Gemini receives the competitor's own ad as an input image
     Part, not just a text description of it - the reference image IS the creative brief,
     so no template scene/layout/palette description is assembled here (see
@@ -2230,11 +2424,13 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             f"the label name alone - \"{name}\". Secondary label content "
             f"(sub-lines, certification icons, fine print) does not need to be legible at "
             f"this scale in this style; name and colour accuracy matter, secondary-text "
-            f"legibility does not. If the reference shows more than one distinct "
-            f"product, account for each explicitly rather than silently dropping any "
-            f"of them - substitute a Besque item where a genuine substitution makes "
-            f"sense, or deliberately remove one with no Besque equivalent and adjust "
-            f"the surrounding composition so the scene makes sense without it. "
+            f"legibility does not. Exactly {authorised_product_count} Besque item(s) "
+            f"belong in this scene - computed from the reference's own product "
+            f"objects, never left for you to judge from the pixels. WHICH reference "
+            f"position each one occupies (and which competitor product, if any, is "
+            f"removed instead) is governed entirely by the SCENE OBJECTS inventory "
+            f"above; follow it exactly, never inventing a different count or a "
+            f"different assignment. "
             + _substance_recolour_clause(substance_colour) +
             f"Everything else in the scene - {_non_carryover_exceptions_clause()} - carries over "
             "from the source image exactly as the reproduce-faithfully instruction above states (never a stricter 'exactly' reintroduced here, including its small natural variation allowance). "
@@ -2263,12 +2459,13 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             "sized for ITS shape, that PROP is what adapts: resize or reshape it to "
             "properly fit the Besque bottle's real proportions, never the reverse "
             "(never stretch, squeeze, or shrink the bottle to fit a prop sized for a "
-            "differently-shaped product). If the reference shows more than one "
-            "distinct product, account for each explicitly rather than silently "
-            "dropping any of them - substitute a Besque item where a genuine "
-            "substitution makes sense, or deliberately remove one with no Besque "
-            "equivalent and adjust the surrounding composition (props, spacing, "
-            "balance) so the scene makes sense without it. " + lighting_instruction
+            "differently-shaped product). Exactly "
+            f"{authorised_product_count} Besque bottle(s) belong in this scene - "
+            "computed from the reference's own product objects, never left for you "
+            "to judge from the pixels. WHICH reference position each one occupies "
+            "(and which competitor product, if any, is removed instead) is governed "
+            "entirely by the SCENE OBJECTS inventory above; follow it exactly, never "
+            "inventing a different count or a different assignment. " + lighting_instruction
             + _substance_recolour_clause(substance_colour) +
             f"Everything else in the scene - {_non_carryover_exceptions_clause()} - carries over "
             "from the source image exactly as the reproduce-faithfully instruction above states (never a stricter 'exactly' reintroduced here, including its small natural variation allowance). "

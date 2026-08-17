@@ -87,6 +87,15 @@
           "serves_object_id": {
             "type": ["string", "null"],
             "description": "2026-08-17 (Problem 1 restoration): the object_id of the object THIS object exists to support - e.g. a hand holding the competitor's product records the product's object_id here. Meaningful for kind 'text' or 'prop' only (a caption pointing at a product, a hand/prop holding or staging one); null when this object stands on its own, which is the common case. Additive and optional - never required, so a pre-existing blueprint with no relational data on any object remains valid unchanged."
+          },
+          "same_product_as": {
+            "type": ["string", "null"],
+            "description": "2026-08-18 (three-voices product-count fix): the object_id of an EARLIER product object in this SAME list that this object is the SAME product as, differing only in size or format (e.g. a standard-size and a jumbo-size bottle of one product line). Meaningful for kind 'product' only. null (or omit) when this product is visually distinct from every other product object in the scene, which is the common single-product case, OR when this IS the earliest instance of a repeated product (it never names itself). Two-or-more product objects sharing a same_product_as chain are treated as multiple INSTANCES of the one authorised Besque bottle (all substitute, matching the reference's own count/layout); product objects that name no same_product_as and are not named BY one are each a DISTINCT product, of which only one substitutes and the rest drop - see deconstruct.resolve_product_group_dispositions. Additive and optional - a pre-existing blueprint with no relational data on any object remains valid unchanged and is treated as every product object being distinct, the same behaviour as before this field existed."
+          },
+          "social_proof_kind": {
+            "type": ["string", "null"],
+            "enum": ["single_quote", "aggregate", null],
+            "description": "2026-08-19 (duplicate-testimonial guard + aggregate-vs-quote restoration): restores structural_zones[].social_proof_kind's aggregate_bar vs single_quote distinction, deleted by 6b82f60 with no replacement. Meaningful only when text_purpose is 'testimonial'. 'single_quote' = one customer's own words; 'aggregate' = a review-count/star-average summary with no single customer's words (e.g. 'Rated 4.8 by 12,000 customers') - Besque has no approved aggregate figure, so an aggregate-shaped object is ALWAYS dropped, never substituted, regardless of context - see deconstruct.resolve_testimonial_dispositions. null/omitted (a pre-existing blueprint predating this field, or a testimonial object the model didn't classify) is treated as 'single_quote' - the common case, and the same behaviour every testimonial-purposed object had before this field existed. Additive and optional, never required - a pre-existing blueprint remains valid unchanged."
           }
         },
         "if": { "properties": { "kind": { "const": "text" } } },

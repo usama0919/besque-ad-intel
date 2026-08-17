@@ -105,7 +105,8 @@
       "description": "OSEA Undaria Algae Body Oil jumbo-size pump bottle, larger of the two, positioned on the right and slightly forward",
       "disposition": "substitute",
       "carries_brand_mark": true,
-      "persuasive_function": "The hero product being sold; its larger size visually justifies the offer"
+      "persuasive_function": "The hero product being sold; its larger size visually justifies the offer",
+      "same_product_as": "obj_03"
     },
     {
       "bbox": [

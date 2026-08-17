@@ -7,7 +7,7 @@ import re
 import time
 from pathlib import Path
 
-from src import json_response, validator
+from src import compliance, json_response, validator
 
 # Model + key are read from env so the real key plugs in at kickoff.
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
@@ -59,13 +59,15 @@ The JSON must have exactly these fields:
         cta = a call-to-action button label or link text.
         offer = a discount, promo code, scarcity/stock-count claim, or urgency wording (e.g. "20% OFF", "Only 100 left").
         certification = a badge or line naming a certification/standard the product holds (e.g. "Vegan", "Cruelty Free", "Dermatologist Tested").
-        testimonial = a customer quote or review, with or without a star rating or name.
+        testimonial = a customer quote or review, with or without a star rating or name. Distinguish which KIND via the `social_proof_kind` field below - a single customer's own words is a different thing from an aggregate review-count/star-average bar, and they need different treatment downstream.
         price_anchor = a shown price, or a was/now price comparison.
         award = an award, "as seen in" press mention, editorial accolade, or third-party endorsement line (e.g. "by THE BODY FIRM").
         disclaimer = legal, regulatory, or medical fine print, or an asterisked footnote.
         product_callout = a short benefit or property label pointing at the product, distinct from the headline (e.g. an icon + "Fast-Absorbing").
         other = any other discrete text block that genuinely fits none of the above - use sparingly, only when no other value honestly applies.
       "serves_object_id": OPTIONAL, applies only when `kind` is "text" or "prop" - the object_id of a DIFFERENT object THIS one exists only to support, e.g. a hand whose entire visible role is holding a specific product bottle records that product's object_id here; a caption or arrow pointing specifically at one product records that product's object_id. null (or omit) for every object that stands on its own, which is the common case - most props and text blocks serve no other single object and must NOT be forced to name one. Never point at yourself, and only ever name an object_id you have already assigned earlier in this SAME list - assign object_ids in an order that makes this possible (the product/person before anything that serves it).
+      "same_product_as": OPTIONAL, applies only when `kind` is "product" - when this ad shows MORE THAN ONE product object, decide whether they are the SAME product differing only in size or format (e.g. a standard-size and a jumbo-size bottle of the identical product line) or GENUINELY DIFFERENT products. If this product is the SAME product as an EARLIER product object_id in this list, record that earlier object's id here. null (or omit) when this product is visually distinct from every other product object in the scene (the common single-product case), or when this IS the first/earliest instance of a repeated product - never name yourself, and only ever name an object_id you have already assigned earlier in this SAME list. Get this right: instances sharing a same_product_as chain all get replaced with Besque's product; products left unlinked (each genuinely distinct) result in only ONE surviving in the output, with the others removed entirely - so mislabelling two different products as "the same" wrongly keeps a second one, and mislabelling two sizes of one product as "different" wrongly deletes one that should have survived.
+      "social_proof_kind": REQUIRED when text_purpose is "testimonial", omit entirely otherwise - one of "single_quote" (one customer's own words, with or without a name/rating attached) or "aggregate" (a review-count/star-average summary with no single customer's words, e.g. "Rated 4.8 by 12,000 customers", "Trustpilot - Over 30,000 - 5 stars"). An aggregate figure is NEVER Besque's to show (no approved aggregate exists) and is always removed downstream regardless of what you record here - this field exists so that removal is judged by what the zone actually IS, never guessed from its text_purpose alone.
     }}
 - semantic_split (object): REQUIRED - this key must ALWAYS be present. {{ "is_split": true/false, "split_axis": "vertical" or "horizontal" or null, "left_or_before": free text describing what that side/panel depicts, "right_or_after": free text describing what the other side/panel depicts }}. is_split is true whenever the image is visually divided into two comparable panels or halves - a before/after, a side-by-side comparison, a split-screen. When is_split is false, split_axis is null and both left_or_before and right_or_after are "". For a genuine before/after ad, the two sides MUST be described as materially DIFFERENT states (e.g. left_or_before: "dry, crepey skin with visible fine lines"; right_or_after: "smooth, hydrated skin with visible firmness") - recording both sides as showing the same condition is a failure, since the contrast between them is the entire point of the format.
 - production_style (object): REQUIRED - this key must ALWAYS be present. {{ "style": one of {production_style_options}, "confidence": high/medium/low, "signals": array of short phrases justifying the choice }}
@@ -267,6 +269,42 @@ _TEXT_PURPOSE_CONTEXT_GATED = {
     "certification": "certifications", "testimonial": "testimonial",
 }
 
+# Stat-claim restoration (2026-08-19, audit-confirmed gap: 6b82f60 deleted
+# STAT_CLAIM_PATTERNS/_is_stat_shaped_zone with no replacement - nothing in the
+# text_purpose enum covers a numeric/percentage/ratio/timescale efficacy badge, e.g.
+# a "+61% more supple skin" roundel. Recovered verbatim from git history
+# (6b82f60~1:src/generate_image_prompt.py) rather than reinvented, per the standing
+# instruction to restore from history not guess a new implementation. Reuses
+# compliance.py's own numeric-claim patterns, same as the original - matches the
+# SHAPE of a stat claim generally (any percentage, any "N out of M", any "Nx more/
+# faster/better", any "in N days/weeks/hours"), never a list of known values, same
+# principle _TEXT_PURPOSE_ALWAYS_DROP already uses for award names via keyword match.
+STAT_CLAIM_PATTERNS = (
+    compliance.NUMERIC_CLAIM_PATTERN, compliance.RATIO_CLAIM_PATTERN, compliance.TIMESCALE_CLAIM_PATTERN,
+)
+
+# Only these two purposes are checked - deliberately NOT headline/subtext/cta/offer/
+# certification/testimonial/price_anchor/award/disclaimer, matching the ORIGINAL
+# (pre-6b82f60) scope exactly: that code only ever ran _is_stat_shaped_zone against
+# product_callout zones. A stat-shaped headline/subtext still can't leak a fabricated
+# claim - its wording is governed entirely by rule 6/TIER 1 angle language elsewhere,
+# never copied from the reference - so forcing its SLOT to drop here would only
+# delete a headline position that should still exist for Besque's own (non-stat)
+# wording to occupy, a regression this restoration must not introduce.
+_STAT_SHAPE_CHECKED_PURPOSES = ("product_callout", "other", None)
+
+
+def _is_stat_shaped_text(obj):
+    """True when this text object's own description/persuasive_function reads as a
+    numeric/percentage/ratio/timescale efficacy claim - Besque did not run whatever
+    study produced THAT number, so a container shaped for someone else's statistic
+    has no Besque counterpart to substitute with; putting our product name or a
+    generated benefit line in it isn't a substitution, it's noise wearing the shape
+    of one. Checked against BOTH fields (not description alone) since the vision
+    model may record the actual figure in either, depending on phrasing."""
+    text = f"{obj.get('description') or ''} {obj.get('persuasive_function') or ''}"
+    return any(p.search(text) for p in STAT_CLAIM_PATTERNS)
+
 
 def _served_object_needs_drop(obj, served_object_disposition):
     """True when `obj` names a `serves_object_id` AND the object it serves has
@@ -296,9 +334,15 @@ def _resolve_text_disposition(obj, context, is_branded, served_object_dispositio
     disposition (2026-08-17, Problem 1) only ever reaches this final fallback - every
     other text_purpose is already deterministic on its own terms (a headline substitutes
     regardless of what it "serves"; an unrecognised/"other" purpose is the one case with
-    nothing else deciding its fate, e.g. a caption or arrow pointing at a product)."""
+    nothing else deciding its fate, e.g. a caption or arrow pointing at a product).
+
+    Stat-shaped check (2026-08-19 restoration) runs BEFORE _TEXT_PURPOSE_ALWAYS_SUBSTITUTE
+    deliberately - product_callout is unconditionally in that set, so a stat-shaped
+    callout must be intercepted here or it would never reach this check at all."""
     purpose = obj.get("text_purpose")
     if purpose in _TEXT_PURPOSE_ALWAYS_DROP:
+        return "drop"
+    if purpose in _STAT_SHAPE_CHECKED_PURPOSES and _is_stat_shaped_text(obj):
         return "drop"
     if purpose in _TEXT_PURPOSE_ALWAYS_SUBSTITUTE:
         return "substitute"
@@ -473,6 +517,179 @@ def _resolve_object_dispositions(blueprint):
         resolved_objects.append({**obj, "disposition": disposition})
     blueprint["objects"] = resolved_objects
     return blueprint
+
+
+def resolve_product_group_dispositions(objects):
+    """The three-voices product-count fix (2026-08-18, live failure: the OSEA "You'll
+    Wish You Went Jumbo" reference - two competitor-branded product objects, both
+    individually resolved to "substitute" by resolve_disposition, with nothing
+    coordinating them - rendered as two byte-identical SUBSTITUTE bullets in SCENE
+    OBJECTS while rule 7 elsewhere in the same prompt unconditionally forbade a second
+    bottle. The critic reported neither bottle was ever replaced.
+
+    resolve_disposition decides ONE object's fate in isolation and correctly resolves
+    every competitor-branded/brand-marked product object to "substitute" on its own
+    terms - that per-object answer was never wrong, it was just never coordinated
+    across MULTIPLE product objects in the same scene. This function is that
+    coordination, run fresh over the WHOLE objects list rather than stored on the
+    blueprint at deconstruct time (unlike resolve_disposition's own answer): the rule
+    it applies needs no run-specific context (no offer_text/certifications/
+    testimonial), but it does need every product object visible at once, which a
+    per-object pure function structurally cannot see.
+
+    THE RULE:
+    - Multiple product objects that are the SAME product differing only in size or
+      format (linked via same_product_as - see schema/blueprint.schema.json and
+      BLUEPRINT_PROMPT above) are multiple INSTANCES of the one authorised Besque
+      bottle - ALL of them substitute, matching the reference's own count and layout.
+      This is the OSEA case: standard-size and jumbo-size are the same product.
+    - Product objects that name no same_product_as and are not named BY one are each
+      a GENUINELY DIFFERENT product - when more than one such distinct product (or
+      distinct product-group) exists, exactly ONE substitutes (the hero-role one, or
+      the first-listed when none is marked hero) and every other one DROPS, so the
+      freed space closes into the composition rather than being left empty (see
+      _objects_clause's ABSENT wording) instead of a second competitor product
+      surviving untouched.
+
+    An object whose disposition has already been explicitly forced to "drop" (e.g. an
+    operator's object-removal edit - see generate_image_prompt.blueprint_with_object_
+    dropped) is excluded from consideration entirely, never re-admitted into a group
+    or counted - a manual removal is a stronger, later decision than this mechanism's
+    own grouping judgement.
+
+    Returns {object_id: "substitute"|"drop"} for every kind=="product" object that is
+    competitor_branded or carries_brand_mark and not already drop-forced - the same
+    "is_branded" predicate resolve_disposition already uses to decide a product
+    substitutes at all. A single such object (the common case) always returns
+    "substitute" and is never treated as ambiguous. Returns {} when there are none -
+    callers fall back to whatever resolve_disposition already produced per-object,
+    unaffected by this function existing."""
+    objects = [obj for obj in (objects or []) if isinstance(obj, dict)]
+    product_objects = [
+        obj for obj in objects
+        if obj.get("kind") == "product"
+        and obj.get("disposition") != "drop"
+        and (obj.get("ownership") == "competitor_branded" or bool(obj.get("carries_brand_mark")))
+    ]
+    if len(product_objects) <= 1:
+        return {obj["object_id"]: "substitute" for obj in product_objects if obj.get("object_id")}
+
+    by_id = {obj.get("object_id"): obj for obj in product_objects}
+
+    def root_of(object_id):
+        seen = set()
+        current = object_id
+        while True:
+            obj = by_id.get(current)
+            same_as = (obj or {}).get("same_product_as")
+            if not same_as or same_as not in by_id or same_as in seen:
+                return current
+            seen.add(current)
+            current = same_as
+
+    groups = {}
+    for obj in product_objects:
+        root = root_of(obj.get("object_id"))
+        groups.setdefault(root, []).append(obj)
+
+    if len(groups) <= 1:
+        return {obj["object_id"]: "substitute" for obj in product_objects if obj.get("object_id")}
+
+    # More than one distinct product - exactly one group wins outright, never a guess
+    # from colour/size/description text. Prefer a hero-role group; otherwise the
+    # first-listed group (object list order) - a deterministic, code-level tiebreak,
+    # not a model judgement call.
+    def group_sort_key(root):
+        members = groups[root]
+        has_hero = any(m.get("role") == "hero" for m in members)
+        first_index = min(product_objects.index(m) for m in members)
+        return (0 if has_hero else 1, first_index)
+
+    winning_root = min(groups, key=group_sort_key)
+    result = {}
+    for root, members in groups.items():
+        disposition = "substitute" if root == winning_root else "drop"
+        for member in members:
+            object_id = member.get("object_id")
+            if object_id:
+                result[object_id] = disposition
+    return result
+
+
+def resolve_testimonial_dispositions(objects, context=None):
+    """Duplicate-testimonial guard, restored 2026-08-19 (audit-confirmed gap, CONFIRMED
+    LIVE: a real draft rendered the identical review, "Nice and smooth... - Margaret
+    P.", in two separate boxes). The deleted test was test_structural_zones_clause_
+    testimonial_renders_exactly_once_across_two_zones - the old mechanism was a local
+    `testimonial_placed` boolean inside _structural_zones_clause (6b82f60~1:src/
+    generate_image_prompt.py), set True the first time a social_proof/single_quote
+    zone actually substituted; every zone reached afterward fell to the else branch
+    and was force-removed regardless of its own kind. _substitute_object_line's
+    testimonial branch has NO equivalent state today - two independent kind=="text",
+    text_purpose=="testimonial" objects each independently pass _resolve_text_
+    disposition's context-gate check and BOTH resolve "substitute", because that
+    check (like resolve_product_group_dispositions' predecessor bug) only ever looks
+    at ONE object at a time. This function is the same fix shape as resolve_product_
+    group_dispositions: coordinate across the WHOLE objects list, not per-object.
+
+    Same session also restores structural_zones[].social_proof_kind's aggregate_bar
+    vs single_quote distinction (Task 3) as objects[].social_proof_kind ("aggregate"
+    vs "single_quote", default/absent treated as single_quote for back-compat with
+    every blueprint predating this field) - an aggregate-shaped object (a review-
+    count/star-average bar, e.g. "Rated 4.8 by 12,000 customers") is NEVER eligible
+    to win the one substitute slot, exactly matching the old code's own social_proof_
+    kind branch: only "single_quote" could ever substitute, anything else (including
+    "unspecified kind") always removed. Besque has no approved aggregate figure to
+    substitute an aggregate bar WITH (see CLAUDE.md: "A published review-count/
+    average is HELD pending Harry") - this is a compliance backstop, not just a
+    dedup convenience.
+
+    context carries the same {"testimonial": {...}} shape resolve_disposition's own
+    context-gated purposes already use - context=None/no real testimonial supplied
+    means EVERY testimonial-purposed object drops (nothing to substitute with),
+    identical to the pre-existing single-object behaviour for this case.
+
+    Deliberately does NOT filter on the object's own stored `disposition` the way
+    resolve_product_group_dispositions filters out an already-drop-forced product:
+    for a context-gated purpose, the STORED value is "drop" by default for every
+    testimonial object regardless of any operator action (deconstruct time always
+    runs with context=None, per resolve_disposition's own dual-resolution design) -
+    it carries no information distinguishing "deconstruct's context-free default"
+    from "an operator's manual object-removal edit." resolve_disposition's own
+    context-gated branch already had this exact same limitation for the single-
+    testimonial case before this function existed (it recomputes from context alone,
+    never consulting the stored field either) - this function preserves that,
+    unchanged, while fixing the actual bug in scope: coordination ACROSS objects.
+
+    Returns {object_id: "substitute"|"drop"} for every kind=="text", text_purpose==
+    "testimonial" object. At most ONE entry is ever "substitute" - the first-listed
+    object that is not aggregate-shaped, when a real testimonial was actually
+    supplied this run. Returns {} when there are no testimonial-purposed objects at
+    all - callers fall back to whatever resolve_disposition already produces
+    per-object, unaffected by this function existing."""
+    objects = [obj for obj in (objects or []) if isinstance(obj, dict)]
+    context = context or {}
+    testimonial_objects = [
+        obj for obj in objects
+        if obj.get("kind") == "text" and obj.get("text_purpose") == "testimonial"
+    ]
+    if not testimonial_objects:
+        return {}
+
+    has_real_testimonial = bool((context.get("testimonial") or {}).get("quote"))
+    result = {}
+    winner_assigned = False
+    for obj in testimonial_objects:
+        object_id = obj.get("object_id")
+        if not object_id:
+            continue
+        is_aggregate = obj.get("social_proof_kind") == "aggregate"
+        if not is_aggregate and has_real_testimonial and not winner_assigned:
+            result[object_id] = "substitute"
+            winner_assigned = True
+        else:
+            result[object_id] = "drop"
+    return result
 
 
 def _assert_no_competitor_branded_object_kept(blueprint):
