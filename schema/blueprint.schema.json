@@ -96,6 +96,24 @@
             "type": ["string", "null"],
             "enum": ["single_quote", "aggregate", null],
             "description": "2026-08-19 (duplicate-testimonial guard + aggregate-vs-quote restoration): restores structural_zones[].social_proof_kind's aggregate_bar vs single_quote distinction, deleted by 6b82f60 with no replacement. Meaningful only when text_purpose is 'testimonial'. 'single_quote' = one customer's own words; 'aggregate' = a review-count/star-average summary with no single customer's words (e.g. 'Rated 4.8 by 12,000 customers') - Besque has no approved aggregate figure, so an aggregate-shaped object is ALWAYS dropped, never substituted, regardless of context - see deconstruct.resolve_testimonial_dispositions. null/omitted (a pre-existing blueprint predating this field, or a testimonial object the model didn't classify) is treated as 'single_quote' - the common case, and the same behaviour every testimonial-purposed object had before this field existed. Additive and optional, never required - a pre-existing blueprint remains valid unchanged."
+          },
+          "typography": {
+            "type": ["object", "null"],
+            "properties": {
+              "typeface_class": { "type": "string" },
+              "weight": { "type": "string" },
+              "case": { "type": "string" },
+              "letter_spacing": { "type": "string" },
+              "colour": { "type": "string" },
+              "size_relative": { "type": "string" },
+              "decorative_elements": { "type": "array", "items": { "type": "string" } },
+              "line_count": { "type": ["number", "null"] }
+            },
+            "description": "2026-08-17 (per-zone typography restoration): restores the deleted top-level typography_zones array's per-zone typographic TREATMENT, deleted by 6b82f60 with no replacement - recorded per-object here instead of a separate position-matched array, since text objects already carry a stable object_id/bbox. Meaningful only for kind 'text'. Content substitution (which words land here, whether this object survives at all) is governed elsewhere (disposition/text_purpose) - this states HOW an object that DOES survive is dressed, so a reference with several distinct typographic levels (a large serif headline, a gold small-caps accent line, small sans body copy, a CTA button label) doesn't collapse into one style by default. null/omitted (a pre-existing blueprint predating this field, or a text object the model didn't classify) produces no typographic instruction for that object, same as every text object had before this field existed - additive and optional, never required."
+          },
+          "styling": {
+            "type": ["string", "null"],
+            "description": "2026-08-17 (testimonial styling restoration): restores the deleted testimonial_zones[].styling field (card style, star-rating presence, quote-mark treatment - e.g. 'quote marks, no card', '5-star rating above the quote inside a white rounded card'), deleted by 6b82f60 with no replacement. Meaningful only when text_purpose is 'testimonial'. Content (the actual quote/attribution rendered) NEVER comes from this field - it always comes from the real, separately-selected customer review (select_testimonial_review); this field governs the CONTAINER's presentation only. null/omitted (a pre-existing blueprint predating this field, or a testimonial object the model didn't classify) produces a generic container instruction, the same behaviour every testimonial-purposed object had before this field existed - additive and optional, never required."
           }
         },
         "if": { "properties": { "kind": { "const": "text" } } },

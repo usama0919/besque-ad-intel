@@ -424,6 +424,76 @@ def _object_copy_clause(objects):
     )
 
 
+def _communicative_purpose_clause(blueprint):
+    """Copy purpose-steering restoration (2026-08-17): restores _text_purpose_clause
+    (GONE, deleted a9b1e9f, acknowledged in that deletion's own surviving comment -
+    "text_purpose and structural_zones, the two fields it reconciled, no longer
+    exist") - reimplemented against PER-OBJECT text_purpose (2026-08-17+ objects
+    model), per the operator's explicit instruction, rather than the deleted
+    top-level text_purpose array ({text_verbatim, purpose, placement}).
+
+    This is a DIFFERENT, broader concern from _object_copy_clause immediately above:
+    that function generates SPECIFIC per-object content for the narrow "other"/
+    unset-purpose bucket only (text_objects_needing_copy). This clause instead gives
+    the copywriter a picture of what JOB every text object in the reference did -
+    including headline/subtext/cta/offer/etc., which already have their own
+    dedicated content sources elsewhere in this pipeline - so an offer-led reference
+    steers the model toward writing offer-led Besque copy and a problem-hook
+    reference toward a problem-hook, never flattening every reference into the same
+    generic register regardless of what job its original text was doing. The two
+    clauses never compete for the same decision: this one steers overall TONE/
+    REGISTER, _object_copy_clause dictates specific CONTENT for specific objects.
+
+    The old enum (offer/testimonial/efficacy_claim/problem_hook/product_description/
+    cta/other) does NOT survive in the current schema's text_purpose enum (headline/
+    subtext/cta/offer/certification/testimonial/price_anchor/award/disclaimer/
+    product_callout/other - a different, structural axis, not a persuasive-mode
+    one) - the closing instruction below is deliberately reworded to speak generically
+    about "inherit the job" rather than hardcoding the old enum's specific values,
+    which would be wrong for the new one.
+
+    description is used in place of the deleted text_verbatim (objects don't store a
+    literal transcription for every text block, only a description of what it IS) -
+    redacted via _redact_personal_attribution, same defensive redaction _object_copy_
+    clause already applies to the same field, for the same reason: a reference
+    object's own description can carry a personal-name-shaped construct straight from
+    the reference.
+
+    Returns "" when there are no kind=="text" objects at all - byte-identical prompt
+    output for any blueprint with no text_purpose data, same additive convention as
+    every other restoration this session."""
+    objects = [
+        obj for obj in (blueprint or {}).get("objects") or []
+        if (obj or {}).get("kind") == "text"
+    ]
+    if not objects:
+        return ""
+    lines = "\n".join(
+        f'  - "{_redact_personal_attribution(obj.get("description") or "")}" served as: '
+        f'{obj.get("text_purpose") or "other"} '
+        f'({_redact_personal_attribution(obj.get("persuasive_function") or "unspecified")})'
+        for obj in objects
+    )
+    return (
+        "\n\nCOMMUNICATIVE PURPOSE (STRICT): the reference ad's own text blocks each did a "
+        f"specific JOB, not just occupied space - here is what each one was actually "
+        f"doing:\n{lines}\n"
+        "Your Besque copy must accomplish the SAME job(s) as whichever of these actually "
+        "survive into the output - inherit the JOB only, never the WORDING: write "
+        "entirely new sentences for every job above, never reuse the reference's own "
+        "sentence structure, phrasing, or the specific nouns/subjects it named, even when "
+        "the job itself carries over exactly. This names the JOB only, never permission "
+        "beyond what APPROVED CLAIMS/APPROVED TESTIMONIALS above allow - a testimonial-"
+        "purposed block is never fabricated here just because the reference had one in "
+        "that role. Never flatten every reference into generic product description "
+        "regardless of what job its original text was doing. Any personal name, initial-"
+        "surname construction (e.g. \"Sean R.\"), handle, or signature appearing anywhere "
+        "above must never appear in your output - the only personal attribution this copy "
+        "may ever carry is the one supplied in APPROVED TESTIMONIALS, and nothing above is "
+        "that."
+    )
+
+
 def find_object_copy_collisions(objects, object_copy):
     """Detects a DEFECT: two DIFFERENT text objects (different object_id) whose
     generated object_copy text is byte-identical, despite their own differentiating
@@ -583,6 +653,7 @@ def build_copy_prompt(blueprint, brand_voice="", approved_claims="", product=Non
     if used_headlines:
         prompt += _used_copy_clause(used_headlines)
     prompt += _object_copy_clause(text_objects_needing_copy(blueprint))
+    prompt += _communicative_purpose_clause(blueprint)
     if compliance_feedback:
         issues_text = "\n".join(f"- {issue}" for issue in compliance_feedback)
         prompt += (

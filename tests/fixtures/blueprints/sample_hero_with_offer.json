@@ -81,7 +81,17 @@
       "carries_brand_mark": false,
       "persuasive_function": "primary hook",
       "disposition": "substitute",
-      "text_purpose": "headline"
+      "text_purpose": "headline",
+      "typography": {
+        "typeface_class": "serif",
+        "weight": "bold",
+        "case": "title",
+        "letter_spacing": "normal",
+        "colour": "white",
+        "size_relative": "large",
+        "decorative_elements": [],
+        "line_count": 2
+      }
     },
     {
       "object_id": "obj_06",

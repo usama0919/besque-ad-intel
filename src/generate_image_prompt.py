@@ -538,6 +538,12 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
             _operator_instruction_clause(operator_instruction) +
             _critic_feedback_clause(critic_feedback) +
             _objects_clause(blueprint.get("objects"), objects_context, ad_id=blueprint.get("ad_id")) +
+            # Per-zone typography restoration (2026-08-17) - edit-mode only, matching
+            # the deleted _typography_zones_clause's own original scope exactly (the
+            # reference IS the creative brief in this branch, so typographic
+            # differentiation is only ever meaningful here, same as before this was
+            # deleted). Never called in the other two branches below.
+            _object_typography_clause(blueprint.get("objects"), objects_context) +
             _semantic_split_clause(blueprint.get("semantic_split")) +
             # include_product here is the RAW operator toggle - identical to
             # effective_include_product since the 2026-08-07 reference usability gate
@@ -937,6 +943,117 @@ _OBJECT_CLOSURE_SENTENCE = (
 )
 
 
+def _testimonial_styling_instruction(obj):
+    """Testimonial styling restoration (2026-08-17): restores testimonial_zones[].
+    styling (card shape, star-rating presence, quote-mark treatment), deleted by
+    6b82f60 with no replacement - content was restored in a9b1e9f
+    (_substitute_object_line's testimonial branch, above), styling was not, so a
+    correctly-substituted testimonial rendered in a generic container instead of
+    matching the reference's own card/rating treatment.
+
+    Recovered from git history (6b82f60~1:src/generate_image_prompt.py's
+    testimonial_zones styling_instruction, including the account-chrome carve-out
+    added 2026-08-13 for rule C9) rather than reinvented - the carve-out is NOT
+    optional to drop: "match this reference's own styling for the card" previously
+    read as license to reproduce the reference's own avatar/handle/display name
+    verbatim, a real live leak this exact wording closed. Dropped the old
+    "Position it at {placement}" sub-sentence - the objects model already gives this
+    object its own bbox, so a second, separately-worded position statement would be
+    the same "closer-instruction contradicts an earlier one" shape this codebase has
+    hit repeatedly, not a restoration worth reintroducing.
+
+    Returns "" when obj has no `styling` (a pre-existing blueprint predating this
+    field, or a testimonial object the model didn't classify) - byte-identical
+    output to before this field existed, same additive convention as every other
+    field added to the objects model this session."""
+    styling = (obj or {}).get("styling")
+    if not styling:
+        return ""
+    return (
+        f" Match this reference's own styling for the card/container itself (never "
+        f"its wording, which comes only from the real review above): {styling} This "
+        f"styling covers LAYOUT ONLY (card shape, avatar placement, handle text "
+        f"position, verified tick, follow button) - it is NEVER license to reproduce "
+        f"WHOSE account this is. If the reference shows an avatar, @handle, "
+        f"username, or display name, that account identity is never the reference's "
+        f"own: render Besque's own account identity if one is supplied above, or "
+        f"remove it entirely (compliance rule C9) - never the competitor's or any "
+        f"other real account's identity. Any face rendered inside that avatar is a "
+        f"depicted person like any other in this image, never decorative UI "
+        f"furniture exempt from anything: it is bound by compliance rule C1 (never a "
+        f"real individual's likeness, always a generic non-identifiable stand-in) "
+        f"and rule 10 (must read 45-60, never younger) exactly the same as this ad's "
+        f"primary subject."
+    )
+
+
+def _object_typography_clause(objects, context=None):
+    """Per-zone typography restoration (2026-08-17): restores the deleted top-level
+    typography_zones array and its consumer _typography_zones_clause (both GONE,
+    deleted by 6b82f60 with no replacement), reimplemented on the objects model per
+    the operator's explicit instruction - text objects already carry bbox and
+    text_purpose, so per-object `typography` (schema/blueprint.schema.json) replaces
+    a separate array matched by a free-text position string.
+
+    Recovered framing from git history (6b82f60~1) almost verbatim - only the
+    per-zone label changed (an object's own `description`, not a position-matched
+    `zone` string) and the listed set now comes from actual object disposition
+    rather than being unfiltered: only objects that will actually appear in the
+    output (disposition "substitute" or "keep") are listed - dressing an object
+    that's being removed is meaningless, and the old code's own closing sentence
+    ("for whichever zones survive") already claimed this filtering without actually
+    doing it; this restoration does what that sentence said.
+
+    Returns "" when no kind=="text" object carries a `typography` field - byte-
+    identical output for every blueprint predating this field, same as every other
+    additive field this session."""
+    context = context or {}
+    lines = []
+    for obj in objects or []:
+        obj = obj or {}
+        if obj.get("kind") != "text":
+            continue
+        # Resolved fresh via deconstruct.resolve_disposition, never the raw stored
+        # field - a context-gated purpose (offer/price_anchor/certification/
+        # testimonial) can be stored "drop" at deconstruct time and still resolve
+        # "substitute" here with this run's real context, same dual-resolution
+        # discipline every other per-object caller in this module already follows.
+        if deconstruct.resolve_disposition(obj, context) == "drop":
+            continue
+        typography = obj.get("typography")
+        if typography is None:
+            continue
+        parts = [
+            f"{typography.get('typeface_class') or '?'} typeface",
+            f"{typography.get('weight') or '?'} weight",
+            f"{typography.get('case') or '?'} case",
+            f"{typography.get('letter_spacing') or '?'} letter-spacing",
+            f"colour {typography.get('colour') or '?'}",
+            f"{typography.get('size_relative') or '?'} relative to the frame",
+        ]
+        deco = typography.get("decorative_elements") or []
+        if deco:
+            parts.append("with " + ", ".join(deco))
+        label = (obj.get("description") or obj.get("object_id") or "unnamed object").strip()
+        line_count = typography.get("line_count")
+        lines.append(
+            f"- {label}: {', '.join(parts)}, "
+            f"{line_count if line_count is not None else '?'} line(s)"
+        )
+    if not lines:
+        return ""
+    zone_list = " ".join(lines)
+    return (
+        f"TYPOGRAPHIC LEVELS (STRICT): the reference has {len(lines)} distinct "
+        f"typographic level(s) below, each with its OWN treatment - reproduce every "
+        f"one of them exactly as described, never collapsing two into one and never "
+        f"rendering every level in the same style. Whatever wording each object "
+        f"actually receives is governed by the SCENE OBJECTS inventory and rules "
+        f"above - this only states HOW that object is dressed, for whichever "
+        f"objects survive: {zone_list} "
+    )
+
+
 def _substitute_object_line(obj, kind, text_purpose, description, context, product_instance_count=1):
     """The SUBSTITUTE line for one object whose (re-)resolved disposition is
     "substitute" - dispatches on text_purpose (2026-08-17 restoration of the deleted
@@ -1025,6 +1142,7 @@ def _substitute_object_line(obj, kind, text_purpose, description, context, produ
             f"reworded, shortened, or invented: \"{quote}\" — attributed to "
             f"{attribution}. No star rating, age, or timeframe unless the review text "
             f"itself states one."
+            + _testimonial_styling_instruction(obj)
         )
     if text_purpose == "product_callout":
         product_name = context.get("product_name") or "Besque"
