@@ -65,6 +65,7 @@ The JSON must have exactly these fields:
         disclaimer = legal, regulatory, or medical fine print, or an asterisked footnote.
         product_callout = a short benefit or property label pointing at the product, distinct from the headline (e.g. an icon + "Fast-Absorbing").
         other = any other discrete text block that genuinely fits none of the above - use sparingly, only when no other value honestly applies.
+      "serves_object_id": OPTIONAL, applies only when `kind` is "text" or "prop" - the object_id of a DIFFERENT object THIS one exists only to support, e.g. a hand whose entire visible role is holding a specific product bottle records that product's object_id here; a caption or arrow pointing specifically at one product records that product's object_id. null (or omit) for every object that stands on its own, which is the common case - most props and text blocks serve no other single object and must NOT be forced to name one. Never point at yourself, and only ever name an object_id you have already assigned earlier in this SAME list - assign object_ids in an order that makes this possible (the product/person before anything that serves it).
     }}
 - semantic_split (object): REQUIRED - this key must ALWAYS be present. {{ "is_split": true/false, "split_axis": "vertical" or "horizontal" or null, "left_or_before": free text describing what that side/panel depicts, "right_or_after": free text describing what the other side/panel depicts }}. is_split is true whenever the image is visually divided into two comparable panels or halves - a before/after, a side-by-side comparison, a split-screen. When is_split is false, split_axis is null and both left_or_before and right_or_after are "". For a genuine before/after ad, the two sides MUST be described as materially DIFFERENT states (e.g. left_or_before: "dry, crepey skin with visible fine lines"; right_or_after: "smooth, hydrated skin with visible firmness") - recording both sides as showing the same condition is a failure, since the contrast between them is the entire point of the format.
 - production_style (object): REQUIRED - this key must ALWAYS be present. {{ "style": one of {production_style_options}, "confidence": high/medium/low, "signals": array of short phrases justifying the choice }}
@@ -267,7 +268,21 @@ _TEXT_PURPOSE_CONTEXT_GATED = {
 }
 
 
-def _resolve_text_disposition(obj, context, is_branded):
+def _served_object_needs_drop(obj, served_object_disposition):
+    """True when `obj` names a `serves_object_id` AND the object it serves has
+    resolved to "substitute" or "drop" - the mechanical re-evaluation Problem 1
+    (2026-08-17) requires: a hand/prop/caption existing only to hold or point at
+    another object has no independent reason to survive once what it served is gone
+    (drop) or replaced with a structurally different Besque equivalent (substitute) -
+    "the hand carries over unchanged" (observed five times, also with hair) is exactly
+    what trusting the model's own "keep" guess here produces, the same "prompt-only
+    rules do not reliably bind" failure class this codebase has hit repeatedly (see
+    CLAUDE.md's guardrails note). served_object_disposition is None when obj has no
+    serves_object_id, or the caller has not resolved one - never guessed here."""
+    return bool(obj.get("serves_object_id")) and served_object_disposition in ("substitute", "drop")
+
+
+def _resolve_text_disposition(obj, context, is_branded, served_object_disposition=None):
     """The text_purpose-driven half of resolve_disposition, below - kept as its own
     function so the branded/non-branded call sites can both reach it without
     duplicating the purpose map. `is_branded` is passed in (never recomputed here) so
@@ -277,7 +292,11 @@ def _resolve_text_disposition(obj, context, is_branded):
     Missing/unrecognised text_purpose (a legacy object predating this field, or a
     genuinely malformed one) falls back to the object's own model-assigned disposition,
     same as any other kind - back-compat for the ~300 existing rows this schema
-    addition does not retroactively touch, never a guessed purpose."""
+    addition does not retroactively touch, never a guessed purpose. served_object_
+    disposition (2026-08-17, Problem 1) only ever reaches this final fallback - every
+    other text_purpose is already deterministic on its own terms (a headline substitutes
+    regardless of what it "serves"; an unrecognised/"other" purpose is the one case with
+    nothing else deciding its fate, e.g. a caption or arrow pointing at a product)."""
     purpose = obj.get("text_purpose")
     if purpose in _TEXT_PURPOSE_ALWAYS_DROP:
         return "drop"
@@ -288,6 +307,8 @@ def _resolve_text_disposition(obj, context, is_branded):
         return "substitute" if context.get(gate_key) else "drop"
     # purpose == "other", or no purpose recorded at all.
     if is_branded:
+        return "drop"
+    if _served_object_needs_drop(obj, served_object_disposition):
         return "drop"
     return obj.get("disposition")
 
@@ -302,7 +323,7 @@ def _resolve_text_disposition(obj, context, is_branded):
 # than any other prompt-only rule. resolve_disposition is the function that actually
 # decides, run over every object AFTER the vision call, unconditionally overriding
 # whatever the model wrote.
-def resolve_disposition(obj, context=None):
+def resolve_disposition(obj, context=None, served_object_disposition=None):
     """Mechanical override of one object's `disposition` - never trusts the model's own
     guess for a competitor-owned or brand-marked object, or for a text object whose
     text_purpose mechanically determines the answer (2026-08-17, restoring the
@@ -370,22 +391,34 @@ def resolve_disposition(obj, context=None):
     no per-object category-matching signal in this schema to check more precisely than
     that.
 
+    served_object_disposition (2026-08-17, Problem 1 - "inherited objects the ad does
+    not need"): the ALREADY-RESOLVED disposition of the object THIS object's own
+    `serves_object_id` points at, if any - passed in by the caller (never looked up
+    here; this function stays a pure function of its own arguments, same discipline
+    `context` already established). blueprint.objects is a flat list with no
+    relationships beyond this one optional pointer, so nothing else could tell this
+    function "the product this hand holds is being replaced" - see
+    _served_object_needs_drop, checked in the final passthrough below and inside
+    _resolve_text_disposition's own "other"/no-purpose branch. A hand/prop/caption
+    that serves nothing (serves_object_id is null, the common case) is entirely
+    unaffected regardless of what this parameter is passed as.
+
     Every other object (kind not text/person, ownership in generic/besque, not
-    brand-mark-carrying, not a competitor-argument prop) passes through with whatever
-    disposition the model assigned, completely unchanged - this function only ever
-    narrows an object AWAY from "keep", never invents a "keep" the model didn't already
-    choose, and never touches an object that was never a compliance risk to begin with.
-    `person` is no longer part of this passthrough group (see above) - it is the ONE
-    kind this function narrows away from "keep" unconditionally, regardless of whether
-    it was ever a "risk" by the ownership/branding tests the rest of this function
-    uses."""
+    brand-mark-carrying, not a competitor-argument prop, not serving an object that
+    substituted or dropped) passes through with whatever disposition the model
+    assigned, completely unchanged - this function only ever narrows an object AWAY
+    from "keep", never invents a "keep" the model didn't already choose, and never
+    touches an object that was never a compliance risk to begin with. `person` is no
+    longer part of this passthrough group (see above) - it is the ONE kind this
+    function narrows away from "keep" unconditionally, regardless of whether it was
+    ever a "risk" by the ownership/branding tests the rest of this function uses."""
     context = context or {}
     ownership = obj.get("ownership")
     carries_brand_mark = bool(obj.get("carries_brand_mark"))
     is_branded = ownership == "competitor_branded" or carries_brand_mark
 
     if obj.get("kind") == "text":
-        return _resolve_text_disposition(obj, context, is_branded)
+        return _resolve_text_disposition(obj, context, is_branded, served_object_disposition)
 
     if obj.get("kind") == "person":
         return "substitute"
@@ -395,6 +428,8 @@ def resolve_disposition(obj, context=None):
             return "substitute"
         return "drop"
     if _is_competitor_argument_prop(obj):
+        return "drop"
+    if _served_object_needs_drop(obj, served_object_disposition):
         return "drop"
     return obj.get("disposition")
 
@@ -406,15 +441,37 @@ def _resolve_object_dispositions(blueprint):
     blueprint. Safe to call on a blueprint with no `objects` key or an empty list -
     returns the blueprint unchanged in that case; schema validation is what actually
     guarantees `objects` is present and non-empty by the time this runs in the real
-    pipeline (deconstruct_from_response calls this AFTER validation)."""
+    pipeline (deconstruct_from_response calls this AFTER validation).
+
+    TWO PASSES (2026-08-17, Problem 1 - serves_object_id): pass 1 resolves every object
+    exactly as before, with no knowledge of serves_object_id - this is also what pass 2
+    reads AS the served object's disposition for anything that names one, since
+    resolve_disposition is a pure function of one object plus its OWN served-object
+    input, never a whole-blueprint traversal. Pass 2 re-resolves only objects that
+    actually name a serves_object_id, passing pass 1's value for whatever they serve.
+    Deliberately single-hop: if A serves B and B serves C, pass 2 corrects B against C
+    correctly, but A is re-resolved against B's PASS-1 value (which does not yet know
+    about C) - a chain longer than one hop is not handled generically here, since
+    nothing in this schema or any observed failure has needed one; recorded as a known
+    scoping limit, not a silent gap."""
     objects = blueprint.get("objects")
     if not isinstance(objects, list):
         return blueprint
+    pass1 = {
+        obj.get("object_id"): resolve_disposition(obj)
+        for obj in objects if isinstance(obj, dict)
+    }
     blueprint = dict(blueprint)
-    blueprint["objects"] = [
-        {**obj, "disposition": resolve_disposition(obj)} if isinstance(obj, dict) else obj
-        for obj in objects
-    ]
+    resolved_objects = []
+    for obj in objects:
+        if not isinstance(obj, dict):
+            resolved_objects.append(obj)
+            continue
+        served_id = obj.get("serves_object_id")
+        served_disposition = pass1.get(served_id) if served_id else None
+        disposition = resolve_disposition(obj, served_object_disposition=served_disposition)
+        resolved_objects.append({**obj, "disposition": disposition})
+    blueprint["objects"] = resolved_objects
     return blueprint
 
 

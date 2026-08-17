@@ -78,6 +78,91 @@ def test_resolve_disposition_person_never_drops_even_when_branded():
     assert deconstruct.resolve_disposition(obj) == "substitute"
 
 
+# ---- serves_object_id re-evaluation (2026-08-17, Problem 1 - "inherited objects the
+# ad does not need"): a hand/prop/caption that exists only to hold or point at another
+# object must not survive unchanged once what it served substitutes or drops - "the
+# hand carries over unchanged" (observed five times, also with hair) is the live
+# failure this fixes. Enforced mechanically in resolve_disposition, never a prompt
+# sentence. ----
+
+def test_resolve_disposition_serves_object_id_substitute_forces_drop():
+    hand = _obj(kind="prop", ownership="generic", carries_brand_mark=False,
+                disposition="keep", serves_object_id="obj_product")
+    assert deconstruct.resolve_disposition(hand, served_object_disposition="substitute") == "drop"
+
+
+def test_resolve_disposition_serves_object_id_drop_forces_drop():
+    hand = _obj(kind="prop", ownership="generic", carries_brand_mark=False,
+                disposition="keep", serves_object_id="obj_product")
+    assert deconstruct.resolve_disposition(hand, served_object_disposition="drop") == "drop"
+
+
+def test_resolve_disposition_serves_object_id_kept_object_passes_through():
+    # The served object itself resolved to "keep" (still there, unchanged) - the
+    # serving object has no reason to be forced away from its own model-assigned guess.
+    hand = _obj(kind="prop", ownership="generic", carries_brand_mark=False,
+                disposition="keep", serves_object_id="obj_tray")
+    assert deconstruct.resolve_disposition(hand, served_object_disposition="keep") == "keep"
+
+
+def test_resolve_disposition_standalone_object_unaffected_by_served_disposition():
+    # serves_object_id is null/absent (the common case) - served_object_disposition
+    # must never be consulted at all, regardless of what value it's passed as.
+    standalone = _obj(kind="prop", ownership="generic", carries_brand_mark=False, disposition="keep")
+    assert "serves_object_id" not in standalone
+    assert deconstruct.resolve_disposition(standalone, served_object_disposition="substitute") == "keep"
+    assert deconstruct.resolve_disposition(standalone, served_object_disposition="drop") == "keep"
+
+
+def test_resolve_disposition_serves_object_id_text_other_purpose_forces_drop():
+    caption = _text_obj("other", serves_object_id="obj_product", disposition="keep")
+    assert deconstruct.resolve_disposition(caption, served_object_disposition="substitute") == "drop"
+
+
+def test_resolve_disposition_serves_object_id_recognised_text_purpose_unaffected():
+    # A headline's own rule (ALWAYS_SUBSTITUTE) is deterministic on its own terms -
+    # serves_object_id must never override it, even pointing at a dropped object.
+    headline = _text_obj("headline", serves_object_id="obj_product", disposition="keep")
+    assert deconstruct.resolve_disposition(headline, served_object_disposition="drop") == "substitute"
+
+
+def test_resolve_disposition_serves_object_id_none_by_default():
+    # No served_object_disposition supplied at all (the caller hasn't resolved one) -
+    # must never guess a drop.
+    hand = _obj(kind="prop", ownership="generic", carries_brand_mark=False,
+                disposition="keep", serves_object_id="obj_product")
+    assert deconstruct.resolve_disposition(hand) == "keep"
+
+
+def test_resolve_object_dispositions_two_pass_hand_dropped_when_product_substitutes():
+    # End-to-end through _resolve_object_dispositions (the deconstruct-time entry
+    # point): a branded product resolves to "substitute" in pass 1; the hand serving it
+    # (serves_object_id) is re-resolved in pass 2 against that value and dropped.
+    bp = {"objects": [
+        _obj(object_id="obj_product", kind="product", ownership="competitor_branded",
+             carries_brand_mark=True, disposition="keep"),
+        _obj(object_id="obj_hand", kind="prop", description="a hand", ownership="generic",
+             carries_brand_mark=False, disposition="keep", serves_object_id="obj_product"),
+    ]}
+    resolved = deconstruct._resolve_object_dispositions(bp)
+    by_id = {o["object_id"]: o["disposition"] for o in resolved["objects"]}
+    assert by_id["obj_product"] == "substitute"
+    assert by_id["obj_hand"] == "drop"
+
+
+def test_resolve_object_dispositions_two_pass_standalone_prop_unaffected():
+    bp = {"objects": [
+        _obj(object_id="obj_product", kind="product", ownership="competitor_branded",
+             carries_brand_mark=True, disposition="keep"),
+        _obj(object_id="obj_tray", kind="prop", description="a wooden tray", ownership="generic",
+             carries_brand_mark=False, disposition="keep"),
+    ]}
+    resolved = deconstruct._resolve_object_dispositions(bp)
+    by_id = {o["object_id"]: o["disposition"] for o in resolved["objects"]}
+    assert by_id["obj_product"] == "substitute"
+    assert by_id["obj_tray"] == "keep"
+
+
 def test_resolve_disposition_carries_brand_mark_forces_regardless_of_kind():
     # A non-product, non-competitor_branded object that still visibly carries a brand
     # mark (e.g. a generic-looking prop with the competitor's logo printed on it) must

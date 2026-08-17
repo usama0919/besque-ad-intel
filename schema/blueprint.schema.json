@@ -83,6 +83,10 @@
             "type": "string",
             "enum": ["headline", "subtext", "cta", "offer", "certification", "testimonial",
                      "price_anchor", "award", "disclaimer", "product_callout", "other"]
+          },
+          "serves_object_id": {
+            "type": ["string", "null"],
+            "description": "2026-08-17 (Problem 1 restoration): the object_id of the object THIS object exists to support - e.g. a hand holding the competitor's product records the product's object_id here. Meaningful for kind 'text' or 'prop' only (a caption pointing at a product, a hand/prop holding or staging one); null when this object stands on its own, which is the common case. Additive and optional - never required, so a pre-existing blueprint with no relational data on any object remains valid unchanged."
           }
         },
         "if": { "properties": { "kind": { "const": "text" } } },

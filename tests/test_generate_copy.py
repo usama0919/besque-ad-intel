@@ -103,6 +103,69 @@ def test_build_copy_prompt_includes_blueprint():
     assert "firmer skin at any age" in prompt
 
 
+# ---- bbox must never reach the copy prompt as bare numeric text (2026-08-17): a live
+# draft rendered the literal text "0.38 0.43" (an object's own bbox width/height) into
+# the IMAGE - traced to build_copy_prompt's raw json.dumps(blueprint) dump, which
+# included every objects[].bbox array sitting right next to description/
+# persuasive_function prose Claude IS meant to draw language from. Fixed at the
+# source (_blueprint_without_bbox strips bbox before the dump), never by asking Claude
+# not to quote coordinates. ----
+
+def _blueprint_with_bbox_object(**overrides):
+    obj = {
+        "object_id": "obj_01", "kind": "prop", "description": "a wooden tray",
+        "bbox": [0.12, 0.34, 0.38, 0.43], "colours": ["brown"], "ownership": "generic",
+        "role": "supporting_prop", "carries_brand_mark": False,
+        "persuasive_function": "staging", "disposition": "keep",
+    }
+    obj.update(overrides)
+    return {"angle": "x", "objects": [obj]}
+
+
+def test_build_copy_prompt_never_leaks_raw_bbox_floats():
+    prompt = generate_copy.build_copy_prompt(_blueprint_with_bbox_object())
+    assert "0.38" not in prompt
+    assert "0.43" not in prompt
+    assert "0.12" not in prompt
+    assert "0.34" not in prompt
+    # the object's own non-spatial fields must still reach the prompt - this is a
+    # targeted strip of ONE key, never a blanket exclusion of the object.
+    assert "a wooden tray" in prompt
+    assert "staging" in prompt
+
+
+def test_blueprint_without_bbox_strips_only_bbox():
+    bp = _blueprint_with_bbox_object()
+    stripped = generate_copy._blueprint_without_bbox(bp)
+    assert "bbox" not in stripped["objects"][0]
+    assert stripped["objects"][0]["description"] == "a wooden tray"
+    assert stripped["objects"][0]["colours"] == ["brown"]
+    # never mutates the caller's own blueprint
+    assert "bbox" in bp["objects"][0]
+
+
+def test_blueprint_without_bbox_handles_multiple_objects():
+    bp = {"objects": [
+        _blueprint_with_bbox_object()["objects"][0],
+        {"object_id": "obj_02", "kind": "text", "description": "headline",
+         "bbox": [0.0, 0.0, 1.0, 0.2], "text_purpose": "headline", "disposition": "substitute"},
+    ]}
+    stripped = generate_copy._blueprint_without_bbox(bp)
+    assert all("bbox" not in obj for obj in stripped["objects"])
+    assert stripped["objects"][1]["description"] == "headline"
+
+
+def test_blueprint_without_bbox_no_objects_key_unchanged():
+    bp = {"angle": "x"}
+    assert generate_copy._blueprint_without_bbox(bp) == bp
+
+
+def test_blueprint_without_bbox_empty_objects_list_unchanged():
+    bp = {"angle": "x", "objects": []}
+    stripped = generate_copy._blueprint_without_bbox(bp)
+    assert stripped["objects"] == []
+
+
 def test_build_copy_prompt_includes_compliance_rules():
     prompt = generate_copy.build_copy_prompt({"angle": "x"})
     assert "C2. NO FABRICATED TESTIMONIALS" in prompt

@@ -919,6 +919,16 @@ def _objects_clause(objects=None, context=None, ad_id=None):
     blueprint predating this field) falls back to its stored disposition unchanged -
     back-compat, never re-resolved against a purpose that doesn't exist.
 
+    serves_object_id (2026-08-17, Problem 1) gets the SAME two-pass treatment, for the
+    same reason: an object serving a context-gated text object (an offer badge's own
+    prop stand, say) can only know that object's FINAL disposition once this run's real
+    context is applied, not the context-free value deconstruct time stored. A first
+    pass resolves every object exactly as the single-object case above already did;
+    a second pass re-resolves ONLY objects naming a serves_object_id, feeding pass 1's
+    value for whatever they serve into deconstruct.resolve_disposition's own
+    served_object_disposition parameter. Single-hop only, same documented scoping limit
+    as deconstruct._resolve_object_dispositions.
+
     Returns "" when objects is empty/absent (a legacy blueprint predating this schema,
     or a blueprint with a genuinely empty list, which schema validation should never
     actually allow through in practice) - never a fabricated object list.
@@ -944,15 +954,26 @@ def _objects_clause(objects=None, context=None, ad_id=None):
         )
         return ""
     context = context or {}
+    first_pass = {}
+    for obj in objects:
+        obj = obj or {}
+        kind = obj.get("kind")
+        text_purpose = obj.get("text_purpose") if kind == "text" else None
+        first_pass[obj.get("object_id")] = (
+            deconstruct.resolve_disposition(obj, context) if text_purpose
+            else obj.get("disposition")
+        )
     lines = []
     for obj in objects:
         obj = obj or {}
         kind = obj.get("kind")
         text_purpose = obj.get("text_purpose") if kind == "text" else None
-        disposition = (
-            deconstruct.resolve_disposition(obj, context) if text_purpose
-            else obj.get("disposition")
-        )
+        served_id = obj.get("serves_object_id")
+        if served_id:
+            disposition = deconstruct.resolve_disposition(
+                obj, context, served_object_disposition=first_pass.get(served_id))
+        else:
+            disposition = first_pass.get(obj.get("object_id"))
         description = (obj.get("description") or obj.get("object_id") or "object").strip()
         role = obj.get("role") or ""
         if disposition == "keep":
@@ -3205,14 +3226,21 @@ def _regenerate_delta_clause(instruction):
     )
 
 
-def regenerate_from_stored_prompt(current_image_bytes, stored_prompt, instruction, ad_id, angle_slug=None):
-    """Regenerate a draft by applying `instruction` as a delta to `stored_prompt` (the
-    exact prompt that produced current_image_bytes), never a fresh rebuild from current
-    form state. Aspect ratio is derived from current_image_bytes itself, never a
-    parameter. Caller must version the outgoing draft before calling this - it only
-    overwrites. Returns the new draft path, or None on failure."""
+def _regenerate_image_bytes(current_image_bytes, stored_prompt, instruction):
+    """The core Gemini call regenerate_from_stored_prompt makes - extracted (2026-08-17,
+    object-removal restoration) so a SECOND caller (dashboard.py's object-removal edit
+    path, which needs its own versioned filename, not the plain `{stem}_draft.png`
+    overwrite this function's own caller below writes) can reuse the identical
+    rebuild-and-regenerate mechanism without inheriting that file-writing side effect.
+    Returns raw PNG bytes, or None on failure - no file writing, no GCS upload, no
+    ad_id/angle_slug parameter, since neither is needed for the Gemini call itself.
+
+    Applies `instruction` as a delta on top of `stored_prompt` (a freshly REBUILT full
+    prompt, never a frozen historical one - see regenerate_from_stored_prompt's own
+    docstring for why), attached to current_image_bytes as the base image. Aspect ratio
+    is derived from current_image_bytes itself, same reasoning as every other caller of
+    derive_aspect_ratio in this file."""
     from google.genai import types as genai_types
-    stem = _draft_stem(ad_id, angle_slug)
     prompt = stored_prompt.strip() + _regenerate_delta_clause(instruction)
     try:
         client = genai.Client(vertexai=True, project="besque-martech", location="global")
@@ -3242,21 +3270,70 @@ def regenerate_from_stored_prompt(current_image_bytes, stored_prompt, instructio
             if part.inline_data is not None:
                 image_bytes = part.inline_data.data
                 break
-        if image_bytes is None:
-            return None
-        ASSET_DIR.mkdir(exist_ok=True)
-        dest = ASSET_DIR / f"{stem}_draft.png"
-        with open(dest, "wb") as f:
-            f.write(image_bytes)
-        try:
-            from google.cloud import storage
-            storage.Client().bucket(assets.asset_bucket_name()).blob(f"{stem}_draft.png").upload_from_string(
-                image_bytes, content_type="image/png")
-        except Exception as e:
-            print(f"Bucket upload failed (non-fatal): {e}")
-        regenerate_from_stored_prompt.last_prompt = prompt
-        return str(dest)
+        _regenerate_image_bytes.last_prompt = prompt
+        return image_bytes
     except Exception:
         import traceback
         traceback.print_exc()
         return None
+
+
+def regenerate_from_stored_prompt(current_image_bytes, stored_prompt, instruction, ad_id, angle_slug=None):
+    """Regenerate a draft by applying `instruction` as a delta to `stored_prompt` (the
+    exact prompt that produced current_image_bytes), never a fresh rebuild from current
+    form state. Aspect ratio is derived from current_image_bytes itself, never a
+    parameter. Caller must version the outgoing draft before calling this - it only
+    overwrites. Returns the new draft path, or None on failure.
+
+    2026-08-17: the actual Gemini call now lives in _regenerate_image_bytes (see its own
+    docstring) - this function is a thin wrapper adding the plain-overwrite file write +
+    GCS upload, unchanged from before that extraction, so every existing caller sees
+    byte-for-byte identical behaviour."""
+    stem = _draft_stem(ad_id, angle_slug)
+    image_bytes = _regenerate_image_bytes(current_image_bytes, stored_prompt, instruction)
+    if image_bytes is None:
+        return None
+    ASSET_DIR.mkdir(exist_ok=True)
+    dest = ASSET_DIR / f"{stem}_draft.png"
+    with open(dest, "wb") as f:
+        f.write(image_bytes)
+    try:
+        from google.cloud import storage
+        storage.Client().bucket(assets.asset_bucket_name()).blob(f"{stem}_draft.png").upload_from_string(
+            image_bytes, content_type="image/png")
+    except Exception as e:
+        print(f"Bucket upload failed (non-fatal): {e}")
+    regenerate_from_stored_prompt.last_prompt = getattr(_regenerate_image_bytes, "last_prompt", "")
+    return str(dest)
+
+
+def blueprint_with_object_dropped(blueprint, object_id):
+    """A COPY of `blueprint` with exactly one objects[] entry's disposition forced to
+    "drop" - never mutates the caller's own blueprint dict (same discipline
+    deconstruct.strip_bottle_shape_language/_resolve_object_dispositions already use).
+
+    Object-removal restoration (2026-08-17, Problem 2): the operator's remove control
+    must close the scene coherently, not leave a hole - forcing disposition="drop" and
+    rebuilding the FULL prompt via build_image_prompt gives _objects_clause a real
+    ABSENT line ("close the space naturally with the surrounding surface and lighting")
+    plus the closure sentence, the same mechanism a fresh generation already uses to
+    remove an object cleanly - never an isolated inpaint instruction with no view of the
+    rest of the composition.
+
+    Returns (new_blueprint, target_object) - target_object is the ORIGINAL (unmodified)
+    object dict if object_id matched an entry, else None. Callers must treat None as
+    "object_id doesn't exist on this blueprint" and reject rather than silently
+    proceeding with an unmodified blueprint."""
+    objects = blueprint.get("objects") or []
+    target_object = None
+    new_objects = []
+    for obj in objects:
+        obj = obj or {}
+        if obj.get("object_id") == object_id:
+            target_object = obj
+            new_objects.append({**obj, "disposition": "drop"})
+        else:
+            new_objects.append(obj)
+    new_blueprint = dict(blueprint)
+    new_blueprint["objects"] = new_objects
+    return new_blueprint, target_object

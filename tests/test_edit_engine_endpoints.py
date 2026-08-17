@@ -60,6 +60,33 @@ def test_edit_capabilities_endpoint_404_when_missing(monkeypatch):
     assert resp.status_code == 404
 
 
+def test_edit_capabilities_endpoint_object_remove_control_present_with_objects_inventory(monkeypatch):
+    # _artifact()'s base fixture blueprint has one objects[] entry (obj_01) - the
+    # per-object remove control is already dynamically derived by
+    # edit_capability._object_remove_controls (unchanged this session) and must
+    # appear via this endpoint too.
+    monkeypatch.setattr(dedupe, "get_artifact_by_id", lambda aid: _artifact())
+    resp = _client().get("/artifact/42/edit-capabilities")
+    body = resp.json()
+    targets = {(c["target"], c["attribute"]) for c in body["controls"]}
+    assert ("object", "obj_01") in targets
+
+
+def test_edit_capabilities_endpoint_object_remove_control_absent_without_objects_key(monkeypatch):
+    # A blueprint with no `objects` key at all (predates the objects-array schema) -
+    # is_legacy territory (see dashboard.api_edit_capabilities/edit_capability.
+    # legacy_scene_summary) - must never offer a remove control for anything, since
+    # there is no objects inventory to derive one from.
+    monkeypatch.setattr(dedupe, "get_artifact_by_id", lambda aid: _artifact(
+        blueprint={"format": "hero", "face_present": {"has_face": False}, "layout_detail": {}},
+    ))
+    resp = _client().get("/artifact/42/edit-capabilities")
+    body = resp.json()
+    assert body["is_legacy"] is True
+    targets = {c["target"] for c in body["controls"]}
+    assert "object" not in targets
+
+
 # ---- Stage 5 (2026-08-17): is_legacy/legacy_scene_summary - a blueprint with no
 # `objects` key predates the objects schema and gets a read-only text summary instead
 # of erroring or silently showing nothing ----
@@ -431,10 +458,23 @@ def test_edit_endpoint_realism_rejects_unknown_value(monkeypatch):
     assert resp.json()["ok"] is False
 
 
-# ---- Stage 4 (2026-08-17): per-object remove control end-to-end - the fixed
-# build_object_removal_instruction delta, and a removal_zone drift check ----
+# ---- Stage 4 (2026-08-17): per-object remove control end-to-end.
+#
+# REWIRED 2026-08-17 (Problem 2 restoration): the remove control no longer inpaints
+# the v1 pixels via apply_targeted_edit - it marks the object "drop" in a copy of the
+# blueprint, rebuilds the full prompt via build_image_prompt, and regenerates via
+# generate_image_prompt._regenerate_image_bytes (the same rebuild-and-regenerate shape
+# pipeline._regenerate_existing_draft already uses), so the scene closes coherently
+# instead of leaving a hole. apply_targeted_edit/build_object_removal_instruction stay
+# in place, unchanged, for every OTHER target - see the drift-retry tests below, which
+# still use apply_targeted_edit for target="cta". ----
 
-def test_edit_endpoint_object_removal_sends_fixed_delta_and_uses_removal_zone(monkeypatch):
+def _object_removal_dedupe_mocks(monkeypatch):
+    monkeypatch.setattr(dedupe, "get_product", lambda pid: {"id": pid, "name": "Besque Magic Body Oil"})
+    monkeypatch.setattr(dedupe, "get_brand_settings", lambda: {"palette": "terracotta"})
+
+
+def test_edit_endpoint_object_removal_rebuilds_prompt_and_regenerates(monkeypatch):
     monkeypatch.setattr(dedupe, "get_artifact_by_id", lambda aid: _artifact(
         blueprint={
             "format": "hero", "face_present": {"has_face": False}, "layout_detail": {},
@@ -452,12 +492,18 @@ def test_edit_endpoint_object_removal_sends_fixed_delta_and_uses_removal_zone(mo
     monkeypatch.setattr(dedupe, "get_angle", lambda aid: None)
     monkeypatch.setattr(dashboard, "_read_artifact_image_bytes",
                          lambda art, ad_id: (b"draft-bytes", "AD123_draft.png"))
+    _object_removal_dedupe_mocks(monkeypatch)
+
+    apply_calls = []
+    monkeypatch.setattr(generate_image_prompt, "apply_targeted_edit",
+                         lambda *a, **k: apply_calls.append(1))
 
     captured = {}
-    def fake_apply(source_bytes, instruction, reference_images=None):
+    def fake_regen_bytes(source_bytes, stored_prompt, instruction):
         captured["instruction"] = instruction
+        captured["stored_prompt"] = stored_prompt
         return b"new-image-bytes"
-    monkeypatch.setattr(generate_image_prompt, "apply_targeted_edit", fake_apply)
+    monkeypatch.setattr(generate_image_prompt, "_regenerate_image_bytes", fake_regen_bytes)
 
     drift_calls = []
     def fake_check_drift(source_bytes, result_bytes, descriptor, blueprint):
@@ -474,16 +520,89 @@ def test_edit_endpoint_object_removal_sends_fixed_delta_and_uses_removal_zone(mo
     assert body["ok"] is True
     assert body["drift_method"] == "removal_zone"
 
+    # apply_targeted_edit (the old inpaint path) must never be called for this target.
+    assert apply_calls == []
+
     assert captured["instruction"] == (
         "Remove the a wooden tray entirely and close the space naturally with the "
         "surrounding surface and lighting. Everything else in the image is unchanged."
     )
-    # The exact fixed template - never build_targeted_edit_instruction's generic
-    # "attached image is FINAL and CORRECT... preservation list" wrapper.
-    assert "FINAL and CORRECT" not in captured["instruction"]
+    # The rebuilt prompt is a REAL build_image_prompt output (the ABSENT line +
+    # closure sentence), never the old fixed one-line template alone.
+    assert "ABSENT: the a wooden tray" in captured["stored_prompt"]
+    assert "close the space naturally" in captured["stored_prompt"]
+    assert "FINAL and CORRECT" not in captured["stored_prompt"]
     assert len(drift_calls) == 1
     assert drift_calls[0][0]["target"] == "object"
     assert drift_calls[0][0]["attribute"] == "obj_02"
+
+
+def test_edit_endpoint_object_removal_rejects_when_object_missing_from_blueprint(monkeypatch):
+    # A descriptor pointing at an object_id blueprint_with_object_dropped can't find -
+    # in practice this would need the blueprint to change between deriving the control
+    # and applying the edit; simulated directly via edit_capability.find_control so
+    # this exercises the endpoint's own None-target rejection, not just
+    # blueprint_with_object_dropped in isolation (already unit-tested in
+    # test_generate_image_prompt.py).
+    from src import edit_capability
+    monkeypatch.setattr(dedupe, "get_artifact_by_id", lambda aid: _artifact(
+        blueprint={"format": "hero", "objects": [
+            {"object_id": "obj_02", "kind": "prop", "description": "a wooden tray",
+             "ownership": "generic", "role": "environment", "carries_brand_mark": False,
+             "persuasive_function": "staging", "disposition": "keep"},
+        ]},
+    ))
+    monkeypatch.setattr(edit_capability, "find_control", lambda controls, target, attribute: {
+        "target": "object", "attribute": "obj_missing", "label": "a ghost object",
+        "current_value": "a ghost object", "allowed_ops": ["remove"],
+        "blueprint_path": "objects[].object_id",
+    } if target == "object" else None)
+    monkeypatch.setattr(dedupe, "insert_edit_event", lambda **k: 9)
+    monkeypatch.setattr(dedupe, "update_edit_event_result", lambda *a, **k: None)
+    monkeypatch.setattr(dashboard, "_read_artifact_image_bytes",
+                         lambda art, ad_id: (b"draft-bytes", "AD123_draft.png"))
+    _object_removal_dedupe_mocks(monkeypatch)
+
+    resp = _client().post("/artifact/42/edit", json={
+        "target": "object", "attribute": "obj_missing", "operation": "remove",
+    })
+    assert resp.status_code == 400
+    assert resp.json()["ok"] is False
+
+
+def test_edit_endpoint_object_removal_records_kind_and_role_on_edit_event(monkeypatch):
+    monkeypatch.setattr(dedupe, "get_artifact_by_id", lambda aid: _artifact(
+        blueprint={
+            "format": "hero", "objects": [
+                {"object_id": "obj_02", "kind": "prop", "description": "a wooden tray",
+                 "ownership": "generic", "role": "environment", "carries_brand_mark": False,
+                 "persuasive_function": "staging", "disposition": "keep"},
+            ],
+        },
+    ))
+    captured_events = []
+    def fake_insert_edit_event(**k):
+        captured_events.append(k)
+        return 9
+    monkeypatch.setattr(dedupe, "insert_edit_event", fake_insert_edit_event)
+    monkeypatch.setattr(dedupe, "update_edit_event_result", lambda *a, **k: None)
+    monkeypatch.setattr(dedupe, "insert_edit_artifact", lambda **k: 55)
+    monkeypatch.setattr(dedupe, "get_angle", lambda aid: None)
+    monkeypatch.setattr(dashboard, "_read_artifact_image_bytes",
+                         lambda art, ad_id: (b"draft-bytes", "AD123_draft.png"))
+    _object_removal_dedupe_mocks(monkeypatch)
+    monkeypatch.setattr(generate_image_prompt, "_regenerate_image_bytes",
+                         lambda *a, **k: b"new-image-bytes")
+    monkeypatch.setattr(drift_check, "check_drift", lambda *a, **k: {
+        "method": "removal_zone", "checked": True, "drift_flag": False,
+        "inside_pct": 5.0, "outside_pct": 0.1, "scatter_pct": None, "bbox": (0, 0, 1, 1)})
+
+    resp = _client().post("/artifact/42/edit", json={
+        "target": "object", "attribute": "obj_02", "operation": "remove",
+    })
+    assert resp.status_code == 200
+    assert len(captured_events) == 1
+    assert captured_events[0]["scope"] == {"kind": "prop", "role": "environment"}
 
 
 # ---- Step 4: drift check + one automatic retry, then stop ----

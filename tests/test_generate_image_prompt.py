@@ -545,6 +545,134 @@ def test_build_image_prompt_object_copy_none_keeps_generic_fallback():
     assert "Besque's own equivalent content" in prompt
 
 
+# ---- _objects_clause's serves_object_id re-evaluation (2026-08-17, Problem 1): a
+# prop/text object serving another object must be re-resolved against that object's
+# OWN (possibly context-gated) disposition at prompt-build time, not just trusted from
+# its deconstruct-time stored value. ----
+
+def test_objects_clause_hand_serving_substituted_product_resolves_to_absent():
+    # disposition="substitute" on the product mirrors what a real blueprint carries by
+    # the time it reaches _objects_clause - a branded product is ALREADY resolved to
+    # "substitute" by deconstruct._resolve_object_dispositions before this function
+    # ever sees it (non-text kinds are trusted from their stored value here, never
+    # independently re-derived from ownership/carries_brand_mark a second time - see
+    # _objects_clause's own first-pass loop).
+    objects = [
+        {"object_id": "obj_product", "kind": "product", "description": "competitor bottle",
+         "ownership": "competitor_branded", "carries_brand_mark": True,
+         "role": "hero", "persuasive_function": "hero product", "disposition": "substitute"},
+        {"object_id": "obj_hand", "kind": "prop", "description": "a hand",
+         "ownership": "generic", "carries_brand_mark": False, "role": "supporting_prop",
+         "persuasive_function": "holds the product", "disposition": "keep",
+         "serves_object_id": "obj_product"},
+    ]
+    clause = generate_image_prompt._objects_clause(objects, {})
+    assert "ABSENT: the a hand" in clause
+    assert "KEEP: a hand" not in clause
+
+
+def test_objects_clause_standalone_prop_unaffected_by_serves_object_id_logic():
+    objects = [
+        {"object_id": "obj_product", "kind": "product", "description": "competitor bottle",
+         "ownership": "competitor_branded", "carries_brand_mark": True,
+         "role": "hero", "persuasive_function": "hero product", "disposition": "keep"},
+        {"object_id": "obj_tray", "kind": "prop", "description": "a wooden tray",
+         "ownership": "generic", "carries_brand_mark": False, "role": "environment",
+         "persuasive_function": "staging", "disposition": "keep"},
+    ]
+    clause = generate_image_prompt._objects_clause(objects, {})
+    assert "KEEP: a wooden tray" in clause
+
+
+def test_objects_clause_serves_object_id_re_resolves_against_context_gated_served_object():
+    # The served object is a text_purpose=="offer" object - only substitutes when
+    # offer_text is supplied THIS run; drops otherwise. Both outcomes force the
+    # serving ribbon to "drop" too (substitute OR drop on the served object both
+    # trigger _served_object_needs_drop) - so the ribbon's OWN line is identical
+    # either way. What this proves is that the SECOND pass is genuinely re-deriving
+    # the badge's disposition from THIS run's real context (never a stale
+    # deconstruct-time value: the badge's own stored disposition here is "drop", yet
+    # supplying offer_text this run correctly flips it to "substitute" - visible on
+    # the badge's own line - and the ribbon tracks whichever the badge actually
+    # resolved to, in both directions, rather than always trusting one cached value.
+    objects = [
+        {"object_id": "obj_badge", "kind": "text", "text_purpose": "offer",
+         "description": "20% off badge", "ownership": "generic", "carries_brand_mark": False,
+         "role": "secondary", "persuasive_function": "communicates a discount", "disposition": "drop"},
+        {"object_id": "obj_ribbon", "kind": "prop", "description": "a decorative ribbon",
+         "ownership": "generic", "carries_brand_mark": False, "role": "supporting_prop",
+         "persuasive_function": "frames the badge", "disposition": "keep",
+         "serves_object_id": "obj_badge"},
+    ]
+    no_offer = generate_image_prompt._objects_clause(objects, {})
+    assert "ABSENT: the 20% off badge" in no_offer
+    assert "ABSENT: the a decorative ribbon" in no_offer
+
+    with_offer = generate_image_prompt._objects_clause(objects, {"offer_text": "20% off"})
+    assert "SUBSTITUTE: this reads as the reference's offer/price element" in with_offer
+    assert "ABSENT: the a decorative ribbon" in with_offer
+
+
+def test_objects_clause_object_serving_a_kept_object_survives():
+    # The served object resolves to "keep" (an unbranded, non-argument prop that
+    # stands on its own) - _served_object_needs_drop only fires for substitute/drop,
+    # so the serving object is left exactly as the model guessed.
+    objects = [
+        {"object_id": "obj_tray", "kind": "prop", "description": "a wooden tray",
+         "ownership": "generic", "carries_brand_mark": False, "role": "environment",
+         "persuasive_function": "staging", "disposition": "keep"},
+        {"object_id": "obj_cloth", "kind": "prop", "description": "a folded cloth",
+         "ownership": "generic", "carries_brand_mark": False, "role": "supporting_prop",
+         "persuasive_function": "rests on the tray", "disposition": "keep",
+         "serves_object_id": "obj_tray"},
+    ]
+    clause = generate_image_prompt._objects_clause(objects, {})
+    assert "KEEP: a wooden tray" in clause
+    assert "KEEP: a folded cloth" in clause
+
+
+# ---- blueprint_with_object_dropped (2026-08-17, Problem 2 restoration): the mechanism
+# behind the object-removal edit rebuilding the prompt instead of inpainting the v1
+# pixels. ----
+
+def test_blueprint_with_object_dropped_forces_disposition_and_returns_target():
+    bp = {"objects": [
+        {"object_id": "obj_01", "kind": "prop", "description": "a wooden tray", "disposition": "keep"},
+        {"object_id": "obj_02", "kind": "text", "description": "headline", "disposition": "substitute"},
+    ]}
+    new_bp, target = generate_image_prompt.blueprint_with_object_dropped(bp, "obj_01")
+    assert target["object_id"] == "obj_01"
+    assert target["disposition"] == "keep"  # the ORIGINAL object, unmodified
+    dropped = next(o for o in new_bp["objects"] if o["object_id"] == "obj_01")
+    assert dropped["disposition"] == "drop"
+    unchanged = next(o for o in new_bp["objects"] if o["object_id"] == "obj_02")
+    assert unchanged["disposition"] == "substitute"
+    # never mutates the caller's own blueprint
+    assert bp["objects"][0]["disposition"] == "keep"
+
+
+def test_blueprint_with_object_dropped_unknown_object_id_returns_none_target():
+    bp = {"objects": [{"object_id": "obj_01", "kind": "prop", "description": "x", "disposition": "keep"}]}
+    new_bp, target = generate_image_prompt.blueprint_with_object_dropped(bp, "obj_does_not_exist")
+    assert target is None
+    assert new_bp["objects"] == bp["objects"]
+
+
+def test_blueprint_with_object_dropped_prompt_shows_absent_line():
+    bp = {
+        "visual": {"layout": "flat lay", "subject": "", "palette_mood": "warm", "text_placement": "lower"},
+        "objects": [
+            {"object_id": "obj_01", "kind": "prop", "description": "a wooden tray",
+             "ownership": "generic", "carries_brand_mark": False, "role": "environment",
+             "persuasive_function": "staging", "disposition": "keep"},
+        ],
+    }
+    new_bp, _ = generate_image_prompt.blueprint_with_object_dropped(bp, "obj_01")
+    prompt = generate_image_prompt.build_image_prompt(new_bp, edit_mode=True)
+    assert "ABSENT: the a wooden tray" in prompt
+    assert "close the space naturally" in prompt
+
+
 def test_non_carryover_exceptions_clause_excepts_scene_objects():
     # 2026-08-17: repointed at the SCENE OBJECTS inventory (_objects_clause), which
     # subsumed the deleted "COMPETITOR ELEMENTS TO SUBSTITUTE" instruction this

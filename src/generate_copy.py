@@ -240,6 +240,34 @@ def _redact_personal_attribution(text):
     return PERSONAL_NAME_ATTRIBUTION_PATTERN.sub("", text)
 
 
+def _blueprint_without_bbox(blueprint):
+    """Strips objects[].bbox before the blueprint is dumped into the COPY prompt
+    (build_copy_prompt) - 2026-08-17, live bug: a draft rendered the literal text
+    "0.38 0.43" (an object's own bbox width/height, both plain floats) into the image.
+    bbox is a spatial-layout coordinate array meant for the IMAGE path only
+    (drift_check's pixel math, generate_copy._reading_order_key's reading-order sort,
+    both of which read it directly from blueprint.objects, never from this copy
+    prompt) - Claude has no legitimate use for it when writing marketing copy, and
+    nothing before this stopped the raw JSON dump below (build_copy_prompt's own
+    `blueprint=json.dumps(blueprint, indent=2)`) from handing Claude the coordinates
+    sitting right next to `description`/`persuasive_function` prose it IS meant to
+    draw language from - a real vector for exactly this kind of leak, not a fabricated
+    concern. Fixed at the SOURCE (never dump the coordinates in the first place), not
+    by asking Claude not to quote them: this codebase's own standing finding is that
+    prompt-only rules do not reliably bind (see CLAUDE.md's guardrails note). Never
+    mutates the caller's own blueprint dict. A blueprint with no `objects` list (or a
+    non-list value) is returned unchanged."""
+    objects = blueprint.get("objects")
+    if not isinstance(objects, list):
+        return blueprint
+    blueprint = dict(blueprint)
+    blueprint["objects"] = [
+        {k: v for k, v in obj.items() if k != "bbox"} if isinstance(obj, dict) else obj
+        for obj in objects
+    ]
+    return blueprint
+
+
 # text_zone_targets/_text_zone_copy_clause/_cta_zone/_cta_zone_clause DELETED 2026-08-17:
 # their sole input, structural_zones, no longer exists (schema/blueprint.schema.json -
 # blueprint.objects replaces it). telling generate_copy_live/validate_copy whether a
@@ -523,13 +551,15 @@ def build_copy_prompt(blueprint, brand_voice="", approved_claims="", product=Non
     the mechanical validate_copy backstop can never disagree about whether this
     reference has a zone that needs filling.
 
-    blueprint=... below is passed through _redact_personal_attribution (item 2,
-    sharpened, 2026-08-13) - the raw blueprint dump is where a reference-derived
-    object's own `description` (the competitor's own testimonial name/handle, wordmark
-    text, etc.) would otherwise reach Claude with no clause governing it at all. One
-    redaction pass over the whole dumped JSON covers this and any other current or
-    future field with the same shape, rather than a per-field filter that could miss
-    one.
+    blueprint=... below is passed through _blueprint_without_bbox THEN
+    _redact_personal_attribution (2026-08-17 / item 2, sharpened 2026-08-13) - the raw
+    blueprint dump is where a reference-derived object's own `description` (the
+    competitor's own testimonial name/handle, wordmark text, etc.) or bbox coordinates
+    (spatial data with no legitimate copy-writing use - see _blueprint_without_bbox's
+    own docstring for the live bug this fixes) would otherwise reach Claude with no
+    clause governing them at all. One redaction/strip pass over the whole dumped JSON
+    covers this and any other current or future field with the same shape, rather than
+    a per-field filter that could miss one.
 
     object_copy (2026-08-17 restoration, see text_objects_needing_copy/
     _object_copy_clause) is appended the same additive way as used_headlines/
@@ -545,7 +575,7 @@ def build_copy_prompt(blueprint, brand_voice="", approved_claims="", product=Non
         approved_claims=approved_claims or NO_APPROVED_CLAIMS,
         approved_testimonials=approved_testimonials or NO_APPROVED_TESTIMONIALS,
         compliance_rules=COMPLIANCE_RULES,
-        blueprint=_redact_personal_attribution(json.dumps(blueprint, indent=2)),
+        blueprint=_redact_personal_attribution(json.dumps(_blueprint_without_bbox(blueprint), indent=2)),
         product_info=_product_facts(product),
         offer_clause=_offer_clause(offer_text),
         angle_language_clause=_angle_language_clause(angle_language),

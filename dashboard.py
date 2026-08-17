@@ -594,11 +594,29 @@ async def api_apply_edit(artifact_id: int, request: Request):
         else:
             new_generated_copy[_TEXT_TARGET_COPY_KEYS[target]] = redacted_value
 
+    # scope (2026-08-17, object-removal restoration item 8): a removal's object_id is
+    # already captured by `attribute` (edit_capability._object_remove_controls sets
+    # attribute=object_id) - kind/role are NOT recorded anywhere else on this row, so a
+    # human or a future query asking "what kinds of things get removed" would have
+    # nothing to read. Looked up here, before any image call, so a REJECTED removal
+    # (no matching object, compliance, etc.) still carries this signal.
+    edit_scope = {}
+    if operation == "remove" and descriptor.get("essential"):
+        edit_scope["essential_removal_warning"] = descriptor.get("warning")
+    if target == "object":
+        removed_object = next(
+            (o for o in (blueprint.get("objects") or []) if (o or {}).get("object_id") == attribute),
+            None,
+        )
+        if removed_object:
+            edit_scope["kind"] = removed_object.get("kind")
+            edit_scope["role"] = removed_object.get("role")
+
     edit_event_id = dedupe.insert_edit_event(
         source_artifact_id=artifact_id, competitor_ad_id=competitor_ad_id, format=fmt,
         angle_id=angle_id, target=target, attribute=attribute, operation=operation,
         original_value=descriptor.get("current_value"), new_value=resolved_value,
-        scope={"essential_removal_warning": descriptor.get("warning")} if (operation == "remove" and descriptor.get("essential")) else {},
+        scope=edit_scope,
         outcome="pending",
     )
 
@@ -616,6 +634,7 @@ async def api_apply_edit(artifact_id: int, request: Request):
     # surface for brand or identity content to leak through. Only the v1 draft image
     # plus that one sentence is ever sent - no reference photos, no stored prompt, no
     # other blueprint fields.
+    object_removal_prompt = None
     if target == "product" and attribute == "realism":
         from src import realism_deltas
         instruction = realism_deltas.get_delta(resolved_value)
@@ -625,16 +644,59 @@ async def api_apply_edit(artifact_id: int, request: Request):
             dedupe.update_edit_event_result(edit_event_id, None, outcome="rejected", reject_reason=reason)
             return JSONResponse({"ok": False, "error": reason}, status_code=400)
     elif target == "object":
-        # Stage 4 (2026-08-17): per-object remove control - the fixed
-        # build_object_removal_instruction template, never build_targeted_edit_
-        # instruction's generic change-list machinery. descriptor['current_value'] is
-        # this object's own description (edit_capability._object_remove_controls).
+        # 2026-08-17 (Problem 2 restoration): a remove control must close the scene
+        # coherently, not leave a hole - REPLACES the old build_object_removal_
+        # instruction + apply_targeted_edit inpaint (kept below, unchanged, for every
+        # OTHER target). Mark this object's disposition "drop" in a COPY of the
+        # blueprint, rebuild the FULL prompt via build_image_prompt (so _objects_clause
+        # emits a real ABSENT line plus the closure sentence, the same mechanism a
+        # fresh generation already uses to remove an object cleanly), then regenerate
+        # against the v1 draft - never an isolated one-line delta with no view of the
+        # rest of the composition. Follows _regenerate_existing_draft's own shape
+        # (pipeline.py) for resolving the artifact's stored inputs.
+        modified_blueprint, target_object = generate_image_prompt.blueprint_with_object_dropped(
+            blueprint, attribute)
+        if target_object is None:
+            reason = f"object {attribute!r} not found in this artifact's blueprint"
+            dedupe.update_edit_event_result(edit_event_id, None, outcome="rejected", reject_reason=reason)
+            return JSONResponse({"ok": False, "error": reason}, status_code=400)
         instruction = generate_image_prompt.build_object_removal_instruction(
             descriptor.get("current_value"))
+        from src import pipeline as _pipeline
+        stored_copy = source.get("generated_copy") or {}
+        stored_product_id = source.get("product_id")
+        stored_product = dedupe.get_product(stored_product_id) if stored_product_id is not None else None
+        stored_include_product = source.get("include_product")
+        if stored_include_product is None:
+            stored_include_product = True
+        stored_retheme_colours = source.get("retheme_colours")
+        if stored_retheme_colours is None:
+            stored_retheme_colours = True
+        stored_brand_palette = dedupe.get_brand_settings().get("palette") if stored_retheme_colours else None
+        # Testimonial is recomputed from the ORIGINAL (unmodified) blueprint, same
+        # reasoning _regenerate_existing_draft already applies - deterministic by
+        # ad_id, so this reproduces the same pick a normal generation would make.
+        stored_testimonial = _pipeline.select_testimonial_review(blueprint, stored_product, source["ad_id"])
+        object_removal_prompt = generate_image_prompt.build_image_prompt(
+            modified_blueprint, product=stored_product, include_product=stored_include_product,
+            text_in_image=bool(source.get("text_in_image")), headline=stored_copy.get("headline"),
+            subtext=stored_copy.get("image_subtext") or None, edit_mode=True,
+            offer_text=source.get("offer_text"), operator_instruction=source.get("operator_instruction") or "",
+            retheme_colours=stored_retheme_colours, brand_palette=stored_brand_palette,
+            realism=source.get("realism"), cta_text=stored_copy.get("cta") or None,
+            panel_copy=stored_copy.get("panel_copy") or None,
+            object_copy=stored_copy.get("object_copy") or None,
+            testimonial=stored_testimonial,
+        )
     else:
         instruction = generate_image_prompt.build_targeted_edit_instruction(
             descriptor, operation, resolved_value, blueprint=blueprint)
-    new_image_bytes = generate_image_prompt.apply_targeted_edit(source_bytes, instruction)
+
+    if target == "object":
+        new_image_bytes = generate_image_prompt._regenerate_image_bytes(
+            source_bytes, object_removal_prompt, instruction)
+    else:
+        new_image_bytes = generate_image_prompt.apply_targeted_edit(source_bytes, instruction)
     if new_image_bytes is None:
         reason = "image edit call failed"
         dedupe.update_edit_event_result(edit_event_id, None, outcome="rejected", reject_reason=reason)
@@ -650,7 +712,11 @@ async def api_apply_edit(artifact_id: int, request: Request):
     drift_result = drift_check.check_drift(source_bytes, new_image_bytes, descriptor, blueprint)
     if drift_result["checked"] and drift_result["drift_flag"]:
         retry_instruction = generate_image_prompt.build_drift_retry_instruction(instruction, descriptor)
-        retry_bytes = generate_image_prompt.apply_targeted_edit(source_bytes, retry_instruction)
+        if target == "object":
+            retry_bytes = generate_image_prompt._regenerate_image_bytes(
+                source_bytes, object_removal_prompt, retry_instruction)
+        else:
+            retry_bytes = generate_image_prompt.apply_targeted_edit(source_bytes, retry_instruction)
         if retry_bytes is not None:
             instruction = retry_instruction
             new_image_bytes = retry_bytes
