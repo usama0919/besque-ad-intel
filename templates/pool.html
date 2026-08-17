@@ -418,13 +418,17 @@ async function loadGrid(){
 // generates normally, with the product/copy ADDED into the scene rather than
 // substituted, never skipped.
 function referenceHasNothingToClone(blueprint){
+  // 2026-08-17: structural_zones no longer exists (schema/blueprint.schema.json -
+  // blueprint.objects replaces it) - mirrors the Python-side fix in
+  // generate_image_prompt.reference_has_text_zone: a "text-bearing" object is now any
+  // kind=="text" entry whose text_purpose is headline/subtext/cta.
   blueprint = blueprint || {};
   const layoutDetail = blueprint.layout_detail || {};
   if(layoutDetail.product_count !== 0){ return false; }
   const hasHeadline = !!(blueprint.headline_verbatim || '').trim();
-  const textZoneTypes = new Set(['sub_line', 'body_copy', 'cta']);
-  const hasTextZone = (blueprint.structural_zones || []).some(z => textZoneTypes.has((z || {}).zone_type));
-  if(hasHeadline || hasTextZone){ return false; }
+  const textPurposes = new Set(['headline', 'subtext', 'cta']);
+  const hasTextObject = (blueprint.objects || []).some(o => (o || {}).kind === 'text' && textPurposes.has((o || {}).text_purpose));
+  if(hasHeadline || hasTextObject){ return false; }
   if(blueprint.offer){ return false; }
   return true;
 }

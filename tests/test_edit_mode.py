@@ -110,15 +110,21 @@ def test_build_image_prompt_edit_mode_headline_and_subtext_appear_exactly_once()
     assert prompt.count(f'"{subtext}"') == 1
 
 
-def test_build_image_prompt_edit_mode_headline_and_subtext_exactly_once_with_overlapping_zone():
-    """The overlapping-zone case: a sub_line structural zone with no distinct panel_copy
-    entry previously fell back to re-quoting the same subtext a third time
-    (_structural_zones_clause's sub_line/body_copy branch) - it now references rule 6's
-    authorisation instead, so the count stays 1 even here."""
+def test_build_image_prompt_edit_mode_headline_and_subtext_exactly_once_with_overlapping_object():
+    """The overlapping-object case: a subtext-purposed text object (2026-08-17: the
+    objects-array replacement for the old sub_line structural zone) with no distinct
+    per-object copy of its own previously risked re-quoting the same subtext a third
+    time (the deleted _structural_zones_clause's sub_line/body_copy branch) - the
+    object's own SUBSTITUTE line now defers to rule 6's TEXT POLICY authorisation
+    instead (see _substitute_object_line), so the count stays 1 even here."""
     headline = "Firmer Skin By Friday"
     subtext = "7 cold-pressed oils"
     bp = _blueprint()
-    bp["structural_zones"] = [{"zone_type": "sub_line", "position": "top-center", "container": "none"}]
+    bp["objects"] = [{"object_id": "obj_01", "kind": "text", "description": "sub-line",
+                       "bbox": [0.1, 0.1, 0.6, 0.1], "colours": [], "ownership": "competitor_branded",
+                       "role": "secondary", "carries_brand_mark": False,
+                       "persuasive_function": "supports headline", "disposition": "substitute",
+                       "text_purpose": "subtext"}]
     prompt = generate_image_prompt.build_image_prompt(
         bp, edit_mode=True, text_in_image=True, headline=headline, subtext=subtext,
     )
@@ -846,84 +852,68 @@ def test_reference_has_text_zone_true_for_headline():
     assert generate_image_prompt.reference_has_text_zone({"headline_verbatim": "Feel confident again"}) is True
 
 
-def test_reference_has_text_zone_true_for_text_bearing_structural_zone():
-    bp = {"structural_zones": [{"zone_type": "body_copy", "position": "mid", "container": "none", "detail": "x"}]}
+def _obj_with_purpose(purpose, **overrides):
+    base = {"object_id": "obj_x", "kind": "text", "description": "reference text",
+            "text_purpose": purpose}
+    base.update(overrides)
+    return base
+
+
+def test_reference_has_text_zone_true_for_text_bearing_object():
+    bp = {"objects": [_obj_with_purpose("subtext")]}
     assert generate_image_prompt.reference_has_text_zone(bp) is True
 
 
 def test_reference_has_text_zone_false_when_neither():
-    bp = {"structural_zones": [{"zone_type": "badge", "position": "top", "container": "oval", "detail": "NEW"}]}
+    bp = {"objects": [_obj_with_purpose("certification")]}
     assert generate_image_prompt.reference_has_text_zone(bp) is False
     assert generate_image_prompt.reference_has_text_zone({}) is False
 
 
-# ---- OFFER_BADGE_KEYWORDS word-boundary matching (2026-08-11): plain substring matching
-# let "off" match inside "official"/"offering", "sale" inside "salesperson", "price" inside
-# "pricing" - none of these are actually offer-shaped. ----
+# _is_offer_shaped_zone/OFFER_BADGE_KEYWORDS DELETED 2026-08-17: text_purpose now
+# classifies a text object as "offer"/"price_anchor" directly at deconstruct time (see
+# deconstruct.py's BLUEPRINT_PROMPT) - there is no free-text `detail` left to guess an
+# offer shape from, so the keyword-matching this tested no longer exists. See
+# reference_has_offer_zone below for its replacement.
 
-def test_is_offer_shaped_zone_true_for_real_offer_keywords():
-    assert generate_image_prompt._is_offer_shaped_zone("reads 'SAVE 16%'") is True
-    assert generate_image_prompt._is_offer_shaped_zone("20% off first order") is True
-    assert generate_image_prompt._is_offer_shaped_zone("summer sale") is True
-    assert generate_image_prompt._is_offer_shaped_zone("best price guarantee") is True
-    assert generate_image_prompt._is_offer_shaped_zone("promo code inside") is True
-    assert generate_image_prompt._is_offer_shaped_zone("discount badge") is True
-    assert generate_image_prompt._is_offer_shaped_zone("deal of the day") is True
-
-
-def test_is_offer_shaped_zone_false_for_word_boundary_false_positives():
-    """The exact false-positive class plain substring matching produced - "off"/"sale"/
-    "price" appearing INSIDE an unrelated word, never as a word of its own."""
-    assert generate_image_prompt._is_offer_shaped_zone("official product seal") is False
-    assert generate_image_prompt._is_offer_shaped_zone("special offering this month") is False
-    assert generate_image_prompt._is_offer_shaped_zone("salesperson recommended") is False
-    assert generate_image_prompt._is_offer_shaped_zone("pricing details inside") is False
-    assert generate_image_prompt._is_offer_shaped_zone("coffee break gift set") is False
-
-
-def test_is_offer_shaped_zone_false_for_empty_or_none():
-    assert generate_image_prompt._is_offer_shaped_zone("") is False
-    assert generate_image_prompt._is_offer_shaped_zone(None) is False
-
-
-def test_is_offer_shaped_zone_percent_sign_still_matches_without_word_boundary():
-    """% is never part of a word, so it deliberately keeps plain substring matching -
-    confirms the % branch of the pattern wasn't broken by adding \\b to the others."""
-    assert generate_image_prompt._is_offer_shaped_zone("94%") is True
-
-
-# ---- reference_has_offer_zone (2026-08-11, clone mode): whole-blueprint analogue of
-# _is_offer_shaped_zone (which only tests one zone's own detail string) - True when a
-# price_anchor is present (inherently offer-shaped, no keyword check needed) or a badge
-# whose detail reads as offer/discount-shaped, same OFFER_BADGE_KEYWORDS
-# _structural_zones_clause itself uses to decide substitute-vs-remove ----
+# ---- reference_has_offer_zone (2026-08-11, clone mode; REWIRED 2026-08-17 to read
+# blueprint.objects' text_purpose - see _objects_have_text_purpose/
+# _TEXT_PURPOSE_OFFER_TYPES) ----
 
 def test_reference_has_offer_zone_true_for_price_anchor():
-    bp = {"structural_zones": [{"zone_type": "price_anchor", "position": "top", "container": "none", "detail": "was $60, now $45"}]}
+    bp = {"objects": [_obj_with_purpose("price_anchor", description="was $60, now $45")]}
     assert generate_image_prompt.reference_has_offer_zone(bp) is True
 
 
-def test_reference_has_offer_zone_true_for_offer_shaped_badge():
-    bp = {"structural_zones": [{"zone_type": "badge", "position": "top", "container": "oval", "detail": "reads 'SAVE 16%'"}]}
+def test_reference_has_offer_zone_true_for_offer_object():
+    bp = {"objects": [_obj_with_purpose("offer", description="reads 'SAVE 16%'")]}
     assert generate_image_prompt.reference_has_offer_zone(bp) is True
 
 
-def test_reference_has_offer_zone_false_for_non_offer_badge():
-    """A badge exists, but its detail doesn't read as offer-shaped (e.g. a plain "NEW"
-    flag or a star rating) - must not be treated as an offer zone."""
-    bp = {"structural_zones": [{"zone_type": "badge", "position": "top", "container": "oval", "detail": "reads NEW"}]}
+def test_reference_has_offer_zone_false_for_non_offer_object():
+    """A text object exists, but its purpose isn't offer-shaped (e.g. a certification
+    badge or a plain "NEW" flag classified as "other") - must not be treated as an
+    offer zone."""
+    bp = {"objects": [_obj_with_purpose("other", description="reads NEW")]}
     assert generate_image_prompt.reference_has_offer_zone(bp) is False
 
 
-def test_reference_has_offer_zone_false_when_no_structural_zones():
+def test_reference_has_offer_zone_false_when_no_objects():
     assert generate_image_prompt.reference_has_offer_zone({}) is False
     assert generate_image_prompt.reference_has_offer_zone(None) is False
-    assert generate_image_prompt.reference_has_offer_zone({"structural_zones": []}) is False
+    assert generate_image_prompt.reference_has_offer_zone({"objects": []}) is False
 
 
-def test_reference_has_offer_zone_false_for_unrelated_zone_types():
-    bp = {"structural_zones": [{"zone_type": "brand_wordmark", "position": "top", "container": "none", "detail": "OSEA"},
-                                {"zone_type": "sub_line", "position": "mid", "container": "none", "detail": "tagline"}]}
+def test_reference_has_offer_zone_false_for_unrelated_purposes():
+    bp = {"objects": [_obj_with_purpose("headline", description="OSEA"),
+                       _obj_with_purpose("subtext", description="tagline")]}
+    assert generate_image_prompt.reference_has_offer_zone(bp) is False
+
+
+def test_reference_has_offer_zone_ignores_non_text_kind():
+    # A non-text object could in principle carry a stray text_purpose key by caller
+    # error - only kind=="text" counts, matching deconstruct.py's own schema.
+    bp = {"objects": [{"object_id": "obj_x", "kind": "graphic", "text_purpose": "offer"}]}
     assert generate_image_prompt.reference_has_offer_zone(bp) is False
 
 
@@ -934,11 +924,18 @@ def test_reference_has_offer_zone_false_for_unrelated_zone_types():
 # reference_has_offer_zone actually says so - never Gemini's own call. clone_mode=False
 # (the default) is unaffected. ----
 
-_NO_OFFER_ZONE_BLUEPRINT = {"structural_zones": [
-    {"zone_type": "brand_wordmark", "position": "top", "container": "none", "detail": "OSEA"},
+_NO_OFFER_ZONE_BLUEPRINT = {"objects": [
+    {"object_id": "obj_01", "kind": "logo", "description": "OSEA wordmark",
+     "bbox": [0, 0, 0.2, 0.1], "colours": [], "ownership": "competitor_branded",
+     "role": "secondary", "carries_brand_mark": True,
+     "persuasive_function": "names the advertiser", "disposition": "drop"},
 ]}
-_HAS_OFFER_ZONE_BLUEPRINT = {"structural_zones": [
-    {"zone_type": "price_anchor", "position": "top", "container": "none", "detail": "was $60, now $45"},
+_HAS_OFFER_ZONE_BLUEPRINT = {"objects": [
+    {"object_id": "obj_01", "kind": "text", "description": "was $60, now $45",
+     "bbox": [0.1, 0, 0.3, 0.1], "colours": [], "ownership": "competitor_branded",
+     "role": "secondary", "carries_brand_mark": False,
+     "persuasive_function": "shows a price comparison", "disposition": "substitute",
+     "text_purpose": "price_anchor"},
 ]}
 
 
@@ -963,22 +960,18 @@ def test_edit_mode_offer_clause_suppressed_when_clone_mode_on_and_no_offer_zone(
     assert "no offer was supplied for this run" in prompt
 
 
-def test_edit_mode_offer_clause_always_suppressed_under_clone_mode_now():
-    """2026-08-17: structural_zones no longer exists (blueprint.objects replaces it -
-    schema/blueprint.schema.json), so _structural_zones_have_offer/reference_has_offer_
-    zone has no signal to read for a new blueprint - _edit_mode_instruction no longer
-    receives structural_zones as a parameter at all. Rather than guess an equivalent
-    from `objects` (no field maps cleanly to "is this specifically an offer-shaped
-    zone"), clone_mode now ALWAYS suppresses offer_text - the safer direction (never
-    renders an offer that might not be authorised) - even for a blueprint that, under
-    the OLD structural_zones-based check, would have been recognised as having a real
-    offer zone. This replaces test_edit_mode_offer_clause_still_fires_when_clone_mode_
-    on_and_offer_zone_present, which asserted the opposite, now-retired behaviour."""
+def test_edit_mode_offer_clause_still_fires_when_clone_mode_on_and_offer_zone_present():
+    """REWIRED 2026-08-17 (was test_edit_mode_offer_clause_always_suppressed_under_
+    clone_mode_now, asserting the ORPHANED behaviour): structural_zones no longer
+    exists (blueprint.objects replaces it), but text_purpose now classifies a text
+    object as "price_anchor"/"offer" directly - a MORE precise signal than the old
+    zone_type/keyword combination, not a weaker one. clone_mode's offer-carrying
+    decision is restored: a real offer-shaped object still lets offer_text through."""
     prompt = generate_image_prompt.build_image_prompt(
         _HAS_OFFER_ZONE_BLUEPRINT, edit_mode=True, offer_text="20% off", clone_mode=True,
     )
-    assert 'replace ONLY its wording with: 20% off' not in prompt
-    assert "no offer was supplied for this run" in prompt
+    assert 'replace ONLY its wording with: 20% off' in prompt
+    assert "no offer was supplied for this run" not in prompt
 
 
 def test_edit_mode_offer_clause_and_suppression_exception_never_disagree():

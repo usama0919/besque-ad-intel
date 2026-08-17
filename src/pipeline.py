@@ -71,16 +71,24 @@ def _reads_like_a_complaint(review_text):
 
 
 def select_testimonial_review(blueprint, product, ad_id, max_chars=140):
-    """Pick a REAL, approved customer review to substitute into a social_proof
-    single_quote structural zone - real review or nothing, never fabricated (2026-08-06:
-    Gemini was inventing customer quotes wholesale for a testimonial-shaped zone it had
-    nothing real to fill, styled exactly like a genuine customer quote with a star
-    rating - see CLAUDE.md). Returns None (never a placeholder) when: the blueprint has
-    no single_quote zone at all (skips the DB read entirely), no product/product_id is
-    given, or no review both short enough to read as a single in-image line AND free of
-    complaint-shaped language (see _reads_like_a_complaint) exists for this product.
-    Callers must treat None as "remove the zone" - see
-    generate_image_prompt._structural_zones_clause.
+    """Pick a REAL, approved customer review to substitute into a testimonial-purposed
+    text object - real review or nothing, never fabricated (2026-08-06: Gemini was
+    inventing customer quotes wholesale for a testimonial-shaped zone it had nothing
+    real to fill, styled exactly like a genuine customer quote with a star rating - see
+    CLAUDE.md). Returns None (never a placeholder) when: the blueprint has no
+    text_purpose=="testimonial" object at all (skips the DB read entirely), no
+    product/product_id is given, or no review both short enough to read as a single
+    in-image line AND free of complaint-shaped language (see _reads_like_a_complaint)
+    exists for this product. Callers must treat None as "remove the object" - see
+    generate_image_prompt._objects_clause/_substitute_object_line.
+
+    REWIRED 2026-08-17: structural_zones/social_proof_kind no longer exist
+    (schema/blueprint.schema.json - blueprint.objects replaces them). The old
+    single_quote/aggregate_bar distinction has no equivalent in the objects model - any
+    text_purpose=="testimonial" object is treated as wanting a real quote, same as a
+    single_quote zone used to; an aggregate review-count/average is still not built
+    anywhere downstream (held pending Harry, see CLAUDE.md), so this can never
+    accidentally start rendering one.
 
     Deterministic by ad_id, not random: the SAME ad picks the SAME review on every
     regenerate (reproducible - a real review disappearing and reappearing on repeat runs
@@ -90,12 +98,12 @@ def select_testimonial_review(blueprint, product, ad_id, max_chars=140):
     per-review "last used" tracking exists (the team's stated want for a future version
     of this feature, not buildable with today's schema) - deferred rather than guessed
     at; see CLAUDE.md 2026-08-06. max_chars keeps the pick short enough to read as a
-    single in-image line, the same "short line" constraint image_subtext/panel_copy
-    already apply - not a length pulled from nowhere."""
-    zones = (blueprint or {}).get("structural_zones") or []
+    single in-image line, the same "short line" constraint image_subtext already
+    applies - not a length pulled from nowhere."""
+    objects = (blueprint or {}).get("objects") or []
     wants_quote = any(
-        z.get("zone_type") == "social_proof" and z.get("social_proof_kind") == "single_quote"
-        for z in zones
+        (obj or {}).get("kind") == "text" and (obj or {}).get("text_purpose") == "testimonial"
+        for obj in objects
     )
     if not wants_quote:
         return None

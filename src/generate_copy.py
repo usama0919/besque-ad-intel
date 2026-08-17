@@ -99,7 +99,7 @@ IMAGE_SUBTEXT_FIELD_DEFAULT = (
 IMAGE_SUBTEXT_FIELD_ZONE_PRESENT = (
     '- image_subtext (string): ONE short line suitable for rendering directly ONTO the '
     'image itself - under about 12 words, NOT the full primary_text body copy. This '
-    'reference has a sub_line/body_copy zone that will be REMOVED from the generated '
+    'reference has a subtext-shaped text block that will be REMOVED from the generated '
     'image if this is left empty - a real container exists there and needs real Besque '
     'wording, not the reference\'s own text. Must NOT be empty string this time.'
 )
@@ -240,135 +240,24 @@ def _redact_personal_attribution(text):
     return PERSONAL_NAME_ATTRIBUTION_PATTERN.sub("", text)
 
 
-# zone_types that carry per-zone copy via the panel_copy output field (structural_zones,
-# 2026-08-06 schema addition) - cta is deliberately excluded here: it's a single output
-# field, not a list, so it gets its own detector/clause below (_cta_zone/_cta_zone_clause).
-#
-# product_callout ADDED 2026-08-12 (Item 2): every product_callout zone used to receive
-# generate_image_prompt's bare product_name, unconditionally - confirmed live, ad
-# 1576971893931336: four callout zones with four genuinely distinct reference details
-# (thermogenic/energy/skin-tightening/nail-and-hair) all rendered the identical "Besque
-# Magic Body Oil", because nothing ever gave each zone its OWN copy to substitute. This
-# module's own per-zone machinery (text_zone_targets/_text_zone_copy_clause, and
-# generate_image_prompt._structural_zones_clause's position-keyed panel_copy lookup) was
-# already fully general - it needed zero structural changes, only this one zone type
-# added to the tuple it already iterates.
-_PANEL_COPY_ZONE_TYPES = ("sub_line", "body_copy", "product_callout")
-
-
-def text_zone_targets(blueprint):
-    """Every sub_line/body_copy/product_callout structural_zones entry in this reference,
-    each with its own position and its own detail describing what that specific zone
-    shows. Returns [] when there are none at all - callers must treat an empty list
-    as "nothing to target", never a target with nothing in it.
-
-    Renamed from comparison_panels (2026-08-11): that name and its old >=2 gate were
-    describing only the multi-panel comparison case (a two-panel before/after joke) -
-    but a reference with exactly ONE sub_line/body_copy zone has the identical problem
-    a comparison does (nothing tells Claude the zone exists or that content is needed for
-    it specifically), and generate_image_prompt._structural_zones_clause's own
-    panel_copy_by_position lookup already builds a position-keyed map generically from
-    however many entries panel_copy contains - it needed zero changes to support this.
-    Only the >=2 gate and the "MULTI-PANEL COMPARISON" wording were wrong for N=1; the
-    image-side plumbing was always general.
-
-    Detected here, not left to Claude to notice buried in the raw blueprint JSON - a real
-    live failure (2026-08-06, Grüns GLP-1 two-panel joke: problem panel left, outcome panel
-    right) had the model return byte-identical text in both panels, because nothing ever
-    told it a SECOND, DISTINCT piece of copy was expected at all. The N=1 case is the same
-    failure shape with N=1: a reference with a real sub_line/body_copy zone got a
-    generically-empty image_subtext because nothing ever told Claude that specific zone
-    existed and needed content, and the zone was removed as a result."""
-    zones = blueprint.get("structural_zones") or []
-    return [z for z in zones if z.get("zone_type") in _PANEL_COPY_ZONE_TYPES]
-
-
-def _text_zone_copy_clause(zones):
-    """Instruction text appended when text_zone_targets() finds at least one sub_line/
-    body_copy/product_callout zone - lists each zone's own position/detail so Claude
-    writes copy matching what THAT specific zone shows, rather than relying on a generic
-    image_subtext line to also happen to satisfy it. Position strings are echoed back
-    VERBATIM from the blueprint (not rephrased) so generate_image_prompt._structural_
-    zones_clause can match panel_copy entries back to the exact structural_zones entry
-    they belong to by position string. Works identically for exactly one zone or
-    several - the "never repeat" rule only has anything to bite on when there's more
-    than one to repeat against.
-
-    product_callout zones get an ADDITIONAL rule (2026-08-12, Item 2): the copy for
-    those specifically must be a benefit or property, never the product name - a
-    callout's job is to say what makes the product worth choosing, and the product's
-    own identity is already established elsewhere (rule 1/rule 4, the brand_wordmark
-    substitution). Stated once, only when at least one product_callout zone is present,
-    not duplicated per zone.
-
-    detail is redacted via _redact_personal_attribution (2026-08-13, item 2 sharpened)
-    before it is ever printed here - a zone's own detail can otherwise carry a
-    personal-name-shaped construct straight from the reference (see that function's
-    own docstring)."""
-    zone_lines = "\n".join(
-        f'  - position "{z.get("position", "")}" ({z.get("zone_type", "")}): the '
-        f'reference shows - {_redact_personal_attribution(z.get("detail", ""))}'
-        for z in zones
-    )
-    repeat_rule = (
-        " Every zone must get genuinely different wording matching its own described "
-        "content - never repeat the same phrase across zones, and never let one zone's "
-        "text describe what a DIFFERENT zone shows."
-    ) if len(zones) > 1 else ""
-    callout_rule = (
-        " For any zone of type product_callout specifically: its copy is a single "
-        "BENEFIT or PROPERTY (e.g. \"Fast-Absorbing\" or \"Deeply Hydrating\"), never "
-        "the product name and never the same phrase repeated across multiple callouts - "
-        "the product's own identity is established elsewhere in this image, this zone's "
-        "job is to say what makes it worth choosing."
-    ) if any(z.get("zone_type") == "product_callout" for z in zones) else ""
-    return (
-        "\n\nTEXT ZONE COPY (STRICT): this reference has "
-        f"{len(zones)} distinct sub_line/body_copy/product_callout zone(s) that need "
-        f"matching Besque copy, not the reference's own words, per the zone-specific "
-        f"detail below:\n{zone_lines}\n"
-        "Write ENTIRELY NEW sentences for every zone above: never reuse the reference's "
-        "own sentence structure, phrasing, or specific nouns/subjects it named - only "
-        "the JOB each zone is doing carries over, never its words. Any personal name, "
-        "initial-surname construction (e.g. \"Sean R.\"), handle, or signature is never "
-        "written into panel_copy under any circumstances, even if one appeared in the "
-        "detail above - the only personal attribution this copy may ever carry is the "
-        "one supplied in APPROVED TESTIMONIALS, and that never flows through this "
-        "field. "
-        "Also return an ADDITIONAL field, panel_copy: a list of EXACTLY "
-        f"{len(zones)} objects, one per zone above, each "
-        '{"position": "<the exact position string from the list above, verbatim>", '
-        '"text": "<a short line of Besque copy matching what THAT zone specifically '
-        f'shows>"}}.{repeat_rule}{callout_rule}'
-    )
-
-
-def _cta_zone(blueprint):
-    """The first cta-type structural_zones entry in this reference, or None. Unlike
-    sub_line/body_copy (which can be several, e.g. a two-panel comparison), COPY_PROMPT's
-    schema has a single `cta` output field to match - not a list - so this returns one
-    zone, never a collection, and there is no per-position matching needed the way
-    text_zone_targets/panel_copy has."""
-    zones = (blueprint or {}).get("structural_zones") or []
-    for z in zones:
-        if (z or {}).get("zone_type") == "cta":
-            return z
-    return None
-
-
-def _cta_zone_clause(cta_zone):
-    """Instruction text appended when _cta_zone() finds a real cta zone - names its
-    position/detail so Claude's own `cta` field supplies matching, non-empty wording
-    rather than a generic call-to-action that happens to also need to satisfy it. No new
-    output field - cta already exists in COPY_PROMPT's schema."""
-    if not cta_zone:
-        return ""
-    return (
-        "\n\nCTA ZONE (STRICT): this reference has a cta zone at position "
-        f"\"{cta_zone.get('position', '')}\" (the reference shows: "
-        f"{cta_zone.get('detail', '')}). Your own cta field must supply real, "
-        "action-oriented Besque wording for this zone - never left empty, and never the "
-        "reference's own label verbatim."
+# text_zone_targets/_text_zone_copy_clause/_cta_zone/_cta_zone_clause DELETED 2026-08-17:
+# their sole input, structural_zones, no longer exists (schema/blueprint.schema.json -
+# blueprint.objects replaces it). The per-zone-type copy precision they carried (a
+# DIFFERENT line of Besque copy per sub_line/body_copy/product_callout zone, matched
+# back to the image path by echoing the zone's own position string verbatim) has NO
+# equivalent in the objects model and was NOT restored - Stage 2 of the objects
+# restoration this session scoped product_callout down to a single substitution (the
+# bare Besque product name, via generate_image_prompt._substitute_object_line), not
+# per-callout benefit copy; see the handover report for this session. What WAS
+# restored is the narrower, still-load-bearing half of what these functions did:
+# telling generate_copy_live/validate_copy whether a real subtext/cta-shaped text block
+# exists in the reference at all, so an empty cta/image_subtext against one still fails
+# validation - see _has_text_purpose_object below, which replaces both existence checks
+# with one exact match against each object's own text_purpose.
+def _has_text_purpose_object(blueprint, purpose):
+    return any(
+        (obj or {}).get("kind") == "text" and (obj or {}).get("text_purpose") == purpose
+        for obj in (blueprint or {}).get("objects") or []
     )
 
 
@@ -405,73 +294,20 @@ def _used_copy_clause(used_headlines):
     )
 
 
-def _normalize_position(position):
-    """Lowercase/whitespace-collapse a position/placement string for comparison. Its
-    only caller, _dedupe_text_purpose_against_zones, was DELETED 2026-08-17 (see
-    _text_purpose_clause's docstring - text_purpose and structural_zones, the two
-    fields it reconciled, no longer exist). Left in place as a small, self-contained,
-    still-correct utility in case a future position-matching need reaches for it again,
-    rather than deleted and potentially rewritten from scratch."""
-    return re.sub(r"[\s\-_]+", " ", (position or "").strip().lower())
-
-
-def _text_purpose_clause(blueprint, zones=None):
-    """text_purpose consumption (2026-08-11 schema addition, Item 11): each reference
-    text block's FUNCTION (offer/testimonial/efficacy_claim/problem_hook/
-    product_description/cta/other), not its wording - read straight from the blueprint
-    like text_zone_targets/_cta_zone below, no new parameter needed since blueprint is
-    already passed to build_copy_prompt in full. The point: an offer-led reference must
-    produce offer-led Besque copy, a problem-hook reference must produce a problem-hook -
-    matching the FUNCTION the original text performed, never flattening every reference
-    into the same generic product description regardless of what job its text was doing.
-    This is a copy-path-only fix (unlike the image path, text-only prompt instructions
-    reliably bind here - see generate_copy's own compliance-check history) but it still
-    never grants permission beyond APPROVED CLAIMS/APPROVED TESTIMONIALS above: a
-    testimonial-purposed block tells the model the JOB a real testimonial would do here,
-    never license to fabricate one. Returns "" when text_purpose is empty or absent, so a
-    blueprint from before this field existed produces byte-for-byte the same prompt as
-    before this existed.
-
-    zones (2026-08-13, item 1) used to be build_copy_prompt's own text_zone_targets
-    (blueprint) result, passed in so this clause could drop any entry the now-deleted
-    _dedupe_text_purpose_against_zones identified as the SAME underlying text block
-    _text_zone_copy_clause already covers (2026-08-17: both text_purpose and
-    structural_zones, the two fields that dedup reconciled, no longer exist in
-    schema/blueprint.schema.json - blueprint.objects replaces them). Parameter kept,
-    now unused, so this function's signature doesn't change for its one caller.
-
-    text_verbatim is redacted via _redact_personal_attribution (item 2, sharpened) -
-    the reference's own wording can carry a personal-name-shaped construct (an
-    "attributed to X"/em-dash signature) inline, independent of testimonial_zones'
-    dedicated attribution field."""
-    entries = (blueprint or {}).get("text_purpose") or []
-    if not entries:
-        return ""
-    lines = "\n".join(
-        f'  - "{_redact_personal_attribution(e.get("text_verbatim", ""))}" '
-        f'(placement: {e.get("placement", "")}) served as: {e.get("purpose", "other")}'
-        for e in entries
-    )
-    return (
-        "\n\nCOMMUNICATIVE PURPOSE (STRICT): the reference ad's own text blocks each did a "
-        f"specific JOB, not just occupied space - here is what each one was actually "
-        f"doing:\n{lines}\n"
-        "Your Besque copy must accomplish the SAME job(s): an offer-led reference needs "
-        "offer-led Besque copy, a problem-hook reference needs a problem-hook, an "
-        "efficacy_claim reference needs a claim bounded by APPROVED CLAIMS/PRODUCT above, "
-        "a product_description reference needs product description. This names the JOB "
-        "only, never permission beyond what APPROVED CLAIMS/APPROVED TESTIMONIALS above "
-        "allow - a testimonial-purposed block is never fabricated here just because the "
-        "reference had one in that role. Never flatten every reference into generic "
-        "product description regardless of what job its original text was doing. Inherit "
-        "the JOB only, never the WORDING: write entirely new sentences for every job "
-        "above - never reuse the reference's own sentence structure, phrasing, or the "
-        "specific nouns/subjects it named, even when the job itself carries over exactly. "
-        "Any personal name, initial-surname construction (e.g. \"Sean R.\"), handle, or "
-        "signature appearing anywhere above must never appear in your output - the only "
-        "personal attribution this copy may ever carry is the one supplied in APPROVED "
-        "TESTIMONIALS, and nothing above is that."
-    )
+# _normalize_position/_text_purpose_clause DELETED 2026-08-17: their sole shared input,
+# the top-level text_purpose array, no longer exists (schema/blueprint.schema.json -
+# text_purpose is now a PER-OBJECT field on blueprint.objects, one classification word,
+# not a separate array of {text_verbatim, purpose, placement} entries with its own
+# wording to redact/quote). _text_purpose_clause's "communicative purpose" steering
+# (an offer-led reference should produce offer-led Besque copy, a problem-hook
+# reference a problem-hook) has no restored equivalent - it was a copy-QUALITY aid, not
+# a compliance mechanism (copy content stays bounded by APPROVED CLAIMS/TESTIMONIALS
+# regardless), and Stage 2 of the objects restoration this session scoped text_purpose
+# consumption to the disposition/substitution question only - see the handover report
+# for this session for why this was deleted rather than rebuilt against the new
+# per-object shape. _normalize_position had no other caller once
+# _dedupe_text_purpose_against_zones (its own sole caller) was deleted the same session
+# structural_zones was removed.
 
 
 def build_copy_prompt(blueprint, brand_voice="", approved_claims="", product=None,
@@ -500,29 +336,24 @@ def build_copy_prompt(blueprint, brand_voice="", approved_claims="", product=Non
     or any caller that doesn't pass it) leaves the prompt byte-identical to before this
     existed.
 
-    panel_copy (2026-08-06, generalised 2026-08-11) is appended the same additive way as
-    compliance_feedback below - present whenever text_zone_targets(blueprint) finds at
-    least one sub_line/body_copy zone (ANY count, not just 2+ - see that function's own
-    docstring for why the old >=2 "comparison" gate was too narrow). image_subtext's own
-    field description (see _image_subtext_field) drops its "empty string is fine"
-    permission for exactly this same condition, so the two can never disagree about
-    whether this reference has a zone that needs filling. A cta zone (see _cta_zone) gets
-    its own separate clause the same way - it's a single output field, not a list, so it
-    doesn't fit the panel_copy shape. Every ordinary reference with neither kind of zone
-    sees byte-for-byte the same prompt as before any of this existed.
+    image_subtext_field (see _image_subtext_field) drops its "empty string is fine"
+    permission whenever blueprint.objects has a real text_purpose=="subtext" object
+    (see _has_text_purpose_object) - REWIRED 2026-08-17, was gated on
+    text_zone_targets(blueprint) finding a sub_line/body_copy structural zone, which no
+    longer exists. generate_copy_live's own require_image_subtext/require_cta read the
+    identical _has_text_purpose_object check, so the prompt's own permission wording and
+    the mechanical validate_copy backstop can never disagree about whether this
+    reference has a zone that needs filling.
 
     blueprint=... below is passed through _redact_personal_attribution (item 2,
-    sharpened, 2026-08-13) - the raw blueprint dump is where testimonial_zones'
-    dedicated "attribution" field (the competitor's own testimonial name/handle,
-    verbatim) would otherwise reach Claude with no clause governing it at all, since
-    neither _text_zone_copy_clause nor _text_purpose_clause reads that field. One
-    redaction pass over the whole dumped JSON covers testimonial_zones.attribution and
-    any other current or future field with the same shape, rather than a per-field
-    filter that could miss one."""
-    zones = text_zone_targets(blueprint)
-    cta_zone = _cta_zone(blueprint)
+    sharpened, 2026-08-13) - the raw blueprint dump is where a reference-derived
+    object's own `description` (the competitor's own testimonial name/handle, wordmark
+    text, etc.) would otherwise reach Claude with no clause governing it at all. One
+    redaction pass over the whole dumped JSON covers this and any other current or
+    future field with the same shape, rather than a per-field filter that could miss
+    one."""
     prompt = COPY_PROMPT.format(
-        image_subtext_field=_image_subtext_field(bool(zones)),
+        image_subtext_field=_image_subtext_field(_has_text_purpose_object(blueprint, "subtext")),
         brand_voice=brand_voice or NO_BRAND_VOICE,
         approved_claims=approved_claims or NO_APPROVED_CLAIMS,
         approved_testimonials=approved_testimonials or NO_APPROVED_TESTIMONIALS,
@@ -532,11 +363,6 @@ def build_copy_prompt(blueprint, brand_voice="", approved_claims="", product=Non
         offer_clause=_offer_clause(offer_text),
         angle_language_clause=_angle_language_clause(angle_language),
     )
-    if zones:
-        prompt += _text_zone_copy_clause(zones)
-    if cta_zone:
-        prompt += _cta_zone_clause(cta_zone)
-    prompt += _text_purpose_clause(blueprint, zones)
     if used_headlines:
         prompt += _used_copy_clause(used_headlines)
     if compliance_feedback:
@@ -625,7 +451,7 @@ def _seasons_mentioned(text):
 
 def validate_copy(copy, require_cta=False, require_image_subtext=False):
     """require_cta/require_image_subtext (2026-08-11): mechanical backstop for the same
-    condition _cta_zone_clause/_image_subtext_field's prompt text already asks for - a
+    condition _image_subtext_field's prompt text already asks for - a
     prompt instruction alone is the exact pattern that has repeatedly failed on this
     codebase (see CLAUDE.md's top note). Before this, an empty cta already passed this
     function silently: REQUIRED_COPY_FIELDS only checks the KEY exists, never that its
@@ -724,9 +550,11 @@ def generate_copy_live(blueprint, brand_voice="", approved_claims="", product=No
 
     require_cta/require_image_subtext (2026-08-11) are derived from THIS SAME blueprint,
     once, here - never passed in by the caller - so the mechanical check in validate_copy
-    can never drift from what the prompt itself just asked for (_cta_zone_clause/
-    _image_subtext_field above read the identical _cta_zone(blueprint)/
-    text_zone_targets(blueprint)). A raised ValueError is caught by this function's OWN
+    can never drift from what the prompt itself just asked for (_image_subtext_field
+    above reads the identical _has_text_purpose_object(blueprint, "subtext") check).
+    REWIRED 2026-08-17: previously `bool(_cta_zone(blueprint))`/
+    `bool(text_zone_targets(blueprint))`, both structural_zones-based and now deleted -
+    see _has_text_purpose_object. A raised ValueError is caught by this function's OWN
     retry loop below exactly like any other validation failure - an empty cta/
     image_subtext against a real zone gets the same second attempt a malformed-JSON
     response would, no separate retry path invented for this."""
@@ -734,8 +562,8 @@ def generate_copy_live(blueprint, brand_voice="", approved_claims="", product=No
                                 approved_testimonials=approved_testimonials,
                                 compliance_feedback=compliance_feedback, offer_text=offer_text,
                                 angle_language=angle_language, used_headlines=used_headlines)
-    require_cta = bool(_cta_zone(blueprint))
-    require_image_subtext = bool(text_zone_targets(blueprint))
+    require_cta = _has_text_purpose_object(blueprint, "cta")
+    require_image_subtext = _has_text_purpose_object(blueprint, "subtext")
     client = anthropic.Anthropic(timeout=60.0, max_retries=1)  # reads ANTHROPIC_API_KEY from env
 
     total = len(_COPY_ATTEMPTS)

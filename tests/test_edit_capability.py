@@ -3,7 +3,6 @@ calls, zero DB calls: derive_edit_capabilities is a pure function of a plain dic
 every fixture here is hand-built, never fetched via dedupe.get_artifact_by_id."""
 from src.edit_capability import (
     derive_edit_capabilities, find_control, clamp_person_age, RULE_10_AGE_FLOOR,
-    get_brand_wordmark_zone,
 )
 
 
@@ -24,14 +23,6 @@ FULL_ARTIFACT = {
     "text_in_image": True,
     "element_provenance": {"product": "substituted"},
     "blueprint": {
-        "text_purpose": [
-            {"text_verbatim": "ref headline", "purpose": "problem_hook", "placement": "top-centre"},
-            {"text_verbatim": "ref cta", "purpose": "cta", "placement": "bottom"},
-        ],
-        "structural_zones": [
-            {"zone_type": "sub_line", "position": "mid-left", "container": "none", "detail": "d"},
-            {"zone_type": "cta", "position": "bottom", "container": "banner", "detail": "d"},
-        ],
         "face_present": {"has_face": True, "prominence": "primary", "location": "centre"},
         "objects": [
             {"object_id": "obj_01", "kind": "prop", "description": "wooden shelf",
@@ -42,14 +33,27 @@ FULL_ARTIFACT = {
              "bbox": [0.3, 0.4, 0.2, 0.2], "colours": [], "ownership": "person",
              "role": "supporting_prop", "carries_brand_mark": False,
              "persuasive_function": "holding bottle", "disposition": "keep"},
+            {"object_id": "obj_03", "kind": "text", "description": "ref headline",
+             "bbox": [0.1, 0.02, 0.8, 0.1], "colours": ["white"], "ownership": "competitor_branded",
+             "role": "hero", "carries_brand_mark": False,
+             "persuasive_function": "hooks the reader", "disposition": "substitute",
+             "text_purpose": "headline"},
+            {"object_id": "obj_04", "kind": "text", "description": "ref cta",
+             "bbox": [0.35, 0.9, 0.3, 0.08], "colours": ["white"], "ownership": "competitor_branded",
+             "role": "secondary", "carries_brand_mark": False,
+             "persuasive_function": "call to action", "disposition": "substitute",
+             "text_purpose": "cta"},
+            {"object_id": "obj_05", "kind": "text", "description": "ref sub-line",
+             "bbox": [0.15, 0.15, 0.7, 0.08], "colours": ["white"], "ownership": "competitor_branded",
+             "role": "secondary", "carries_brand_mark": False,
+             "persuasive_function": "supports the headline", "disposition": "substitute",
+             "text_purpose": "subtext"},
         ],
         "layout_detail": {
-            "product_count": 1, "background_type": "bathroom counter",
-            "has_corner_badge": True, "has_bottom_banner": True,
+            "product_count": 1, "has_corner_badge": True, "has_bottom_banner": True,
         },
-        "visual": {
-            "scene_lighting": {"light_direction": "left", "hardness": "soft", "colour_temperature": "warm"},
-        },
+        "background": {"surface": "bathroom counter", "colour": "white",
+                       "light": "soft warm light from the left"},
         "typography": {"headline_face": "serif", "headline_weight": "bold", "case_treatment": "title case"},
     },
 }
@@ -108,10 +112,7 @@ EMPTY_ARTIFACT = {
     "offer_text": None,
     "text_in_image": False,
     "blueprint": {
-        "text_purpose": [],
-        "structural_zones": [],
         "face_present": {"has_face": False, "prominence": "none", "location": ""},
-        "scene_elements": [],
         "layout_detail": {},
     },
 }
@@ -139,14 +140,17 @@ PARTIAL_ARTIFACT = {
     "text_in_image": False,
     "element_provenance": {"product": "substituted"},
     "blueprint": {
-        "text_purpose": [{"text_verbatim": "x", "purpose": "cta", "placement": "bottom"}],
-        "structural_zones": [],
         "face_present": {"has_face": False, "prominence": "none", "location": ""},
         "objects": [
             {"object_id": "obj_01", "kind": "person", "description": "bare hand",
              "bbox": [0.4, 0.5, 0.2, 0.2], "colours": [], "ownership": "person",
              "role": "supporting_prop", "carries_brand_mark": False,
              "persuasive_function": "applying oil", "disposition": "keep"},
+            {"object_id": "obj_02", "kind": "text", "description": "ref cta",
+             "bbox": [0.35, 0.9, 0.3, 0.08], "colours": [], "ownership": "competitor_branded",
+             "role": "secondary", "carries_brand_mark": False,
+             "persuasive_function": "call to action", "disposition": "substitute",
+             "text_purpose": "cta"},
         ],
         "layout_detail": {"product_count": 2},
     },
@@ -173,8 +177,7 @@ def test_product_count_zero_yields_no_product_control():
     artifact = {
         "generated_copy": {}, "offer_text": None,
         "element_provenance": {"product": "substituted"},
-        "blueprint": {"text_purpose": [], "structural_zones": [], "scene_elements": [],
-                       "face_present": {"has_face": False}, "layout_detail": {"product_count": 0}},
+        "blueprint": {"face_present": {"has_face": False}, "layout_detail": {"product_count": 0}},
     }
     assert find_control(derive_edit_capabilities(artifact), "product", "placement") is None
 
@@ -187,8 +190,7 @@ def _artifact_with(product_count, provenance_product, include_product=None):
         "generated_copy": {}, "offer_text": None,
         "include_product": include_product,
         "element_provenance": {"product": provenance_product} if provenance_product is not None else {},
-        "blueprint": {"text_purpose": [], "structural_zones": [], "scene_elements": [],
-                      "face_present": {"has_face": False},
+        "blueprint": {"face_present": {"has_face": False},
                       "layout_detail": {"product_count": product_count}},
     }
 
@@ -276,15 +278,14 @@ def test_product_realism_and_placement_controls_coexist_as_distinct_controls():
     assert find_control(controls, "product", "realism") is not None
 
 
-def test_headline_present_but_no_text_purpose_structure_is_omitted():
+def test_headline_present_but_no_headline_shaped_object_is_omitted():
     # Fail-closed rule stated explicitly in the spec: "No copy column value and no
     # matching text_purpose entry -> no Headline control." Here the copy VALUE exists
-    # but blueprint carries no text_purpose entries at all.
+    # but blueprint carries no objects at all.
     artifact = {
         "generated_copy": {"headline": "Some Besque headline"},
         "offer_text": None,
-        "blueprint": {"text_purpose": [], "structural_zones": [], "scene_elements": [],
-                       "face_present": {"has_face": False}, "layout_detail": {}},
+        "blueprint": {"face_present": {"has_face": False}, "layout_detail": {}},
     }
     assert find_control(derive_edit_capabilities(artifact), "headline", "text") is None
 
@@ -319,8 +320,22 @@ def test_clamp_person_age_numeric_age_above_floor_not_clamped():
     assert "55" in resolved
 
 
-# ---- Headline/subtext gating: text_in_image + a genuinely headline-shaped
-# text_purpose entry, not "any entry at all" (the bug fixed 2026-08-14) ----
+# ---- Headline/subtext gating: text_in_image + a real objects[].text_purpose=="headline"
+# entry, not "any text_purpose value at all" (the bug fixed 2026-08-14, now structurally
+# impossible - "other"/"testimonial" are distinct enum values that never equal
+# "headline") ----
+
+def _text_obj(object_id, text_purpose, description="ref text", **overrides):
+    base = {
+        "object_id": object_id, "kind": "text", "description": description,
+        "bbox": [0.1, 0.1, 0.6, 0.1], "colours": [], "ownership": "competitor_branded",
+        "role": "secondary", "carries_brand_mark": False,
+        "persuasive_function": "reference text", "disposition": "substitute",
+        "text_purpose": text_purpose,
+    }
+    base.update(overrides)
+    return base
+
 
 def test_generic_text_in_image_off_with_copy_present_yields_no_headline_or_subtext(monkeypatch=None):
     # copy exists, text_in_image is explicitly off - the general case the fix must cover
@@ -329,8 +344,7 @@ def test_generic_text_in_image_off_with_copy_present_yields_no_headline_or_subte
         "generated_copy": {"headline": "Some Besque headline", "image_subtext": "Some subtext"},
         "offer_text": None, "text_in_image": False,
         "blueprint": {
-            "text_purpose": [{"text_verbatim": "x", "purpose": "problem_hook", "placement": "top"}],
-            "structural_zones": [], "scene_elements": [],
+            "objects": [_text_obj("obj_01", "headline"), _text_obj("obj_02", "subtext")],
             "face_present": {"has_face": False}, "layout_detail": {},
         },
     }
@@ -339,28 +353,24 @@ def test_generic_text_in_image_off_with_copy_present_yields_no_headline_or_subte
     assert find_control(controls, "subtext", "text") is None
 
 
-def test_artifact_1251_shape_text_in_image_true_but_no_headline_shaped_zone_yields_no_headline():
+def test_artifact_1251_shape_text_in_image_true_but_no_headline_shaped_object_yields_no_headline():
     # Real shape found live on artifact 1251, 2026-08-14: text_in_image=True,
-    # generated_copy.headline populated, but text_purpose entries are only "other"
-    # (the COMPETITOR's own wordmark/tagline text) and "testimonial" - never anything
-    # headline-shaped. The image never actually rendered the headline; the old "any
-    # text_purpose entry" gate wrongly offered the control anyway.
+    # generated_copy.headline populated, but the reference's only text objects are
+    # "other"-purposed (the COMPETITOR's own wordmark/tagline text) and "testimonial" -
+    # never anything headline-shaped. The image never actually rendered the headline;
+    # the old "any text_purpose entry" gate wrongly offered the control anyway.
     artifact = {
         "generated_copy": {"headline": "Summer is calling, feel ready for it",
                             "image_subtext": "Step into summer feeling at home in your skin."},
         "offer_text": None, "text_in_image": True,
         "blueprint": {
-            "text_purpose": [
-                {"text_verbatim": "Crépe Erase®", "purpose": "other", "placement": "top-centre"},
-                {"text_verbatim": "by THE BODY FIRM™", "purpose": "other", "placement": "top-centre, directly below brand name"},
-                {"text_verbatim": "I'm excited about the summer.", "purpose": "testimonial", "placement": "mid-centre"},
-                {"text_verbatim": "Cherie, 55", "purpose": "testimonial", "placement": "centre, below quote"},
+            "objects": [
+                _text_obj("obj_01", "other", description="Crépe Erase®", disposition="drop"),
+                _text_obj("obj_02", "other", description="by THE BODY FIRM™", disposition="drop"),
+                _text_obj("obj_03", "testimonial", description="I'm excited about the summer.",
+                          disposition="drop"),
             ],
-            "structural_zones": [
-                {"zone_type": "brand_wordmark", "position": "top-centre", "container": "none", "detail": "BESQUE wordmark"},
-                {"zone_type": "social_proof", "position": "mid-centre", "container": "none", "detail": "quote"},
-            ],
-            "scene_elements": [], "face_present": {"has_face": False}, "layout_detail": {},
+            "face_present": {"has_face": False}, "layout_detail": {},
         },
     }
     controls = derive_edit_capabilities(artifact)
@@ -368,12 +378,11 @@ def test_artifact_1251_shape_text_in_image_true_but_no_headline_shaped_zone_yiel
     assert find_control(controls, "subtext", "text") is None
 
 
-def test_headline_shaped_purpose_with_text_in_image_true_yields_control():
+def test_headline_shaped_object_with_text_in_image_true_yields_control():
     artifact = {
         "generated_copy": {"headline": "Real headline"}, "offer_text": None, "text_in_image": True,
         "blueprint": {
-            "text_purpose": [{"text_verbatim": "x", "purpose": "problem_hook", "placement": "top"}],
-            "structural_zones": [], "scene_elements": [],
+            "objects": [_text_obj("obj_01", "headline")],
             "face_present": {"has_face": False}, "layout_detail": {},
         },
     }
@@ -414,18 +423,11 @@ def test_object_remove_controls_have_no_wordmark_exclusion_by_design():
     assert ("object", "obj_02") in targets
 
 
-def test_get_brand_wordmark_zone_finds_it_by_zone_type():
-    blueprint = {"structural_zones": [
-        {"zone_type": "brand_wordmark", "position": "top-centre", "container": "none", "detail": "d"},
-    ]}
-    zone = get_brand_wordmark_zone(blueprint)
-    assert zone is not None
-    assert zone["position"] == "top-centre"
-
-
-def test_get_brand_wordmark_zone_none_when_absent():
-    assert get_brand_wordmark_zone({"structural_zones": []}) is None
-
+# get_brand_wordmark_zone DELETED 2026-08-17 along with structural_zones - see
+# generate_image_prompt._brand_wordmark_protection_clause, which no longer calls it and
+# always uses its own generic fallback wording now. No replacement: blueprint.objects
+# describes the COMPETITOR reference, never the drafted image, so Besque's own wordmark
+# position (ADDED by brand_rules() rule 9) was never something this schema could name.
 
 # ---- current_value must render as text, never a nested object ("[object Object]") ----
 

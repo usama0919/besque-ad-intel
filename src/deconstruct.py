@@ -53,6 +53,18 @@ The JSON must have exactly these fields:
       "carries_brand_mark": true/false - true if this object itself visibly shows a reproducible brand mark, logo, or wordmark (even if its `kind` isn't "logo" - e.g. a product bottle with the competitor's name printed on its own label carries a brand mark too), false otherwise,
       "persuasive_function": what this object exists to DO in the ad's argument, in one short phrase, e.g. "the hero product being sold", "proves social validation via a real customer's words", "names the advertiser",
       "disposition": one of substitute/keep/drop - your best judgement of whether this object should be replaced with a Besque equivalent, kept as-is, or removed entirely when this reference is cloned for Besque. This is a STARTING POINT only - a separate mechanical check overrides this for any competitor-owned or brand-marked object regardless of what you choose here, so judge honestly rather than trying to predict the override.
+      "text_purpose": REQUIRED when kind is "text", omit entirely for every other kind. One of headline/subtext/cta/offer/certification/testimonial/price_anchor/award/disclaimer/product_callout/other - the JOB this specific text block does, not its wording:
+        headline = the ad's main hook/attention line.
+        subtext = a supporting line or body copy beneath the headline.
+        cta = a call-to-action button label or link text.
+        offer = a discount, promo code, scarcity/stock-count claim, or urgency wording (e.g. "20% OFF", "Only 100 left").
+        certification = a badge or line naming a certification/standard the product holds (e.g. "Vegan", "Cruelty Free", "Dermatologist Tested").
+        testimonial = a customer quote or review, with or without a star rating or name.
+        price_anchor = a shown price, or a was/now price comparison.
+        award = an award, "as seen in" press mention, editorial accolade, or third-party endorsement line (e.g. "by THE BODY FIRM").
+        disclaimer = legal, regulatory, or medical fine print, or an asterisked footnote.
+        product_callout = a short benefit or property label pointing at the product, distinct from the headline (e.g. an icon + "Fast-Absorbing").
+        other = any other discrete text block that genuinely fits none of the above - use sparingly, only when no other value honestly applies.
     }}
 - semantic_split (object): REQUIRED - this key must ALWAYS be present. {{ "is_split": true/false, "split_axis": "vertical" or "horizontal" or null, "left_or_before": free text describing what that side/panel depicts, "right_or_after": free text describing what the other side/panel depicts }}. is_split is true whenever the image is visually divided into two comparable panels or halves - a before/after, a side-by-side comparison, a split-screen. When is_split is false, split_axis is null and both left_or_before and right_or_after are "". For a genuine before/after ad, the two sides MUST be described as materially DIFFERENT states (e.g. left_or_before: "dry, crepey skin with visible fine lines"; right_or_after: "smooth, hydrated skin with visible firmness") - recording both sides as showing the same condition is a failure, since the contrast between them is the entire point of the format.
 - production_style (object): REQUIRED - this key must ALWAYS be present. {{ "style": one of {production_style_options}, "confidence": high/medium/low, "signals": array of short phrases justifying the choice }}
@@ -124,10 +136,17 @@ class BlueprintValidationError(ValueError):
 #
 # Scoped to exactly the three blueprint fields TRACED to actually reach assembled prompt
 # text as free text (not every field that merely exists):
-#   - product_category.signals[] - quoted VERBATIM into _competitor_props_clause's
-#     removal instruction when a signal also matches a PROP_KEYWORD.
-#   - visual.subject - the ONE place this field is read at all in prompt construction
-#     (_competitor_props_clause again); every other consumer deliberately avoids it.
+#   - product_category.signals[] - previously quoted VERBATIM into
+#     generate_image_prompt._competitor_props_clause's removal instruction when a signal
+#     also matched a PROP_KEYWORD; that clause was deleted 2026-08-17 (folded into
+#     resolve_disposition/_is_competitor_argument_prop below, which matches against an
+#     object's own description/persuasive_function instead) - this field no longer
+#     reaches assembled prompt text at all, but the filter stays: content_safety.py's
+#     hard-block check and the dashboard's blueprint display both still read it, and
+#     bottle-shape language has no legitimate reason to survive in either.
+#   - visual.subject - no longer read anywhere in prompt construction at all (its one
+#     former reader, _competitor_props_clause, is deleted); kept filtered for the same
+#     display-surface reason as product_category.signals above.
 #   - layout_detail.zone_positions[] - folded into _scene_composition_facts' "OBSERVED
 #     SCENE COMPOSITION" sentence (product ADD placement) and drift_check's product zone
 #     bbox - both meant to be POSITION-only, per deconstruct's own field description
@@ -207,6 +226,72 @@ def strip_bottle_shape_language(blueprint):
     return blueprint, filtered
 
 
+# COMPETITOR ARGUMENT PROPS (2026-08-17, folded in from the now-deleted
+# generate_image_prompt._competitor_props_clause): a prop tied to the COMPETITOR's own
+# product category (an applicator diagram, an anatomical inset, a device illustration)
+# has no Besque equivalent regardless of how the model scored its `ownership` - a plain
+# roller or dropper tool reads as "generic" ownership (it isn't itself branded) but
+# still only exists to make the competitor's own argument, so it must never survive as
+# a "kept" prop. This used to be a SEPARATE clause in generate_image_prompt.py, matched
+# against product_category.signals/visual.subject with no coordination against this
+# function's own ownership-based override - two independent systems could disagree
+# about the same prop's fate. Folded into resolve_disposition instead, matched against
+# the object's own description/persuasive_function, so there is exactly one mechanism
+# deciding every object's fate, never two.
+_PROP_KEYWORDS = ("diagram", "illustration", "device", "applicator", "inset",
+                   "anatomical", "prop stand", "wand", "roller", "dropper tool")
+
+
+def _is_competitor_argument_prop(obj):
+    if obj.get("kind") != "prop":
+        return False
+    text = f"{obj.get('description') or ''} {obj.get('persuasive_function') or ''}".lower()
+    return any(kw in text for kw in _PROP_KEYWORDS)
+
+
+# TEXT_PURPOSE DISPOSITION MAP (2026-08-17): mirrors the per-zone-type substitution
+# rules the deleted generate_image_prompt._structural_zones_clause used to encode (see
+# git history immediately before the objects-array refactor) - restored here as the
+# mechanical disposition decision, one purpose at a time. Every value here is either
+# unconditional (award/disclaimer always drop; product_callout/headline/subtext/cta
+# always substitute - Besque always has a name/generated-copy line to put there) or
+# gated on a real, supplied Besque value in `context` (offer/price_anchor/
+# certification/testimonial: substitute only when the run actually authorised one,
+# drop otherwise - never left for Gemini to invent a number, cert, or quote it wasn't
+# given).
+_TEXT_PURPOSE_ALWAYS_DROP = {"award", "disclaimer"}
+_TEXT_PURPOSE_ALWAYS_SUBSTITUTE = {"headline", "subtext", "cta", "product_callout"}
+_TEXT_PURPOSE_CONTEXT_GATED = {
+    "offer": "offer_text", "price_anchor": "offer_text",
+    "certification": "certifications", "testimonial": "testimonial",
+}
+
+
+def _resolve_text_disposition(obj, context, is_branded):
+    """The text_purpose-driven half of resolve_disposition, below - kept as its own
+    function so the branded/non-branded call sites can both reach it without
+    duplicating the purpose map. `is_branded` is passed in (never recomputed here) so
+    this can never drift from the same ownership/carries_brand_mark check every other
+    kind already uses.
+
+    Missing/unrecognised text_purpose (a legacy object predating this field, or a
+    genuinely malformed one) falls back to the object's own model-assigned disposition,
+    same as any other kind - back-compat for the ~300 existing rows this schema
+    addition does not retroactively touch, never a guessed purpose."""
+    purpose = obj.get("text_purpose")
+    if purpose in _TEXT_PURPOSE_ALWAYS_DROP:
+        return "drop"
+    if purpose in _TEXT_PURPOSE_ALWAYS_SUBSTITUTE:
+        return "substitute"
+    gate_key = _TEXT_PURPOSE_CONTEXT_GATED.get(purpose)
+    if gate_key is not None:
+        return "substitute" if context.get(gate_key) else "drop"
+    # purpose == "other", or no purpose recorded at all.
+    if is_branded:
+        return "drop"
+    return obj.get("disposition")
+
+
 # OBJECT DISPOSITION ENFORCEMENT (2026-08-17): mechanical, not prompt-only. The vision
 # prompt above already asks the model to judge substitute/keep/drop for itself ("a
 # STARTING POINT only - a separate mechanical check overrides this... judge honestly
@@ -217,9 +302,26 @@ def strip_bottle_shape_language(blueprint):
 # than any other prompt-only rule. resolve_disposition is the function that actually
 # decides, run over every object AFTER the vision call, unconditionally overriding
 # whatever the model wrote.
-def resolve_disposition(obj):
+def resolve_disposition(obj, context=None):
     """Mechanical override of one object's `disposition` - never trusts the model's own
-    guess for a competitor-owned or brand-marked object.
+    guess for a competitor-owned or brand-marked object, or for a text object whose
+    text_purpose mechanically determines the answer (2026-08-17, restoring the
+    per-zone-type rules the deleted structural_zones/_structural_zones_clause used to
+    encode - see the objects-array refactor commit for what replaced them).
+
+    context (2026-08-17) carries the Besque-side facts this run actually has available
+    to substitute WITH - {"offer_text": str|None, "certifications": list|None,
+    "testimonial": dict|None}. Deliberately passed in by the caller, never read from a
+    DB here: this function stays a pure, unit-testable function of its two arguments,
+    same discipline the original version already established for `obj` alone. None
+    (the default) is treated as "nothing supplied" - every context-gated purpose
+    (offer/price_anchor/certification/testimonial) resolves to "drop" in that case,
+    which is exactly correct for the ONE call site that has no run-specific context yet
+    (deconstruct_from_response, at blueprint-creation time, before any operator has
+    chosen a per-run offer/testimonial) and gets RE-RESOLVED with the real context at
+    generation time by generate_image_prompt._objects_clause - see that function's own
+    docstring for why a single deconstruct-time resolution can never be the final
+    answer for these three purposes.
 
     ownership == "competitor_branded" (this specific item visibly belongs to the
     competitor - their product, their logo, their own packaging or on-image copy) OR
@@ -227,29 +329,48 @@ def resolve_disposition(obj):
     of its `kind`) can NEVER resolve to "keep": a competitor's own branded content
     surviving into a Besque draft is exactly the compliance/trademark exposure this
     codebase's rule 9 (brand_rules) already treats as the single most-proven failure
-    class. Of those, a product-kind object SUBSTITUTES - Besque has a real product to
-    put in its place. Every other kind (a competitor's logo, a competitor-branded prop,
-    a block of the competitor's own on-image copy) DROPS - there is no Besque
-    equivalent for a logo or a rival's own sentence to substitute in, only remove.
+    class.
+
+    For kind == "text", ownership/carries_brand_mark alone no longer decide substitute
+    vs. drop - text_purpose does (see _resolve_text_disposition), and every purpose in
+    _TEXT_PURPOSE_ALWAYS_SUBSTITUTE/_TEXT_PURPOSE_CONTEXT_GATED already never resolves
+    to "keep" by construction, so branding can never smuggle a "keep" through those. The
+    one purpose that COULD still fall through to "keep" ("other", or no purpose
+    recorded) is explicitly forced to "drop" here when the object is branded - "ownership
+    rules still win, whatever the text_purpose says."
+
+    For every other kind: a product-kind object SUBSTITUTES - Besque has a real product
+    to put in its place. Every other kind (a competitor's logo, a competitor-branded
+    prop, a block of the competitor's own on-image copy) DROPS - there is no Besque
+    equivalent for a logo or a rival's own sentence to substitute in, only remove. A
+    prop tied to the competitor's own product-category argument drops too, even when
+    its ownership reads as "generic" - see _is_competitor_argument_prop.
 
     "maps to a Besque product" (the task's own phrasing for the substitute condition)
     is resolved here as `kind == "product"` - this pipeline runs against exactly one
     product category at a time (the operator's selected product for the run), so any
     product-kind object in a same-category reference is assumed substitutable; there is
     no per-object category-matching signal in this schema to check more precisely than
-    that, and this function deliberately takes only `obj` - no blueprint, product
-    table, or DB lookup - so it stays a pure, unit-testable function.
+    that.
 
-    Every other object (ownership in generic/besque/person, not brand-mark-carrying)
-    passes through with whatever disposition the model assigned, completely unchanged -
-    this function only ever narrows a competitor-owned object AWAY from "keep", never
-    invents a "keep" the model didn't already choose, and never touches an object that
-    was never a compliance risk to begin with."""
+    Every other object (ownership in generic/besque/person, not brand-mark-carrying,
+    not a competitor-argument prop) passes through with whatever disposition the model
+    assigned, completely unchanged - this function only ever narrows an object AWAY
+    from "keep", never invents a "keep" the model didn't already choose, and never
+    touches an object that was never a compliance risk to begin with."""
+    context = context or {}
     ownership = obj.get("ownership")
     carries_brand_mark = bool(obj.get("carries_brand_mark"))
-    if ownership == "competitor_branded" or carries_brand_mark:
+    is_branded = ownership == "competitor_branded" or carries_brand_mark
+
+    if obj.get("kind") == "text":
+        return _resolve_text_disposition(obj, context, is_branded)
+
+    if is_branded:
         if obj.get("kind") == "product":
             return "substitute"
+        return "drop"
+    if _is_competitor_argument_prop(obj):
         return "drop"
     return obj.get("disposition")
 

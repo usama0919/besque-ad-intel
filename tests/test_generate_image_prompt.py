@@ -418,31 +418,31 @@ def test_rule10_no_longer_hardcodes_an_ad_id():
 # contradicted by the reproduce-faithfully language later in the same prompt (the same
 # failure shape already fixed for PERSON/competitor-branding/prop-scale) ----
 
-def test_non_carryover_exceptions_clause_excepts_competitor_elements():
-    assert "COMPETITOR ELEMENTS TO SUBSTITUTE" in generate_image_prompt._non_carryover_exceptions_clause()
+def test_non_carryover_exceptions_clause_excepts_scene_objects():
+    # 2026-08-17: repointed at the SCENE OBJECTS inventory (_objects_clause), which
+    # subsumed the deleted "COMPETITOR ELEMENTS TO SUBSTITUTE" instruction this
+    # exception used to name - a dangling reference to a deleted clause is exactly the
+    # contradiction class this codebase has repeatedly hit (see CLAUDE.md).
+    clause = generate_image_prompt._non_carryover_exceptions_clause()
+    assert "SCENE OBJECTS" in clause
+    assert "COMPETITOR ELEMENTS TO SUBSTITUTE" not in clause
 
 
-def test_edit_mode_opening_excepts_competitor_elements_both_retheme_branches():
+def test_edit_mode_opening_excepts_scene_objects_both_retheme_branches():
     on = generate_image_prompt._edit_mode_instruction(retheme_colours=True)
     off = generate_image_prompt._edit_mode_instruction(retheme_colours=False)
-    assert "COMPETITOR ELEMENTS TO SUBSTITUTE" in on
-    assert "COMPETITOR ELEMENTS TO SUBSTITUTE" in off
+    assert "SCENE OBJECTS" in on
+    assert "SCENE OBJECTS" in off
+    assert "COMPETITOR ELEMENTS TO SUBSTITUTE" not in on
+    assert "COMPETITOR ELEMENTS TO SUBSTITUTE" not in off
 
 
-# ---- Contradiction check vs _competitor_props_clause (2026-08-13): the two clauses
-# have different actions (remove-only vs substitute) and no shared identity key, so a
-# same-named object could in principle trigger both - _competitor_props_clause now
-# states an explicit precedence for that case. ----
-
-def test_competitor_props_clause_defers_to_illustrated_elements_substitution():
-    bp = {
-        "product_category": {"signals": ["an anatomical diagram of the digestive tract"]},
-        "visual": {},
-    }
-    clause = generate_image_prompt._competitor_props_clause(bp)
-    assert "PROPS (STRICT)" in clause
-    assert "UNLESS this same element is also named in the COMPETITOR ELEMENTS TO SUBSTITUTE" in clause
-    assert "that instruction governs instead" in clause
+# ---- _competitor_props_clause DELETED 2026-08-17: folded into
+# deconstruct.resolve_disposition (_is_competitor_argument_prop) instead - a prop
+# tied to the competitor's own product-category argument now drops via the object's
+# own mechanically-resolved disposition, the same single mechanism as every other
+# object, never a second uncoordinated clause layered on top. See
+# tests/test_objects_schema.py for the replacement coverage. ----
 
 
 def test_build_image_prompt_default_closing_text_unchanged():

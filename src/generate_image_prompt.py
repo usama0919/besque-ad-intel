@@ -5,7 +5,7 @@ import math
 import os
 import re
 from PIL import Image, ImageDraw
-from src import assets, generate_image_prompt_writer
+from src import assets, deconstruct, generate_image_prompt_writer
 from src.compliance_rules import COMPLIANCE_RULES
 
 IMAGE_MODEL = os.getenv("IMAGE_MODEL", "placeholder-image-model")
@@ -13,57 +13,18 @@ IMAGE_MODEL = os.getenv("IMAGE_MODEL", "placeholder-image-model")
 log = logging.getLogger("generate_image_prompt")
 
 
-# SUBSTITUTION AS ONE RULE, props row (2026-08-07): a prop belonging to the COMPETITOR's
-# own product category (an applicator diagram, an anatomical inset, a device illustration)
-# has no Besque equivalent and must be removed WITH the competitor's product, never
-# preserved as background composition. Proven live: a real draft kept a leftover eye-
-# diagram prop (from a competitor eye-gel reference) standing next to the substituted
-# Besque bottle - nothing keyed off product_category.signals/visual.subject at all, so the
-# prop had no removal hook, unlike the product itself which always does.
-PROP_KEYWORDS = ("diagram", "illustration", "device", "applicator", "inset",
-                 "anatomical", "prop stand", "wand", "roller", "dropper tool")
-
-
-def _competitor_props_clause(blueprint):
-    """Scans product_category.signals and visual.subject (both already extracted by
-    deconstruct.py - no new model call) for language naming a prop tied to the
-    COMPETITOR's own product category, quoted back verbatim in the removal instruction so
-    the model sees exactly what was flagged, never a paraphrase. Returns "" when nothing
-    matches (the ordinary case for most references) - never a guessed prop.
-
-    Edit-mode only: this reads signals about what the ATTACHED reference image literally
-    shows, and only edit mode attaches that image to Gemini at all - generate mode's
-    writer/template text has no equivalent literal-pixel-copy risk to guard against here.
-
-    Precedence sentence (2026-08-13, checked while ungating _illustrated_elements_clause
-    from style=="illustrated"): that clause substitutes a competitor-argument element
-    with a replacement; this clause removes a PROP_KEYWORDS-matched prop outright, with
-    no replacement. The two inputs (a keyword hit in free text here, a structured
-    scene_elements.depicts_competitor_category flag there) have no shared identity key,
-    so the SAME physical object could in principle match both (e.g. an "eye-diagram"
-    contains "diagram") - concrete objects checked for this fix (chain, padlock, donut,
-    weight-loss label) don't match any PROP_KEYWORD, so no overlap exists today, but the
-    precedence is stated explicitly below so a future overlap resolves to substitution,
-    not a contradiction between "remove, never redraw" and "replace with X.\""""
-    blueprint = blueprint or {}
-    candidates = list((blueprint.get("product_category") or {}).get("signals") or [])
-    subject = (blueprint.get("visual") or {}).get("subject")
-    if subject:
-        candidates.append(subject)
-    matches = [c for c in candidates if any(kw in c.lower() for kw in PROP_KEYWORDS)]
-    if not matches:
-        return ""
-    quoted = "; ".join(f'"{m}"' for m in matches)
-    return (
-        f"PROPS (STRICT): the reference's own scene includes a prop belonging to the "
-        f"COMPETITOR's product category, not Besque's - {quoted}. Remove it WITH the "
-        f"competitor's product; it is not part of the composition to preserve, and must "
-        f"never be redrawn, kept as a background element, or left standing next to the "
-        f"substituted Besque product - UNLESS this same element is also named in the "
-        f"COMPETITOR ELEMENTS TO SUBSTITUTE instruction elsewhere in this prompt, in "
-        f"which case that instruction governs instead: substitute it per that "
-        f"instruction rather than simply removing it. "
-    )
+# _competitor_props_clause / PROP_KEYWORDS DELETED 2026-08-17: this used to scan
+# product_category.signals/visual.subject for a prop tied to the competitor's own
+# product category (an applicator diagram, an anatomical inset) and emit its own
+# separate removal instruction - a second, uncoordinated mechanism deciding the same
+# object's fate that resolve_disposition already owns per-object (a real prop is now
+# always its own `objects` row, with a real ownership/disposition). Folded into
+# deconstruct.resolve_disposition instead (see _is_competitor_argument_prop there) -
+# one mechanism now decides every object's fate, never two that could disagree about
+# the same prop. See the handover report for this session for why this was deleted
+# rather than repointed at objects: the objects model already covers this case more
+# precisely (a real bounding box, a real ownership judgement) than a keyword scan over
+# two loosely-related free-text fields ever did.
 
 
 def resolve_product_count(reference_count, operator_count, default_count=1):
@@ -112,49 +73,50 @@ def reference_has_text_zone(blueprint):
     reference can have a product but no text, text but no product, both, or neither.
 
     Public for the same reason as reference_has_product above - pipeline.py's pool-badge
-    detection reads this exact derivation, never a re-implementation of it."""
+    detection reads this exact derivation, never a re-implementation of it.
+
+    REWIRED 2026-08-17: structural_zones no longer exists (schema/blueprint.schema.json -
+    blueprint.objects replaces it, see _objects_clause). A "text-bearing zone" is now any
+    kind=="text" object whose text_purpose is headline/subtext/cta - the same three
+    purposes the deleted structural_zones' sub_line/body_copy/cta zone_types used to mean,
+    named more precisely now that text_purpose classifies by JOB rather than a generic
+    sub_line/body_copy split."""
     blueprint = blueprint or {}
     if (blueprint.get("headline_verbatim") or "").strip():
         return True
-    text_zone_types = {"sub_line", "body_copy", "cta"}
+    return _objects_have_text_purpose(blueprint.get("objects"), _TEXT_PURPOSE_ZONE_TYPES)
+
+
+# _TEXT_PURPOSE_ZONE_TYPES/_TEXT_PURPOSE_OFFER_TYPES/_objects_have_text_purpose
+# (2026-08-17): the objects-array replacement for the deleted _structural_zones_have_offer/
+# OFFER_BADGE_KEYWORDS keyword-matching - text_purpose already classifies a text object as
+# "offer"/"price_anchor" mechanically (see deconstruct.py's BLUEPRINT_PROMPT), so there is
+# no longer any free-text detail to guess an offer shape from; the classification IS the
+# signal, not a keyword proxy for it.
+_TEXT_PURPOSE_ZONE_TYPES = ("headline", "subtext", "cta")
+_TEXT_PURPOSE_OFFER_TYPES = ("offer", "price_anchor")
+
+
+def _objects_have_text_purpose(objects, purposes):
     return any(
-        (z or {}).get("zone_type") in text_zone_types
-        for z in (blueprint.get("structural_zones") or [])
+        (obj or {}).get("kind") == "text" and (obj or {}).get("text_purpose") in purposes
+        for obj in (objects or [])
     )
 
 
-def _structural_zones_have_offer(structural_zones):
-    """Core of reference_has_offer_zone below, operating on an already-extracted
-    structural_zones list rather than a full blueprint - lets _edit_mode_instruction
-    (2026-08-11) reuse the identical check on the structural_zones it already receives as
-    its own parameter, without needing the whole blueprint threaded to it separately."""
-    for z in (structural_zones or []):
-        zt = (z or {}).get("zone_type")
-        if zt == "price_anchor":
-            return True
-        if zt == "badge" and _is_offer_shaped_zone(z.get("detail")):
-            return True
-    return False
-
-
 def reference_has_offer_zone(blueprint):
-    """True when the reference blueprint shows a structural zone that actually CARRIES an
-    offer - a price_anchor (a price shown as its own graphic element is inherently
-    offer-shaped, no keyword check needed) or a badge whose own detail reads as
-    offer/discount-shaped (see _is_offer_shaped_zone/OFFER_BADGE_KEYWORDS below - same
-    keyword set _structural_zones_clause already uses to decide whether a badge
-    substitutes with offer_text or gets removed, so this can never disagree with what
-    actually renders).
+    """True when the reference blueprint shows a text object that actually CARRIES an
+    offer - text_purpose "offer" or "price_anchor" (see deconstruct.py's BLUEPRINT_PROMPT
+    for what each means).
 
     Added 2026-08-11 for clone mode (pipeline.py) - deciding whether THIS ad's per-ad
     config should carry the operator's offer_text at all, before build_image_prompt ever
-    runs, rather than only gating it once inside _structural_zones_clause's own per-zone
-    branch. Same public/no-leading-underscore convention as reference_has_product/
+    runs. Same public/no-leading-underscore convention as reference_has_product/
     reference_has_text_zone above - pipeline.py reads this directly, no reimplementation.
 
-    Thin wrapper over _structural_zones_have_offer (added same day) - kept as the public
-    blueprint-taking entry point so pipeline.py's existing call sites are unaffected."""
-    return _structural_zones_have_offer((blueprint or {}).get("structural_zones") or [])
+    REWIRED 2026-08-17: structural_zones/_structural_zones_have_offer/
+    OFFER_BADGE_KEYWORDS no longer exist - see _objects_have_text_purpose above."""
+    return _objects_have_text_purpose((blueprint or {}).get("objects"), _TEXT_PURPOSE_OFFER_TYPES)
 
 
 def resolve_effective_include_product(blueprint, include_product, edit_mode):
@@ -388,6 +350,19 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
             "place any Besque product, bottle, or branding anywhere in this setting. "
         )
 
+    # objects_context (2026-08-17): the real Besque-side values THIS run has to
+    # substitute a text-purposed object with - see _objects_clause's own docstring.
+    # Built once here, reused identically across all three branches below, so an offer/
+    # certification/testimonial/cta object is judged against the SAME facts regardless
+    # of which branch renders the prompt.
+    objects_context = {
+        "offer_text": offer_text,
+        "certifications": (product or {}).get("certifications"),
+        "testimonial": testimonial,
+        "cta_text": cta_text,
+        "product_name": (product or {}).get("name"),
+    }
+
     if text_in_image:
         closing = (
             "Render exactly the headline and supporting text specified in rule 6 above as "
@@ -424,7 +399,7 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
              if effective_include_product else "") +
             _operator_instruction_clause(operator_instruction) +
             _critic_feedback_clause(critic_feedback) +
-            _objects_clause(blueprint.get("objects")) +
+            _objects_clause(blueprint.get("objects"), objects_context) +
             _semantic_split_clause(blueprint.get("semantic_split")) +
             # include_product here is the RAW operator toggle - identical to
             # effective_include_product since the 2026-08-07 reference usability gate
@@ -444,7 +419,7 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
                                    cta_text=cta_text, product_name=(product or {}).get("name"),
                                    panel_copy=panel_copy, testimonial=testimonial,
                                    certifications=(product or {}).get("certifications"),
-                                   competitor_props_clause=_competitor_props_clause(blueprint),
+                                   objects=blueprint.get("objects"),
                                    face_present=blueprint.get("face_present"),
                                    clone_mode=clone_mode) +
             # product_clause already omits its own PLACEMENT sentence when
@@ -469,7 +444,7 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
              if effective_include_product else "") +
             _operator_instruction_clause(operator_instruction) +
             _critic_feedback_clause(critic_feedback) +
-            _objects_clause(blueprint.get("objects")) +
+            _objects_clause(blueprint.get("objects"), objects_context) +
             _semantic_split_clause(blueprint.get("semantic_split")) +
             creative_description.strip() + " "
             + product_clause
@@ -485,7 +460,7 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
              if effective_include_product else "") +
             _operator_instruction_clause(operator_instruction) +
             _critic_feedback_clause(critic_feedback) +
-            _objects_clause(blueprint.get("objects")) +
+            _objects_clause(blueprint.get("objects"), objects_context) +
             _semantic_split_clause(blueprint.get("semantic_split")) +
             f"A premium skincare advertisement image for Besque, a natural body-oil brand for women 40+. "
             f"Composition and setting: {layout}. (If this implies a person, render them per compliance "
@@ -779,14 +754,98 @@ _OBJECT_CLOSURE_SENTENCE = (
 )
 
 
-def _objects_clause(objects=None):
+def _substitute_object_line(obj, kind, text_purpose, description, context):
+    """The SUBSTITUTE line for one object whose (re-)resolved disposition is
+    "substitute" - dispatches on text_purpose (2026-08-17 restoration of the deleted
+    _structural_zones_clause's per-zone-type rules) for a kind=="text" object with a
+    recognised purpose, kind=="product" for the bottle (deferred to BOTTLE IDENTITY/
+    GEOMETRY, unchanged from before this restoration), and a generic fallback for
+    everything else (a non-text prop/logo/graphic being substituted, or a legacy text
+    object with no text_purpose recorded at all - back-compat, byte-for-byte the
+    original generic wording).
+
+    context supplies the actual Besque-side values to substitute WITH - see
+    _objects_clause's own docstring for its shape. A purpose whose value is missing
+    this run (no cta_text produced, e.g.) renders as an explicit removal instead of a
+    substitution with nothing to put there - never an empty or invented value."""
+    if kind == "product":
+        return (
+            "SUBSTITUTE: this position held a competitor product - place the "
+            "Besque product here instead, at the same position and scale. Its "
+            "identity (shape, proportions, colours, label) comes ONLY from the "
+            "BOTTLE IDENTITY and BOTTLE GEOMETRY clauses above, never from this "
+            "object's own colours or description."
+        )
+    if text_purpose in ("offer", "price_anchor"):
+        offer_text = context.get("offer_text")
+        return (
+            f"SUBSTITUTE: this reads as the reference's offer/price element "
+            f"(\"{description}\") - replace its content with this run's authorised "
+            f"offer: \"{offer_text}\" - same position, shape, and size, never a "
+            f"different number, percentage, or term, and never the competitor's own "
+            f"price or amount."
+        )
+    if text_purpose == "certification":
+        cert_list = ", ".join(context.get("certifications") or [])
+        return (
+            f"SUBSTITUTE: this reads as a certification element (\"{description}\") - "
+            f"replace its content with Besque's own real certifications: {cert_list} - "
+            f"never a certification Besque doesn't actually hold."
+        )
+    if text_purpose == "testimonial":
+        testimonial = context.get("testimonial") or {}
+        quote = testimonial.get("quote", "")
+        attribution = testimonial.get("attribution") or "a verified customer"
+        return (
+            f"SUBSTITUTE: this reads as a customer testimonial (\"{description}\") - "
+            f"replace with this REAL customer review, rendered EXACTLY as given, never "
+            f"reworded, shortened, or invented: \"{quote}\" — attributed to "
+            f"{attribution}. No star rating, age, or timeframe unless the review text "
+            f"itself states one."
+        )
+    if text_purpose == "product_callout":
+        product_name = context.get("product_name") or "Besque"
+        return (
+            f"SUBSTITUTE: this reads as a product callout (\"{description}\") - "
+            f"replace its content with the Besque product name, \"{product_name}\" - "
+            f"never a benefit claim not already authorised elsewhere in this prompt."
+        )
+    if text_purpose in ("headline", "subtext"):
+        return (
+            f"SUBSTITUTE: this is the ad's {text_purpose} text (\"{description}\") - "
+            f"its exact wording is governed entirely by the TEXT POLICY (rule 6) and "
+            f"the TEXT instruction elsewhere in this prompt, never restated or "
+            f"reinvented here."
+        )
+    if text_purpose == "cta":
+        cta_text = context.get("cta_text")
+        if cta_text:
+            return (
+                f"SUBSTITUTE: this is the ad's call-to-action (\"{description}\") - "
+                f"replace its label with \"{cta_text}\" - same position and shape, our "
+                f"words only, never the reference's own label."
+            )
+        return (
+            f"ABSENT: no call-to-action wording was authorised for this run - the "
+            f"{description} that appeared here is REMOVED, not left as an empty "
+            f"button; close the space naturally with the surrounding surface."
+        )
+    return (
+        f"SUBSTITUTE: replace this {kind or 'object'} "
+        f"(\"{description}\") with Besque's own equivalent content, in the "
+        f"same position - aligned with this ad's authorised copy/offer "
+        f"elsewhere in this prompt where relevant, never inventing a new claim."
+    )
+
+
+def _objects_clause(objects=None, context=None):
     """2026-08-17: REPLACES _scene_elements_clause/_illustrated_elements_clause -
     deconstruct.py no longer produces scene_elements at all (schema/blueprint.schema.json),
     every visually distinct thing in the reference is now one entry in blueprint.objects,
     each carrying its own disposition (substitute/keep/drop) already mechanically resolved
     by deconstruct.resolve_disposition BEFORE this function ever sees it - this function
-    never re-judges ownership/brand-marking itself, it only phrases whatever disposition
-    is already on the object.
+    never re-judges ownership/brand-marking itself for a non-text object, it only phrases
+    whatever disposition is already on the object.
 
     One line per object, grouped by disposition into a single STRICT clause, followed
     UNCONDITIONALLY by _OBJECT_CLOSURE_SENTENCE verbatim, last - the direct fix for
@@ -795,27 +854,28 @@ def _objects_clause(objects=None):
     only what to include/substitute, which left "is there anything else I could add"
     open by omission.
 
+    context (2026-08-17, restoring the per-zone-type rules the deleted
+    _structural_zones_clause used to encode) is {"offer_text", "certifications",
+    "testimonial", "cta_text", "product_name"} - the real Besque-side values THIS run
+    actually has to substitute with. None (the default) is treated as "nothing
+    supplied", same as deconstruct.resolve_disposition's own default.
+
     - keep: reproduced exactly as shown, unchanged - the analogue of the old
       MUST-INCLUDE list, but for every object the resolved disposition says to keep,
       not only ones flagged essential.
-    - substitute, kind=="product": explicitly deferred to BOTTLE IDENTITY/BOTTLE
-      GEOMETRY above rather than restating this object's own colours/shape - the same
-      "identity comes from the fixed clauses, never from what the reference itself
-      shows" principle _bottle_geometry_source_clause already establishes, applied at
-      the object level so a competitor's own product proportions can never leak in via
-      this clause instead.
-    - substitute, any other kind: a deliberately GENERIC instruction - replace with
-      Besque's own equivalent content, never inventing a new claim. This schema has no
-      zone-type-specific taxonomy (offer/badge/certification/testimonial/price/
-      disclaimer are no longer distinct types) - the old _structural_zones_clause's
-      per-type substitution business logic (fill an offer badge with offer_text, a
-      certification badge with real certifications, a testimonial with a real review,
-      remove an award badge unconditionally, etc.) has NO equivalent here. That
-      precision is a real, deliberate loss against the old system, not an oversight -
-      see CLAUDE.md/the handover report for this session.
+    - substitute: dispatched by kind/text_purpose - see _substitute_object_line.
     - drop: named as ABSENT, not silently omitted - the object's own description is
-      quoted so the model knows exactly what must not appear, same "name what to
-      remove" pattern _competitor_props_clause already uses.
+      quoted so the model knows exactly what must not appear.
+
+    A kind=="text" object with a real text_purpose has its disposition RE-RESOLVED here
+    via deconstruct.resolve_disposition(obj, context), never trusted from the object's
+    own stored `disposition` field - that field was resolved once at deconstruct time,
+    with NO run-specific context (no operator has chosen an offer/testimonial for a run
+    that doesn't exist yet at deconstruct time), so an offer/certification/testimonial
+    purpose stored as "drop" must be re-checked against what THIS run actually
+    authorised before it's trusted. A text object with no text_purpose at all (a legacy
+    blueprint predating this field) falls back to its stored disposition unchanged -
+    back-compat, never re-resolved against a purpose that doesn't exist.
 
     Returns "" when objects is empty/absent (a legacy blueprint predating this schema,
     or a blueprint with a genuinely empty list, which schema validation should never
@@ -823,30 +883,22 @@ def _objects_clause(objects=None):
     objects = objects or []
     if not objects:
         return ""
+    context = context or {}
     lines = []
     for obj in objects:
         obj = obj or {}
-        disposition = obj.get("disposition")
+        kind = obj.get("kind")
+        text_purpose = obj.get("text_purpose") if kind == "text" else None
+        disposition = (
+            deconstruct.resolve_disposition(obj, context) if text_purpose
+            else obj.get("disposition")
+        )
         description = (obj.get("description") or obj.get("object_id") or "object").strip()
         role = obj.get("role") or ""
         if disposition == "keep":
             lines.append(f"KEEP: {description} ({role}) - reproduce exactly as shown, unchanged.")
         elif disposition == "substitute":
-            if obj.get("kind") == "product":
-                lines.append(
-                    "SUBSTITUTE: this position held a competitor product - place the "
-                    "Besque product here instead, at the same position and scale. Its "
-                    "identity (shape, proportions, colours, label) comes ONLY from the "
-                    "BOTTLE IDENTITY and BOTTLE GEOMETRY clauses above, never from this "
-                    "object's own colours or description."
-                )
-            else:
-                lines.append(
-                    f"SUBSTITUTE: replace this {obj.get('kind') or 'object'} "
-                    f"(\"{description}\") with Besque's own equivalent content, in the "
-                    f"same position - aligned with this ad's authorised copy/offer "
-                    f"elsewhere in this prompt where relevant, never inventing a new claim."
-                )
+            lines.append(_substitute_object_line(obj, kind, text_purpose, description, context))
         elif disposition == "drop":
             lines.append(
                 f"ABSENT: the {description} that appeared here is REMOVED - it must not "
@@ -1111,36 +1163,16 @@ def _suppressed_container_exception(suppressing_text, suppressing_offer, suppres
     )
 
 
-# Every zone_type in deconstruct.py's schema now has a real substitute-or-remove branch
-# below - there is no longer a catch-all "no Besque value exists for this type" set.
-# disclaimer is the one deliberate exception: it always removes, in its own branch below,
-# because its removal carries an extra rule the others don't (any pointing asterisk/
-# footnote marker must go with it - 2026-08-06, Grüns GLP-1 leak).
-
-# OFFER_BADGE_KEYWORDS (2026-08-07): still live via _structural_zones_have_offer/
-# reference_has_offer_zone below (pipeline.py's clone_mode offer-carrying decision) -
-# _is_award_shaped_badge/_is_cert_shaped_badge/_is_stat_shaped_zone and the per-zone-type
-# badge substitution logic that used to consume this alongside them were deleted
-# 2026-08-17 with _structural_zones_clause (schema/blueprint.schema.json no longer has
-# structural_zones at all; blueprint.objects replaces it, see _objects_clause) - that
-# per-zone-type precision (award vs. offer vs. certification badge, each substituted or
-# removed by its own rule) has no equivalent in the objects model, a real, deliberate
-# loss of capability; see the handover report for this session.
-OFFER_BADGE_KEYWORDS = ("%", "off", "save", "discount", "sale", "deal", "promo", "price")
-
-# Word-boundary matching (2026-08-11) - plain substring matching on OFFER_BADGE_KEYWORDS
-# let "off" match inside "official"/"offering", "sale" inside "salesperson", etc. \b only
-# makes sense around actual word characters, so "%" (never part of a word) keeps plain
-# substring matching - it can't have this false-positive problem in the first place.
-_OFFER_BADGE_PATTERN = re.compile(
-    "|".join(kw if kw == "%" else rf"\b{re.escape(kw)}\b" for kw in OFFER_BADGE_KEYWORDS),
-    re.IGNORECASE,
-)
-
-
-def _is_offer_shaped_zone(detail):
-    return bool(_OFFER_BADGE_PATTERN.search(detail or ""))
-
+# OFFER_BADGE_KEYWORDS/_OFFER_BADGE_PATTERN/_is_offer_shaped_zone DELETED 2026-08-17:
+# this keyword-matching over a zone's free-text `detail` existed only to GUESS whether a
+# structural_zones badge was offer-shaped, for _structural_zones_have_offer/
+# reference_has_offer_zone above. text_purpose now classifies a text object as "offer"/
+# "price_anchor" directly at deconstruct time (see BLUEPRINT_PROMPT), so there is no
+# longer any free text to guess a shape from - _objects_have_text_purpose above reads the
+# classification itself. _is_award_shaped_badge/_is_cert_shaped_badge/_is_stat_shaped_zone
+# and the per-zone-type badge substitution logic that used to consume this alongside them
+# were deleted 2026-08-17 with _structural_zones_clause (schema/blueprint.schema.json no
+# longer has structural_zones at all; blueprint.objects replaces it, see _objects_clause).
 
 # _structural_zones_clause and _typography_zones_clause DELETED 2026-08-17: their sole
 # input fields (structural_zones, typography_zones) no longer exist in
@@ -1561,15 +1593,15 @@ def _non_carryover_exceptions_clause():
     also silently re-asserting "carries over exactly" against the product-count
     composition-adaptation instruction stated in the product branches above.
 
-    A FOURTH exception is added 2026-08-13 (item 2 redesign): the same catch-all was
-    ALSO silently re-asserting "carries over exactly" against the illustrated-elements
-    substitution clause (_illustrated_elements_clause, which runs earlier in the
-    assembled prompt than this one) - a drawn steak/spoon/hair-strand is exactly a
-    "non-person element" this clause otherwise demands survive, directly contradicting
-    an instruction to substitute it. Confirmed by reading the whole function before
-    building this: `opening`'s own "which non-person elements appear must still carry
-    over" sentence had the identical gap - see that sentence's own fourth exception,
-    added in the same audit.
+    A FOURTH exception was added 2026-08-13 (item 2 redesign) for the now-deleted
+    illustrated-elements substitution clause - REPOINTED 2026-08-17 at the SCENE
+    OBJECTS inventory (_objects_clause), which subsumed it: that clause runs earlier in
+    the assembled prompt than this one and already states substitute/keep/drop for
+    EVERY object individually, including any drawn prop making the competitor's
+    argument. A dangling reference to a deleted clause name is exactly the
+    referring-to-a-missing-instruction contradiction class this codebase has hit
+    repeatedly (see CLAUDE.md's guardrails note) - fixed by repointing at the clause
+    that actually replaced it, never by leaving the old name in place.
 
     Called fresh each time rather than cached as a module constant so a future
     exception can be added without hunting for five call sites to update by hand -
@@ -1585,9 +1617,9 @@ def _non_carryover_exceptions_clause():
         "the scale of any prop, holder, float, or opening sized for the reference's own "
         "product - that adapts to fit the substituted Besque bottle's real, fixed "
         "proportions instead, never the reverse (see the product instruction above), "
-        "and EXCEPT any element named in the COMPETITOR ELEMENTS TO SUBSTITUTE "
-        "instruction above, where one applies - those are substituted per that "
-        "instruction, never carried over unchanged just because they are otherwise "
+        "and EXCEPT any object given a substitute or drop disposition in the SCENE "
+        "OBJECTS inventory above - those are substituted or removed per that "
+        "inventory, never carried over unchanged just because they are otherwise "
         "part of the scene"
     )
 
@@ -1599,7 +1631,7 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
                             substance_colour=None, style=None, scene_lighting=None,
                             cta_text=None, product_name=None,
                             panel_copy=None, testimonial=None, certifications=None,
-                            competitor_props_clause="", face_present=None,
+                            objects=None, face_present=None,
                             clone_mode=False):
     """EDIT MODE (2026-08-01): Gemini receives the competitor's own ad as an input image
     Part, not just a text description of it - the reference image IS the creative brief,
@@ -1736,21 +1768,21 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
     # pattern this codebase has repeatedly found unreliable (see the top of CLAUDE.md).
     # On a reference with no real offer-shaped zone, Gemini invented one - a live "20%
     # OFF" badge with nothing in the reference to substitute into. When clone_mode is on,
-    # offer_text used to be EFFECTIVELY present here only if this reference actually had a
-    # real offer-shaped structural_zones entry (_structural_zones_have_offer).
+    # offer_text is EFFECTIVELY present here only if this reference actually has a real
+    # offer-shaped object (text_purpose "offer"/"price_anchor" - see
+    # _objects_have_text_purpose/_TEXT_PURPOSE_OFFER_TYPES).
     #
-    # ORPHANED 2026-08-17: structural_zones no longer exists (schema/blueprint.schema.json
-    # - blueprint.objects replaces it) and this function no longer receives it as a
-    # parameter, so that check has no signal to read for a new blueprint. Rather than
-    # guess an equivalent from `objects` (no field here maps cleanly to "is this
-    # specifically an offer-shaped zone"), this now ALWAYS resolves to False under
-    # clone_mode - a real behaviour change: clone_mode's offer carry-through is
-    # unconditionally suppressed now, never just when the reference lacks an offer zone.
-    # Deliberately the SAFER direction (never renders an offer that might not be
-    # authorised) rather than a guessed heuristic that could reintroduce the exact
-    # invented-offer-badge bug this mechanism exists to prevent. clone_mode=False (the
-    # default) is unaffected: offer_text's own truthiness is still the only gate.
-    effective_offer_text = offer_text if not clone_mode else None
+    # REWIRED 2026-08-17 (was ORPHANED, always False under clone_mode - structural_zones
+    # no longer exists): the objects-array refactor's own text_purpose classification is
+    # exactly the "is this specifically an offer-shaped zone" signal the old
+    # structural_zones-based check needed and, at the time, had no equivalent for -
+    # text_purpose now IS that signal, more precisely than the old zone_type/keyword
+    # combination ever was. clone_mode=False (the default) is unaffected: offer_text's
+    # own truthiness is still the only gate.
+    effective_offer_text = (
+        offer_text if not clone_mode
+        else (offer_text if _objects_have_text_purpose(objects, _TEXT_PURPOSE_OFFER_TYPES) else None)
+    )
     suppressing_offer = not effective_offer_text
     # Always True: the EFFICACY CLAIMS clause below bans efficacy-claim wording
     # unconditionally (no approved_claims threading to images exists), so an
@@ -1783,8 +1815,8 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             "product the reference shows - see rule 9 above, which governs those and "
             "overrides this carry-over instruction entirely, regardless of how broadly "
             "\"which non-person elements appear\" might otherwise be read - NOR to any "
-            "element named in the COMPETITOR ELEMENTS TO SUBSTITUTE instruction "
-            "above, where one applies, which is substituted per that instruction rather "
+            "object given a substitute or drop disposition in the SCENE OBJECTS "
+            "inventory above, which is substituted or removed per that inventory rather "
             "than carried over unchanged. "
             + exception_clause +
             f"At the same time, every hue in the scene (background, props, "
@@ -1809,13 +1841,12 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             "line) or the competitor's own product/packaging anywhere in frame, "
             "including a SECOND product the reference shows - see rule 9 above, which "
             "governs those and overrides this reproduce instruction entirely - NOR to "
-            "any element named in the COMPETITOR ELEMENTS TO SUBSTITUTE "
-            "instruction above, where one applies, which is substituted per that "
-            "instruction rather than reproduced unchanged. "
+            "any object given a substitute or drop disposition in the SCENE OBJECTS "
+            "inventory above, which is substituted or removed per that inventory "
+            "rather than reproduced unchanged. "
             + exception_clause
         )
     opening += _register_clause(style, scene_lighting)
-    opening += competitor_props_clause or ""
 
     if include_product and reference_has_product and style == "illustrated":
         name = product_name or "Besque"
@@ -2036,20 +2067,17 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
         )
 
     eff_headline, eff_subtext = effective_authorised_text(text_in_image, headline, subtext)
-    # cta_text/panel_copy/testimonial/certifications (2026-08-17): ORPHANED parameters,
-    # kept on this function's signature only because build_image_prompt/generate_image/
-    # pipeline.py still pass real values through for them - removing them here would
-    # cascade into those callers' own signatures for no benefit. They are UNUSED below.
-    # Their sole consumer was _structural_zones_clause's per-zone-type substitution
-    # logic (fill an offer badge with offer_text, a certification badge with real
-    # certifications, a social_proof/single_quote zone with a real testimonial review,
-    # a sub_line/body_copy/cta zone with panel_copy) - deleted along with
-    # structural_zones/typography_zones (schema/blueprint.schema.json no longer has
-    # them; blueprint.objects replaces them, see _objects_clause). That per-zone-type
-    # precision (offer vs. certification vs. testimonial vs. price vs. disclaimer, each
-    # substituted or removed by its own rule) has NO equivalent in the objects model -
-    # a real, deliberate loss of capability, not an oversight; see the handover report
-    # for this session.
+    # cta_text/testimonial/certifications (2026-08-17): UNUSED in this function
+    # specifically, but no longer dead - their per-purpose substitution logic (fill an
+    # offer object with offer_text, a certification object with real certifications, a
+    # testimonial object with a real review, a cta object with cta_text) now lives in
+    # _objects_clause/_substitute_object_line (restoring what the deleted
+    # _structural_zones_clause used to do per zone_type, now driven by each object's own
+    # text_purpose) - build_image_prompt calls _objects_clause separately, earlier in the
+    # assembled prompt, with the same values via its own `objects_context`. panel_copy
+    # remains genuinely unused (no per-zone panel-copy generation was restored - see
+    # generate_copy.py's own handover notes for why) but is kept on this signature for
+    # the same reason as before: removing it would cascade into callers for no benefit.
     if eff_headline:
         # The exact headline/subtext wording is stated ONCE, by rule 6's TEXT POLICY
         # above - this function must reference that authorisation, never re-quote the
@@ -2913,20 +2941,21 @@ def _brand_wordmark_protection_clause(blueprint):
     """ALWAYS appended to a targeted-edit instruction, regardless of what's being
     edited - never target the brand wordmark rule (2026-08-14). Live failure: editing
     artifact 1251's "headline" (whose current_value didn't actually exist in the
-    pixels - see edit_capability._has_headline_shaped_text_purpose's own comment)
-    caused Gemini to overwrite the BESQUE wordmark region instead of leaving it alone.
-    Named by its own recorded position when a structural_zones brand_wordmark entry
-    exists (src.edit_capability.get_brand_wordmark_zone), so the constraint points at a
-    real location rather than a vague generality; falls back to a generic statement
-    when no such zone is recorded, since the rule must hold either way."""
-    from src import edit_capability
-    zone = edit_capability.get_brand_wordmark_zone(blueprint or {})
-    if zone:
-        return (
-            f" The brand wordmark at position \"{zone.get('position', '')}\" must NEVER be "
-            "modified, replaced, resized, moved, or removed by this edit, regardless of "
-            "the instruction above - it is not eligible for editing under any target."
-        )
+    pixels) caused Gemini to overwrite the BESQUE wordmark region instead of leaving it
+    alone.
+
+    `blueprint` is accepted but unused (2026-08-17): this used to name the wordmark's
+    own recorded position when a structural_zones brand_wordmark entry existed
+    (src.edit_capability.get_brand_wordmark_zone) - that field/function no longer
+    exist (schema/blueprint.schema.json - blueprint.objects replaces structural_zones),
+    and there is no equivalent to rewire it to: blueprint.objects describes the
+    COMPETITOR reference, never the drafted image, and Besque's own wordmark is never
+    one of its rows - it is ADDED by brand_rules() rule 9, not tracked as an object
+    here. Always falls back to the generic statement now, which is byte-for-byte what
+    every call already produced in practice, since get_brand_wordmark_zone had already
+    stopped finding anything (structural_zones never populated on a new blueprint)
+    before this parameter was ever removed. Kept on the signature so this function's
+    one caller doesn't need to change."""
     return (
         " The brand wordmark/logo, wherever it appears in the image, must NEVER be "
         "modified, replaced, resized, moved, or removed by this edit, regardless of the "

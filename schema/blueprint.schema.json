@@ -78,8 +78,15 @@
           "disposition": {
             "type": "string",
             "enum": ["substitute", "keep", "drop"]
+          },
+          "text_purpose": {
+            "type": "string",
+            "enum": ["headline", "subtext", "cta", "offer", "certification", "testimonial",
+                     "price_anchor", "award", "disclaimer", "product_callout", "other"]
           }
-        }
+        },
+        "if": { "properties": { "kind": { "const": "text" } } },
+        "then": { "required": ["text_purpose"] }
       }
     },
     "cta": { "type": "string" },

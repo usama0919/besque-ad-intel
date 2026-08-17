@@ -281,303 +281,86 @@ def test_generate_copy_live_forwards_used_headlines_to_prompt(monkeypatch):
     assert "Prior sub" in captured["prompt"]
 
 
-# ---- text_zone_targets / panel_copy (2026-08-06, Grüns GLP-1 leak: a two-panel before/
-# after joke rendered the SAME headline text in both panels; renamed and regated from
-# comparison_panels' old >=2-only gate on 2026-08-11) ----
+# ---- _has_text_purpose_object (2026-08-17): the objects-array replacement for the
+# deleted text_zone_targets/_cta_zone - text_purpose is now a per-object field
+# (schema/blueprint.schema.json), not a separate structural_zones/text_purpose array,
+# so there is one exact-match helper instead of two structural-zone detectors. The
+# per-zone-type COPY generation these used to drive (a DIFFERENT panel_copy line per
+# sub_line/body_copy/product_callout zone, a dedicated CTA ZONE clause quoting the
+# reference's own detail) has NO restored equivalent - see generate_copy.py's own
+# handover comment for why this was scoped down rather than rebuilt. What survives is
+# the narrower, load-bearing half: knowing whether a real subtext/cta-shaped text block
+# exists at all, so validate_copy's mechanical backstop and image_subtext's own field
+# permission still track reality. ----
 
-def _comparison_blueprint():
-    return {
-        "angle": "loose skin",
-        "structural_zones": [
-            {"zone_type": "sub_line", "position": "upper-left-mid", "container": "none",
-             "detail": "negative outcome - hair loss"},
-            {"zone_type": "sub_line", "position": "upper-right-mid", "container": "none",
-             "detail": "positive outcome - keeping hair"},
-        ],
-    }
-
-
-def test_text_zone_targets_absent_for_ordinary_blueprint():
-    assert generate_copy.text_zone_targets({"angle": "x"}) == []
-
-
-def test_text_zone_targets_returns_single_sub_line():
-    """Renamed/regated 2026-08-11: a single sub_line is no longer treated as "nothing to
-    target" - it has the identical problem a comparison does (nothing tells Claude the
-    zone exists or that content is needed for it), and the image-side panel_copy lookup
-    already handles one entry exactly like several."""
-    bp = {"structural_zones": [
-        {"zone_type": "sub_line", "position": "top-center", "detail": "a tagline"},
-    ]}
-    zones = generate_copy.text_zone_targets(bp)
-    assert len(zones) == 1
-    assert zones[0]["position"] == "top-center"
+def _text_obj(purpose, **overrides):
+    base = {"kind": "text", "text_purpose": purpose, "object_id": "obj_x",
+            "description": "reference text", "disposition": "substitute"}
+    base.update(overrides)
+    return base
 
 
-def test_text_zone_targets_detected_for_two_sub_lines():
-    zones = generate_copy.text_zone_targets(_comparison_blueprint())
-    assert len(zones) == 2
-    assert {z["position"] for z in zones} == {"upper-left-mid", "upper-right-mid"}
+def test_has_text_purpose_object_false_for_ordinary_blueprint():
+    assert generate_copy._has_text_purpose_object({"angle": "x"}, "subtext") is False
+    assert generate_copy._has_text_purpose_object({"objects": []}, "cta") is False
 
 
-def test_text_zone_targets_counts_body_copy_too():
-    bp = {"structural_zones": [
-        {"zone_type": "sub_line", "position": "left", "detail": "before"},
-        {"zone_type": "body_copy", "position": "right", "detail": "after"},
-    ]}
-    assert len(generate_copy.text_zone_targets(bp)) == 2
+def test_has_text_purpose_object_true_when_present():
+    bp = {"objects": [_text_obj("subtext")]}
+    assert generate_copy._has_text_purpose_object(bp, "subtext") is True
+    assert generate_copy._has_text_purpose_object(bp, "cta") is False
 
 
-def test_text_zone_targets_ignores_cta_and_other_zone_types():
-    """cta gets its own separate detector/clause (_cta_zone/_cta_zone_clause) - it must
-    never count toward the sub_line/body_copy total, which only the one real sub_line
-    zone here should contribute to."""
-    bp = {"structural_zones": [
-        {"zone_type": "sub_line", "position": "left", "detail": "before"},
-        {"zone_type": "cta", "position": "bottom", "detail": "shop now"},
-    ]}
-    zones = generate_copy.text_zone_targets(bp)
-    assert len(zones) == 1
-    assert zones[0]["zone_type"] == "sub_line"
+def test_has_text_purpose_object_ignores_non_text_kind():
+    # A prop/logo/graphic object could in principle carry a stray text_purpose key by
+    # caller error - only kind=="text" counts, matching deconstruct.py's own schema
+    # (text_purpose is only ever populated for kind=="text").
+    bp = {"objects": [{"kind": "prop", "text_purpose": "cta"}]}
+    assert generate_copy._has_text_purpose_object(bp, "cta") is False
 
 
-def test_build_copy_prompt_unaffected_when_no_text_zones():
-    """Byte-for-byte the same prompt as before this feature existed, for every ordinary
-    blueprint with no sub_line/body_copy zone at all - the overwhelming majority."""
-    with_unrelated_zone = generate_copy.build_copy_prompt(
-        {"angle": "x", "structural_zones": [{"zone_type": "badge", "position": "top"}]}
-    )
-    without_zones = generate_copy.build_copy_prompt({"angle": "x"})
-    assert "TEXT ZONE COPY" not in with_unrelated_zone
-    assert "TEXT ZONE COPY" not in without_zones
-    assert with_unrelated_zone.count(generate_copy.IMAGE_SUBTEXT_FIELD_DEFAULT) == 1
-    assert without_zones.count(generate_copy.IMAGE_SUBTEXT_FIELD_DEFAULT) == 1
-
-
-def test_build_copy_prompt_states_text_zone_instruction_for_single_zone():
-    bp = {"structural_zones": [
-        {"zone_type": "sub_line", "position": "top-center", "detail": "SWEET ALMOND | WARM VANILLA"},
-    ]}
-    prompt = generate_copy.build_copy_prompt(bp)
-    assert "TEXT ZONE COPY" in prompt
-    assert "1 distinct sub_line/body_copy/product_callout zone" in prompt
-    assert "panel_copy" in prompt
-    assert "top-center" in prompt
-    assert "SWEET ALMOND | WARM VANILLA" in prompt
-    # single-zone case has nothing to repeat against - the "never repeat" rule must not
-    # appear when there's only one zone
-    assert "never repeat the same phrase" not in prompt
-
-
-def test_build_copy_prompt_states_multi_zone_instruction_when_detected():
-    prompt = generate_copy.build_copy_prompt(_comparison_blueprint())
-    assert "TEXT ZONE COPY" in prompt
-    assert "panel_copy" in prompt
-    assert "upper-left-mid" in prompt
-    assert "upper-right-mid" in prompt
-    assert "negative outcome - hair loss" in prompt
-    assert "positive outcome - keeping hair" in prompt
-    assert "never repeat the same phrase" in prompt
-
-
-def test_build_copy_prompt_panel_instruction_states_exact_count():
-    prompt = generate_copy.build_copy_prompt(_comparison_blueprint())
-    assert "2 distinct sub_line/body_copy/product_callout zone(s)" in prompt
-    assert "EXACTLY 2 objects" in prompt
-
-
-# ---- product_callout added to _PANEL_COPY_ZONE_TYPES (2026-08-13, Item 2): every
-# callout used to receive the bare product name, unconditionally - confirmed live, ad
-# 1576971893931336, four distinct reference callouts all rendered "Besque Magic Body
-# Oil" ----
-
-def test_text_zone_targets_includes_product_callout():
-    bp = {"structural_zones": [
-        {"zone_type": "product_callout", "position": "mid-left", "detail": "flame icon, thermogenic"},
-    ]}
-    targets = generate_copy.text_zone_targets(bp)
-    assert len(targets) == 1
-    assert targets[0]["zone_type"] == "product_callout"
-
-
-def test_build_copy_prompt_states_product_callout_benefit_not_product_name_rule():
-    bp = {"structural_zones": [
-        {"zone_type": "product_callout", "position": "mid-left", "detail": "flame icon, thermogenic"},
-    ]}
-    prompt = generate_copy.build_copy_prompt(bp)
-    assert "TEXT ZONE COPY" in prompt
-    assert "product_callout" in prompt
-    assert "never the product name" in prompt
-    assert "BENEFIT or PROPERTY" in prompt
-
-
-def test_build_copy_prompt_omits_callout_rule_when_no_product_callout_zone():
-    """The callout-specific rule must not appear as dead weight when only sub_line/
-    body_copy zones are present - it's stated once, only when relevant."""
-    bp = {"structural_zones": [
-        {"zone_type": "sub_line", "position": "top-center", "detail": "a tagline"},
-    ]}
-    prompt = generate_copy.build_copy_prompt(bp)
-    assert "TEXT ZONE COPY" in prompt
-    assert "BENEFIT or PROPERTY" not in prompt
-
-
-def test_build_copy_prompt_mixed_zone_types_all_get_targeted():
-    bp = {"structural_zones": [
-        {"zone_type": "sub_line", "position": "top-center", "detail": "a tagline"},
-        {"zone_type": "product_callout", "position": "mid-left", "detail": "flame icon, thermogenic"},
-        {"zone_type": "product_callout", "position": "mid-right", "detail": "lightning icon, energy"},
-    ]}
-    targets = generate_copy.text_zone_targets(bp)
-    assert len(targets) == 3
-    prompt = generate_copy.build_copy_prompt(bp)
-    assert "EXACTLY 3 objects" in prompt
+def test_has_text_purpose_object_exact_match_only():
+    # "other" must never satisfy a "headline"/"subtext"/"cta" check - the exact bug
+    # _has_headline_shaped_text_purpose (edit_capability.py) used to have with the old
+    # top-level text_purpose array's looser purpose-set membership check.
+    bp = {"objects": [_text_obj("other")]}
+    assert generate_copy._has_text_purpose_object(bp, "headline") is False
 
 
 # ---- image_subtext's field description is conditional, never contradicted later
-# (2026-08-11) - the empty-string permission is present ONLY when there's no sub_line/
-# body_copy zone to fill, in the field description itself, not revoked by a later clause
-# (that would be the exact "prompt demands and forbids the same thing" shape behind
-# artifact 1136 - see CLAUDE.md). ----
+# (2026-08-11) - the empty-string permission is present ONLY when there's no
+# subtext-purposed text object, in the field description itself, not revoked by a later
+# clause (that would be the exact "prompt demands and forbids the same thing" shape
+# behind artifact 1136 - see CLAUDE.md). ----
 
-def test_build_copy_prompt_image_subtext_keeps_empty_permission_with_no_zone():
+def test_build_copy_prompt_image_subtext_keeps_empty_permission_with_no_subtext_object():
     prompt = generate_copy.build_copy_prompt({"angle": "x"})
     assert 'Empty string "" if no short line is appropriate' in prompt
     assert "Must NOT be empty string this time" not in prompt
 
 
-def test_build_copy_prompt_image_subtext_drops_empty_permission_with_zone_present():
-    bp = {"structural_zones": [{"zone_type": "sub_line", "position": "top", "detail": "x"}]}
+def test_build_copy_prompt_image_subtext_drops_empty_permission_with_subtext_object_present():
+    bp = {"objects": [_text_obj("subtext")]}
     prompt = generate_copy.build_copy_prompt(bp)
     assert 'Empty string "" if no short line is appropriate' not in prompt
     assert "Must NOT be empty string this time" in prompt
     assert "REMOVED from the generated image" in prompt
 
 
-# ---- cta zone awareness (2026-08-11) - a single output field, not a list, so it gets its
-# own detector/clause rather than being folded into text_zone_targets/panel_copy. ----
-
-def test_cta_zone_none_when_absent():
-    assert generate_copy._cta_zone({"angle": "x"}) is None
-    assert generate_copy._cta_zone({"structural_zones": []}) is None
-
-
-def test_cta_zone_found():
-    bp = {"structural_zones": [{"zone_type": "cta", "position": "bottom-center", "detail": "DISCOVER NOW"}]}
-    zone = generate_copy._cta_zone(bp)
-    assert zone is not None
-    assert zone["position"] == "bottom-center"
-
-
-def test_build_copy_prompt_omits_cta_clause_when_no_cta_zone():
-    prompt = generate_copy.build_copy_prompt({"angle": "x"})
-    assert "CTA ZONE" not in prompt
-
-
-def test_build_copy_prompt_states_cta_clause_when_cta_zone_present():
-    bp = {"structural_zones": [{"zone_type": "cta", "position": "bottom-center", "detail": "DISCOVER NOW"}]}
-    prompt = generate_copy.build_copy_prompt(bp)
-    assert "CTA ZONE (STRICT)" in prompt
-    assert "bottom-center" in prompt
-    assert "DISCOVER NOW" in prompt
-    assert "never left empty" in prompt
-
-
-# ---- text_purpose consumption (2026-08-11 schema addition, Item 11) - the replacement
-# copy must serve the SAME communicative function as each reference text block, not just
-# generic product description. Copy path is text-only, so a prompt instruction alone is
-# expected to bind here (unlike the image path). ----
-
-def test_build_copy_prompt_omits_communicative_purpose_when_absent():
-    """Byte-for-byte the same prompt as before this feature existed, for every blueprint
-    with no text_purpose field at all - the overwhelming majority (pre-2026-08-11)."""
-    prompt = generate_copy.build_copy_prompt({"angle": "x"})
-    assert "COMMUNICATIVE PURPOSE" not in prompt
-
-
-def test_build_copy_prompt_offer_led_reference_states_offer_led_requirement():
-    bp = {"angle": "x", "text_purpose": [
-        {"text_verbatim": "50% OFF TODAY ONLY", "purpose": "offer", "placement": "top banner"},
-    ]}
-    prompt = generate_copy.build_copy_prompt(bp)
-    assert "COMMUNICATIVE PURPOSE" in prompt
-    assert "50% OFF TODAY ONLY" in prompt
-    assert "top banner" in prompt
-    assert "offer-led Besque copy" in prompt
-
-
-def test_build_copy_prompt_problem_hook_reference_states_problem_hook_requirement():
-    bp = {"angle": "x", "text_purpose": [
-        {"text_verbatim": "Tired of crepey skin?", "purpose": "problem_hook", "placement": "headline"},
-    ]}
-    prompt = generate_copy.build_copy_prompt(bp)
-    assert "Tired of crepey skin?" in prompt
-    assert "problem-hook" in prompt
-
-
-def test_build_copy_prompt_text_purpose_never_licenses_fabricated_testimonial():
-    """purpose: testimonial names the JOB the reference's text was doing - it must never
-    read as permission to invent a testimonial when approved_testimonials is empty (the
-    exact violation class C2/the top guardrails note exists for)."""
-    bp = {"angle": "x", "text_purpose": [
-        {"text_verbatim": "\"Changed my skin in weeks!\" - Jane", "purpose": "testimonial", "placement": "bottom card"},
-    ]}
-    prompt = generate_copy.build_copy_prompt(bp)
-    assert "never fabricated here" in prompt
-    assert "APPROVED CLAIMS/APPROVED TESTIMONIALS" in prompt
-
-
-def test_build_copy_prompt_lists_every_text_purpose_entry():
-    bp = {"angle": "x", "text_purpose": [
-        {"text_verbatim": "50% OFF", "purpose": "offer", "placement": "top"},
-        {"text_verbatim": "Tired of dry skin?", "purpose": "problem_hook", "placement": "headline"},
-    ]}
-    prompt = generate_copy.build_copy_prompt(bp)
-    assert "50% OFF" in prompt
-    assert "Tired of dry skin?" in prompt
-    assert prompt.count("served as:") == 2
-
-
-# ---- Item 2 (2026-08-13, sharpened): purpose not wording - both _text_purpose_clause
-# and _text_zone_copy_clause must prohibit reusing the reference's own sentence
-# structure/phrasing/nouns, and must never let a personal name/attribution reach
-# generated copy. ----
-
-def test_text_purpose_clause_prohibits_reusing_reference_wording():
-    prompt = generate_copy._text_purpose_clause(
-        {"text_purpose": [{"text_verbatim": "Tired of crepey skin?", "purpose": "problem_hook",
-                            "placement": "headline"}]}
+def test_build_copy_prompt_unaffected_by_non_subtext_objects():
+    """Byte-for-byte the same prompt as before this feature existed, for every ordinary
+    blueprint with no subtext-purposed text object at all - the overwhelming majority."""
+    with_unrelated_object = generate_copy.build_copy_prompt(
+        {"angle": "x", "objects": [_text_obj("headline")]}
     )
-    assert "entirely new sentences" in prompt.lower()
-    assert "never reuse the reference's own sentence structure" in prompt
-
-
-def test_text_purpose_clause_prohibits_personal_name_in_output():
-    prompt = generate_copy._text_purpose_clause(
-        {"text_purpose": [{"text_verbatim": "Loving this. Sean R.", "purpose": "testimonial",
-                            "placement": "bottom card"}]}
-    )
-    assert "must never appear in your output" in prompt
-    assert "APPROVED TESTIMONIALS" in prompt
-
-
-def test_text_zone_copy_clause_prohibits_reusing_reference_wording():
-    zones = [{"zone_type": "body_copy", "position": "bottom", "detail": "a closing line"}]
-    prompt = generate_copy._text_zone_copy_clause(zones)
-    assert "ENTIRELY NEW sentences" in prompt
-    assert "never reuse the reference's own sentence structure" in prompt
-
-
-def test_text_zone_copy_clause_prohibits_personal_name_in_panel_copy():
-    zones = [{"zone_type": "body_copy", "position": "bottom", "detail": "a closing line"}]
-    prompt = generate_copy._text_zone_copy_clause(zones)
-    assert "never written into panel_copy" in prompt
+    without_objects = generate_copy.build_copy_prompt({"angle": "x"})
+    assert with_unrelated_object.count(generate_copy.IMAGE_SUBTEXT_FIELD_DEFAULT) == 1
+    assert without_objects.count(generate_copy.IMAGE_SUBTEXT_FIELD_DEFAULT) == 1
 
 
 # ---- Item 2 (2026-08-13, sharpened): personal-name-shaped attribution ("Sean R.", an
 # "attributed to X" construction, or an em-dash signature) must never reach a copy
-# prompt from ANY reference-derived field - testimonial_zones.attribution (via the raw
-# blueprint dump), text_purpose.text_verbatim, or a structural_zones.detail. ----
+# prompt from ANY reference-derived field. ----
 
 def test_redact_personal_attribution_strips_initial_surname():
     assert "Sean R." not in generate_copy._redact_personal_attribution(
@@ -615,69 +398,18 @@ def test_redact_personal_attribution_strips_at_handle():
     assert "@fitness_ty" not in redacted
 
 
-def test_text_zone_copy_clause_redacts_handle_from_detail():
-    zones = [{"zone_type": "body_copy", "position": "bottom",
-              "detail": "a UGC post header showing the handle @fitness_ty"}]
-    prompt = generate_copy._text_zone_copy_clause(zones)
-    assert "@fitness_ty" not in prompt
-
-
-def test_text_purpose_clause_redacts_handle_from_text_verbatim():
-    bp = {"text_purpose": [{"text_verbatim": "@fitness_ty: this changed everything",
-                             "purpose": "testimonial", "placement": "top"}]}
-    prompt = generate_copy._text_purpose_clause(bp)
-    assert "@fitness_ty" not in prompt
-
-
-def test_build_copy_prompt_redacts_testimonial_zones_attribution_from_raw_blueprint():
+def test_build_copy_prompt_redacts_a_reference_objects_description_from_raw_blueprint():
     # A different name from the "Sean R." example already baked into the prohibition
     # wording itself (see PERSONAL_NAME_ATTRIBUTION_PATTERN's own docstring) - using the
     # same name here would trivially match the instructional prose, not prove redaction.
-    bp = {"angle": "x", "testimonial_zones": [
-        {"text_verbatim": "This is my go-to for vacation.", "attribution": "Wendy P.",
-         "placement": "bottom-left card", "styling": "quote marks"},
+    # The raw blueprint dump (build_copy_prompt's own blueprint=... kwarg) is where an
+    # object's own `description` (a competitor's testimonial text, verbatim) would
+    # otherwise reach Claude unredacted.
+    bp = {"angle": "x", "objects": [
+        _text_obj("testimonial", description="This is my go-to for vacation. Wendy P."),
     ]}
     prompt = generate_copy.build_copy_prompt(bp)
     assert "Wendy P" not in prompt
-
-
-def test_text_zone_copy_clause_redacts_personal_name_from_detail():
-    zones = [{"zone_type": "body_copy", "position": "bottom",
-              "detail": "a closing testimonial line attributed to Wendy P."}]
-    prompt = generate_copy._text_zone_copy_clause(zones)
-    assert "Wendy P" not in prompt
-
-
-def test_text_purpose_clause_redacts_personal_name_from_text_verbatim():
-    bp = {"text_purpose": [{"text_verbatim": "So glad I tried this. Wendy P.",
-                             "purpose": "testimonial", "placement": "bottom card"}]}
-    prompt = generate_copy._text_purpose_clause(bp)
-    assert "Wendy P" not in prompt
-
-
-# ---- _dedupe_text_purpose_against_zones DELETED 2026-08-17 (per the task that
-# replaced structural_zones/text_purpose with blueprint.objects - the dedup existed
-# only to reconcile those two now-removed fields against each other). Its 4 direct
-# unit tests and test_build_copy_prompt_does_not_double_commission_same_block (which
-# asserted the dedup's downstream effect - COMMUNICATIVE PURPOSE suppressed when
-# TEXT ZONE COPY already covers the same placement) tested behaviour that no longer
-# exists, and were removed rather than left permanently failing.
-# test_build_copy_prompt_keeps_text_purpose_entry_with_no_matching_zone below is
-# unaffected - it never relied on the dedup firing, only on it correctly not firing. ----
-
-def test_build_copy_prompt_keeps_text_purpose_entry_with_no_matching_zone():
-    bp = {
-        "structural_zones": [
-            {"zone_type": "body_copy", "position": "bottom-left card", "detail": "x"},
-        ],
-        "text_purpose": [
-            {"text_verbatim": "Tired of dry skin?", "purpose": "problem_hook", "placement": "headline"},
-        ],
-    }
-    prompt = generate_copy.build_copy_prompt(bp)
-    assert "TEXT ZONE COPY" in prompt
-    assert "COMMUNICATIVE PURPOSE" in prompt
-    assert "Tired of dry skin?" in prompt
 
 
 # ---- validate_copy mechanical backstop (2026-08-11) - a prompt instruction alone is the
@@ -780,11 +512,12 @@ def test_copy_from_response_rejects_season_contradiction():
 
 
 def test_generate_copy_live_requires_cta_and_image_subtext_when_zones_present(monkeypatch):
-    """End-to-end: a blueprint with a cta zone AND a sub_line zone must reject an empty
-    cta/image_subtext on every attempt and raise, rather than silently accepting it."""
-    bp = {"structural_zones": [
-        {"zone_type": "cta", "position": "bottom", "detail": "DISCOVER NOW"},
-        {"zone_type": "sub_line", "position": "top", "detail": "SWEET ALMOND | WARM VANILLA"},
+    """End-to-end: a blueprint with a cta-purposed object AND a subtext-purposed object
+    must reject an empty cta/image_subtext on every attempt and raise, rather than
+    silently accepting it."""
+    bp = {"objects": [
+        _text_obj("cta", description="DISCOVER NOW"),
+        _text_obj("subtext", description="SWEET ALMOND | WARM VANILLA"),
     ]}
     empty_copy_json = json.dumps({"headline": "H", "primary_text": "P", "cta": "", "image_subtext": ""})
 

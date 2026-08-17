@@ -143,8 +143,11 @@ def test_realism_edit_deltas_contain_no_geometry_clause_or_its_facts():
 
 # ---- Item 4: blueprint-sourced free text reaching the prompt carries no bottle-shape
 # terms - integration test of deconstruct's stripping feeding straight into
-# build_image_prompt's edit-mode branch (the one place product_category.signals/
-# visual.subject actually reach assembled prompt text, via _competitor_props_clause) ----
+# build_image_prompt's edit-mode branch. product_category.signals/visual.subject no
+# longer reach assembled prompt text at all (their one former reader,
+# generate_image_prompt._competitor_props_clause, was deleted 2026-08-17), so this
+# assertion holds even more strongly now than when it was written - kept as a
+# regression guard in case a future clause starts reading them again. ----
 
 def test_blueprint_shape_language_stripped_before_reaching_the_prompt():
     raw_blueprint = _blueprint(

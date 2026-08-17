@@ -6,8 +6,10 @@ structural basis is simply absent (fail closed), never guessed, defaulted, or ha
 CORE DISTINCTION this whole module exists to enforce (see CLAUDE.md's Dynamic Edit
 System notes): blueprint describes the COMPETITOR reference ad - it is STRUCTURE only
 (does a headline-shaped text block exist at all, does a face appear, how many products).
-blueprint.text_purpose/testimonial_zones hold the COMPETITOR's own strings verbatim and
-must NEVER be read as a control's current_value. The artifact's own copy columns
+blueprint.objects[].text_purpose classifies each of the COMPETITOR's own text blocks by
+JOB (headline/subtext/cta/...), and blueprint.objects[].description holds the
+COMPETITOR's own strings - neither must ever be read as a control's current_value. The
+artifact's own copy columns
 (generated_copy.headline/primary_text/cta/image_subtext, artifacts.offer_text) are
 Besque's ADAPTED values and are the ONLY source current_value is ever read from. Where
 our adaptation dropped or never populated a field (no headline was generated, no offer
@@ -44,74 +46,48 @@ def _generated_copy(artifact):
     return artifact.get("generated_copy") or {}
 
 
-# purpose values that actually shape headline/subtext-style copy. Deliberately EXCLUDES
-# "other" and "testimonial" - live evidence (artifact 1251, 2026-08-14): its only
-# text_purpose entries were two purpose="other" rows carrying the COMPETITOR's OWN
-# wordmark/tagline text ("Crêpe Erase®", "by THE BODY FIRM™") and two purpose="testimonial"
-# rows (the quote + attribution). "any entry at all" (the old check) read those "other"
-# rows as "a headline zone exists," so the headline control was offered even though
-# nothing in this reference was ever a headline-shaped text block - Besque's own
-# generated_copy.headline was never rendered into the pixels at all (the image showed
-# the BESQUE wordmark instead), and editing it asked Gemini to change text that was never
-# there, which is what caused it to overwrite the wordmark region instead. "cta"/"offer"
-# are excluded too - each already has its own dedicated detector (_cta_zone_exists,
-# artifacts.offer_text) and must not double-count here.
-_HEADLINE_SHAPED_PURPOSES = {"problem_hook", "efficacy_claim", "product_description"}
+# _has_headline_shaped_text_purpose/_structural_zone_types/_cta_zone_exists/
+# _sub_line_or_body_copy_zone_exists/get_brand_wordmark_zone (2026-08-17): REWIRED at
+# blueprint.objects - the top-level text_purpose/structural_zones arrays these used to
+# read no longer exist (schema/blueprint.schema.json - blueprint.objects replaces both).
+# Repointed rather than deleted: the underlying question each one answered ("does the
+# reference have a headline/subtext/cta-shaped text block") is MORE precisely
+# answerable now that text_purpose classifies each text object's JOB directly, instead
+# of a heuristic guess from a purpose enum (problem_hook/efficacy_claim/
+# product_description) that was only ever a proxy for "headline-shaped." The live bug
+# _has_headline_shaped_text_purpose was built to fix (artifact 1251: "other"-purposed
+# competitor wordmark/tagline text wrongly counted as "a headline zone exists") is now
+# structurally impossible - "other" is a real value that never matches "headline".
+# get_brand_wordmark_zone has no rewire: blueprint.objects describes the COMPETITOR
+# reference, never the drafted image, so Besque's own wordmark (ADDED by brand_rules()
+# rule 9) is never one of these rows - see generate_image_prompt.
+# _brand_wordmark_protection_clause, which now always uses its generic fallback text
+# instead of calling this (deleted) function.
 
 
-def _has_headline_shaped_text_purpose(blueprint):
+def _has_text_purpose_object(blueprint, purpose):
+    """True when blueprint.objects has a kind=="text" entry whose text_purpose exactly
+    matches `purpose` - the objects-array replacement for the deleted
+    _has_headline_shaped_text_purpose/_cta_zone_exists/_sub_line_or_body_copy_zone_exists,
+    now a single exact-match helper instead of three separate heuristics, since
+    text_purpose classifies by JOB directly rather than needing a proxy guess."""
     return any(
-        (tp or {}).get("purpose") in _HEADLINE_SHAPED_PURPOSES
-        for tp in blueprint.get("text_purpose") or []
+        (obj or {}).get("kind") == "text" and (obj or {}).get("text_purpose") == purpose
+        for obj in (blueprint or {}).get("objects") or []
     )
-
-
-def _structural_zone_types(blueprint):
-    return {(z or {}).get("zone_type") for z in (blueprint.get("structural_zones") or [])}
-
-
-def get_brand_wordmark_zone(blueprint):
-    """The structural_zones entry with zone_type=="brand_wordmark", or None. Used by the
-    edit engine (generate_image_prompt.build_targeted_edit_instruction) to name the
-    wordmark's own position in the ALWAYS-ON protection clause every targeted edit
-    carries, regardless of what's being edited.
-
-    ORPHANED 2026-08-17: structural_zones no longer exists for a blueprint deconstructed
-    under the new objects schema (schema/blueprint.schema.json) - this always returns
-    None for a new blueprint, same as it already did for any legacy blueprint with no
-    brand_wordmark zone. Not rewired to blueprint.objects: a competitor logo object
-    there is never Besque's own wordmark position (see _object_remove_controls's own
-    docstring - blueprint.objects describes the reference, never the drafted image;
-    Besque's wordmark is ADDED by brand_rules() rule 9, never tracked as an object
-    here), so there is no equivalent signal to read instead. The protection clause this
-    feeds degrades to its own generic wording with no specific position named -
-    graceful, not a crash."""
-    for z in blueprint.get("structural_zones") or []:
-        if (z or {}).get("zone_type") == "brand_wordmark":
-            return z
-    return None
-
-
-def _cta_zone_exists(blueprint):
-    if "cta" in _structural_zone_types(blueprint):
-        return True
-    return any((tp or {}).get("purpose") == "cta" for tp in blueprint.get("text_purpose") or [])
-
-
-def _sub_line_or_body_copy_zone_exists(blueprint):
-    return bool(_structural_zone_types(blueprint) & {"sub_line", "body_copy"})
 
 
 def _headline_control(artifact, blueprint):
     """Gated on BOTH text_in_image (was this run supposed to bake text into the pixels
-    at all) AND a genuinely headline-shaped text_purpose entry (was there ever a
-    headline-like zone in the reference for Besque's headline to occupy). Neither alone
+    at all) AND a genuine text_purpose=="headline" object (was there ever a
+    headline-like block in the reference for Besque's headline to occupy). Neither alone
     is sufficient - artifact 1251 had text_in_image=True with generated_copy.headline
-    populated, and STILL never rendered a headline (see _has_headline_shaped_text_purpose's
-    own comment for the full trace). Fail closed: missing either signal omits the control."""
+    populated, and STILL never rendered a headline (its only text_purpose entries were
+    "other"-purposed competitor wordmark/tagline text and a testimonial - never
+    headline-shaped). Fail closed: missing either signal omits the control."""
     if not artifact.get("text_in_image"):
         return None
-    if not _has_headline_shaped_text_purpose(blueprint):
+    if not _has_text_purpose_object(blueprint, "headline"):
         return None
     value = _generated_copy(artifact).get("headline")
     if not value:
@@ -119,19 +95,16 @@ def _headline_control(artifact, blueprint):
     return {
         "target": "headline", "attribute": "text", "label": "Headline",
         "current_value": value, "allowed_ops": ["change"],
-        "blueprint_path": "text_in_image + text_purpose[].purpose in "
-                          f"{sorted(_HEADLINE_SHAPED_PURPOSES)} (structure only) + generated_copy.headline",
+        "blueprint_path": "text_in_image + objects[].text_purpose==headline "
+                          "(structure only) + generated_copy.headline",
     }
 
 
 def _subtext_control(artifact, blueprint):
-    """Same two-signal gate as _headline_control - see its docstring. A sub_line/
-    body_copy structural zone is an equally valid basis for subtext (that zone type IS
-    subtext-shaped by definition, unlike text_purpose's ambiguous "other"), so either
-    that OR a headline-shaped text_purpose entry satisfies the structural half of the gate."""
+    """Same two-signal gate as _headline_control - see its docstring."""
     if not artifact.get("text_in_image"):
         return None
-    if not (_has_headline_shaped_text_purpose(blueprint) or _sub_line_or_body_copy_zone_exists(blueprint)):
+    if not _has_text_purpose_object(blueprint, "subtext"):
         return None
     value = _generated_copy(artifact).get("image_subtext")
     if not value:
@@ -139,20 +112,19 @@ def _subtext_control(artifact, blueprint):
     return {
         "target": "subtext", "attribute": "text", "label": "Subtext",
         "current_value": value, "allowed_ops": ["change", "remove"],
-        "blueprint_path": "text_in_image + (structural_zones[].zone_type in (sub_line, body_copy) / "
-                          "text_purpose[].purpose headline-shaped) + generated_copy.image_subtext",
+        "blueprint_path": "text_in_image + objects[].text_purpose==subtext "
+                          "(structure only) + generated_copy.image_subtext",
     }
 
 
 def _cta_control(artifact, blueprint):
     value = _generated_copy(artifact).get("cta")
-    if not value or not _cta_zone_exists(blueprint):
+    if not value or not _has_text_purpose_object(blueprint, "cta"):
         return None
     return {
         "target": "cta", "attribute": "text", "label": "CTA",
         "current_value": value, "allowed_ops": ["change"],
-        "blueprint_path": "structural_zones[].zone_type=cta / text_purpose[].purpose=cta "
-                          "(structure only) + generated_copy.cta",
+        "blueprint_path": "objects[].text_purpose==cta (structure only) + generated_copy.cta",
     }
 
 
@@ -304,27 +276,41 @@ def _product_realism_control(artifact, blueprint):
 
 
 def _background_control(blueprint):
-    background_type = (blueprint.get("layout_detail") or {}).get("background_type")
-    if not background_type:
+    """REWIRED 2026-08-17: layout_detail.background_type no longer exists
+    (schema/blueprint.schema.json) - the six-field visual.scene_lighting/
+    layout_detail.background_type pair was collapsed into a single top-level
+    `background` object ({"surface", "colour", "light"}, see deconstruct.py's
+    BLUEPRINT_PROMPT) when the objects-array refactor landed. `surface` is this
+    control's structural basis; `colour`, when present, is folded into the same
+    current_value string rather than surfaced as a second control - there is no
+    separate "Background colour" control anywhere in the UI to route it to."""
+    background = blueprint.get("background") or {}
+    surface = background.get("surface")
+    if not surface:
         return None
+    current_value = surface
+    if background.get("colour"):
+        current_value = f"{surface} ({background['colour']})"
     return {
         "target": "background", "attribute": "type", "label": "Background",
-        "current_value": background_type, "allowed_ops": ["change"],
-        "blueprint_path": "layout_detail.background_type",
+        "current_value": current_value, "allowed_ops": ["change"],
+        "blueprint_path": "background.surface (+ background.colour)",
     }
 
 
 def _lighting_control(blueprint):
-    scene_lighting = (blueprint.get("visual") or {}).get("scene_lighting")
-    if not scene_lighting:
-        return None
-    parts = [f"{k}: {v}" for k, v in scene_lighting.items() if v]
-    if not parts:
+    """REWIRED 2026-08-17: visual.scene_lighting (six sub-fields) no longer exists -
+    see _background_control's own docstring for what replaced it. `background.light`
+    is a single free-text phrase now (e.g. "soft warm light from upper-left") rather
+    than six structured sub-fields, so current_value is that phrase directly, not a
+    joined "key: value" list the way the six-field version was."""
+    light = (blueprint.get("background") or {}).get("light")
+    if not light:
         return None
     return {
         "target": "lighting", "attribute": "scene_lighting", "label": "Lighting",
-        "current_value": "; ".join(parts), "allowed_ops": ["change"],
-        "blueprint_path": "visual.scene_lighting",
+        "current_value": light, "allowed_ops": ["change"],
+        "blueprint_path": "background.light",
     }
 
 

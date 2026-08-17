@@ -21,10 +21,14 @@ def _artifact(**overrides):
         "parent_artifact_id": None, "root_artifact_id": 42, "version_no": 1, "edit_event_id": None,
         "blueprint": {
             "format": "hero",
-            "text_purpose": [{"text_verbatim": "x", "purpose": "cta", "placement": "bottom"}],
-            "structural_zones": [{"zone_type": "cta", "position": "bottom", "container": "none", "detail": "d"}],
+            "objects": [
+                {"object_id": "obj_01", "kind": "text", "description": "ref cta",
+                 "bbox": [0.35, 0.9, 0.3, 0.08], "colours": [], "ownership": "competitor_branded",
+                 "role": "secondary", "carries_brand_mark": False,
+                 "persuasive_function": "call to action", "disposition": "substitute",
+                 "text_purpose": "cta"},
+            ],
             "face_present": {"has_face": True, "prominence": "primary", "location": "centre"},
-            "scene_elements": [],
             "layout_detail": {"product_count": 1},
         },
     }
@@ -61,7 +65,8 @@ def test_edit_capabilities_endpoint_404_when_missing(monkeypatch):
 # of erroring or silently showing nothing ----
 
 def test_edit_capabilities_endpoint_flags_legacy_blueprint_with_scene_summary(monkeypatch):
-    # _artifact()'s default blueprint has no `objects` key at all - the legacy shape.
+    # This override blueprint has no `objects` key at all - the legacy shape (unlike
+    # _artifact()'s own default blueprint, which now carries a real `objects` array).
     monkeypatch.setattr(dedupe, "get_artifact_by_id", lambda aid: _artifact(
         blueprint={
             "format": "hero", "face_present": {"has_face": False}, "layout_detail": {},
@@ -267,15 +272,23 @@ def test_edit_endpoint_rejects_person_face_age_since_no_control_is_ever_emitted(
 
 # ---- Never target the brand wordmark - build_targeted_edit_instruction ----
 
-def test_instruction_always_includes_wordmark_protection_named_by_position():
-    blueprint = {"structural_zones": [
-        {"zone_type": "brand_wordmark", "position": "top-centre", "container": "none", "detail": "d"},
+def test_instruction_always_includes_wordmark_protection_generic_wording():
+    # 2026-08-17: get_brand_wordmark_zone (which used to name the wordmark's own
+    # recorded position, read from the now-deleted structural_zones) was deleted -
+    # blueprint.objects describes the COMPETITOR reference, never the drafted image, so
+    # Besque's own wordmark (ADDED by brand_rules() rule 9) was never something this
+    # schema could name a position for. _brand_wordmark_protection_clause always uses
+    # its generic fallback wording now, regardless of what `blueprint` contains.
+    blueprint = {"objects": [
+        {"object_id": "obj_01", "kind": "logo", "description": "competitor wordmark",
+         "bbox": [0, 0, 0.2, 0.1], "colours": [], "ownership": "competitor_branded",
+         "role": "secondary", "carries_brand_mark": True,
+         "persuasive_function": "names the advertiser", "disposition": "drop"},
     ]}
     descriptor = {"target": "background", "attribute": "type", "label": "Background", "current_value": "pool"}
     instruction = generate_image_prompt.build_targeted_edit_instruction(
         descriptor, "change", "a bathroom counter", blueprint=blueprint)
     assert "brand wordmark" in instruction.lower()
-    assert "top-centre" in instruction
     assert "never" in instruction.lower()
 
 

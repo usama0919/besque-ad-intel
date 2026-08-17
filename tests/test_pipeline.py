@@ -140,7 +140,7 @@ def test_process_ad_clone_mode_derives_text_in_image_true_for_headline(monkeypat
 def test_process_ad_clone_mode_derives_text_in_image_false_when_no_text_zone(monkeypatch):
     dedupe.init_db()
     ad_id, ad = _clone_mode_ad()
-    blueprint = {"format": "hero"}  # no headline_verbatim, no structural_zones
+    blueprint = {"format": "hero"}  # no headline_verbatim, no objects
     captured = _mock_all_stages_capturing_image_kwargs(monkeypatch, blueprint)
     try:
         assert pipeline.process_ad(ad, text_in_image=True, clone_mode=True) == "processed"
@@ -188,8 +188,11 @@ def test_process_ad_clone_mode_retains_run_strip_body_area_when_blueprint_lacks_
 def test_process_ad_clone_mode_suppresses_offer_when_no_offer_zone(monkeypatch):
     dedupe.init_db()
     ad_id, ad = _clone_mode_ad()
-    blueprint = {"format": "hero", "structural_zones": [
-        {"zone_type": "brand_wordmark", "position": "top", "container": "none", "detail": "OSEA"},
+    blueprint = {"format": "hero", "objects": [
+        {"object_id": "obj_01", "kind": "logo", "description": "OSEA wordmark",
+         "bbox": [0, 0, 0.2, 0.1], "colours": [], "ownership": "competitor_branded",
+         "role": "secondary", "carries_brand_mark": True,
+         "persuasive_function": "names the advertiser", "disposition": "drop"},
     ]}
     captured = _mock_all_stages_capturing_image_kwargs(monkeypatch, blueprint)
     try:
@@ -202,8 +205,12 @@ def test_process_ad_clone_mode_suppresses_offer_when_no_offer_zone(monkeypatch):
 def test_process_ad_clone_mode_keeps_offer_when_offer_zone_present(monkeypatch):
     dedupe.init_db()
     ad_id, ad = _clone_mode_ad()
-    blueprint = {"format": "hero", "structural_zones": [
-        {"zone_type": "price_anchor", "position": "top", "container": "none", "detail": "was $60, now $45"},
+    blueprint = {"format": "hero", "objects": [
+        {"object_id": "obj_01", "kind": "text", "description": "was $60, now $45",
+         "bbox": [0.1, 0, 0.3, 0.1], "colours": [], "ownership": "competitor_branded",
+         "role": "secondary", "carries_brand_mark": False,
+         "persuasive_function": "shows a price comparison", "disposition": "substitute",
+         "text_purpose": "price_anchor"},
     ]}
     captured = _mock_all_stages_capturing_image_kwargs(monkeypatch, blueprint)
     try:
@@ -454,8 +461,8 @@ def test_process_ad_does_not_skip_when_reference_has_a_headline(monkeypatch):
 
 
 def test_process_ad_does_not_skip_when_reference_has_a_text_bearing_zone(monkeypatch):
-    """product_count==0, no headline_verbatim, but a text-bearing structural zone
-    (sub_line/body_copy/cta) exists - still something to clone."""
+    """product_count==0, no headline_verbatim, but a text-bearing object
+    (headline/subtext/cta) exists - still something to clone."""
     dedupe.init_db()
     dedupe.init_artifacts()
     ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
@@ -463,7 +470,11 @@ def test_process_ad_does_not_skip_when_reference_has_a_text_bearing_zone(monkeyp
           "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
     _mock_all_stages(monkeypatch)
     monkeypatch.setattr(pipeline.deconstruct, "deconstruct_image", lambda **k: _nothing_to_clone_blueprint(
-        structural_zones=[{"zone_type": "sub_line", "position": "top", "container": "none", "detail": "tagline"}],
+        objects=[{"object_id": "obj_01", "kind": "text", "description": "tagline",
+                  "bbox": [0.1, 0.1, 0.6, 0.1], "colours": [], "ownership": "competitor_branded",
+                  "role": "secondary", "carries_brand_mark": False,
+                  "persuasive_function": "supports headline", "disposition": "substitute",
+                  "text_purpose": "subtext"}],
     ))
     try:
         assert pipeline.process_ad(ad) == "processed"
@@ -2004,8 +2015,12 @@ def test_process_ad_failure_isolated(monkeypatch):
 # monkeypatched, no DB connection at all. ----
 
 def _quote_blueprint():
-    return {"structural_zones": [
-        {"zone_type": "social_proof", "position": "lower-third", "social_proof_kind": "single_quote"},
+    return {"objects": [
+        {"object_id": "obj_01", "kind": "text", "description": "customer testimonial quote",
+         "bbox": [0.0, 0.8, 0.4, 0.2], "colours": [], "ownership": "competitor_branded",
+         "role": "secondary", "carries_brand_mark": False,
+         "persuasive_function": "proves social validation", "disposition": "drop",
+         "text_purpose": "testimonial"},
     ]}
 
 
@@ -2013,11 +2028,11 @@ def _fake_review(id_, text, nickname="Jane D."):
     return {"id": id_, "review_text": text, "char_length": len(text), "nickname": nickname}
 
 
-def test_select_testimonial_review_none_when_no_single_quote_zone(monkeypatch):
-    """No social_proof/single_quote zone at all - must skip the DB read entirely."""
+def test_select_testimonial_review_none_when_no_testimonial_object(monkeypatch):
+    """No text_purpose=="testimonial" object at all - must skip the DB read entirely."""
     calls = []
     monkeypatch.setattr(pipeline.dedupe, "get_reviews_for_product", lambda *a, **k: calls.append(1) or [])
-    result = pipeline.select_testimonial_review({"structural_zones": []}, {"id": 1}, "AD1")
+    result = pipeline.select_testimonial_review({"objects": []}, {"id": 1}, "AD1")
     assert result is None
     assert calls == []
 
