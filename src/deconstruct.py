@@ -339,6 +339,23 @@ def resolve_disposition(obj, context=None):
     recorded) is explicitly forced to "drop" here when the object is branded - "ownership
     rules still win, whatever the text_purpose says."
 
+    For kind == "person" (2026-08-17): ALWAYS "substitute", unconditionally - checked
+    before the ownership/branding logic below, never after, and never gated on
+    `ownership` or `carries_brand_mark` at all. A person in a competitor's reference ad
+    is that competitor's model by definition - there is no case where reproducing her
+    is correct, so this can never fall through to "keep" the way the generic passthrough
+    below used to let it. This is the fix for a live failure: a competitor's model
+    object resolved to "keep" (the model's own prompt-time guess, trusted unchanged by
+    the old passthrough), and rule 10's prompt-only age/skin-texture requirements
+    (grey/silver hair, visible facial lines, mature skin texture) could not bind against
+    a "keep" disposition sitting closer to the point of use in the assembled prompt -
+    the same "prompt-only rules do not reliably bind" failure class this codebase has
+    hit repeatedly (see CLAUDE.md's guardrails note). The fix is mechanical and
+    structural, same as every other case in this function, not a stronger version of
+    rule 10's own wording. PERSON's own substitution instructions (identity/pose/age)
+    are unaffected by this - this function only decides SUBSTITUTE vs. KEEP vs. DROP,
+    never how a substitution is carried out.
+
     For every other kind: a product-kind object SUBSTITUTES - Besque has a real product
     to put in its place. Every other kind (a competitor's logo, a competitor-branded
     prop, a block of the competitor's own on-image copy) DROPS - there is no Besque
@@ -353,11 +370,15 @@ def resolve_disposition(obj, context=None):
     no per-object category-matching signal in this schema to check more precisely than
     that.
 
-    Every other object (ownership in generic/besque/person, not brand-mark-carrying,
-    not a competitor-argument prop) passes through with whatever disposition the model
-    assigned, completely unchanged - this function only ever narrows an object AWAY
-    from "keep", never invents a "keep" the model didn't already choose, and never
-    touches an object that was never a compliance risk to begin with."""
+    Every other object (kind not text/person, ownership in generic/besque, not
+    brand-mark-carrying, not a competitor-argument prop) passes through with whatever
+    disposition the model assigned, completely unchanged - this function only ever
+    narrows an object AWAY from "keep", never invents a "keep" the model didn't already
+    choose, and never touches an object that was never a compliance risk to begin with.
+    `person` is no longer part of this passthrough group (see above) - it is the ONE
+    kind this function narrows away from "keep" unconditionally, regardless of whether
+    it was ever a "risk" by the ownership/branding tests the rest of this function
+    uses."""
     context = context or {}
     ownership = obj.get("ownership")
     carries_brand_mark = bool(obj.get("carries_brand_mark"))
@@ -365,6 +386,9 @@ def resolve_disposition(obj, context=None):
 
     if obj.get("kind") == "text":
         return _resolve_text_disposition(obj, context, is_branded)
+
+    if obj.get("kind") == "person":
+        return "substitute"
 
     if is_branded:
         if obj.get("kind") == "product":

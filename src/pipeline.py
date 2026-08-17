@@ -830,6 +830,7 @@ def _regenerate_existing_draft(ad, angle_id, angle_slug, delta_instruction, shou
         retheme_colours=retheme_colours, brand_palette=brand_palette,
         realism=realism, cta_text=cta_text, panel_copy=panel_copy,
         testimonial=testimonial, clone_mode=clone_mode,
+        object_copy=generated_copy.get("object_copy") or None,
     )
 
     draft_bytes = generate_image_prompt._current_draft_bytes(ad_id, angle_slug)
@@ -1365,6 +1366,29 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
             # test_pipeline.py, when tried during this same fix.
             ok, issues = compliance.check_compliance(copy, ad.get("page_name", ""), ad.get("text", ""),
                                                       offer_text=offer_text)
+            # Per-object compliance (2026-08-17 restoration, item 7): the whole-draft
+            # check above already scans object_copy's stringified content incidentally
+            # (check_compliance joins every dict value with str()), but running each
+            # object's own line through the SAME check independently attributes a
+            # failure to the specific object_id that caused it, rather than one general
+            # "the draft failed" issue smeared across the whole copy - "compliance must
+            # apply per object, not once per draft." Feeds into the SAME ok/issues this
+            # loop already retries on - no separate retry mechanism invented for this.
+            for entry in (copy.get("object_copy") or []):
+                if not isinstance(entry, dict):
+                    continue
+                entry_text = (entry.get("text") or "").strip()
+                if not entry_text:
+                    continue
+                entry_ok, entry_issues = compliance.check_compliance(
+                    {"text": entry_text}, ad.get("page_name", ""), ad.get("text", ""),
+                    offer_text=offer_text,
+                )
+                if not entry_ok:
+                    ok = False
+                    issues = issues + [
+                        f"object {entry.get('object_id', '?')}: {issue}" for issue in entry_issues
+                    ]
             if ok:
                 break
             log.warning("Ad %s failed compliance check (attempt %s/%s): %s",
@@ -1376,6 +1400,27 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
             dedupe.init_pipeline_warnings()
             dedupe.record_warning("compliance_failed", reason)
             return "failed"
+        # Distinctness (2026-08-17 restoration, item 5): enforced in CODE, never a
+        # prompt sentence asking the model to avoid repetition (this codebase's own
+        # standing finding is that prompt-only rules do not reliably bind - see
+        # CLAUDE.md's guardrails note). Two DIFFERENT text objects resolving to the
+        # identical generated line is a defect - detected here, surfaced as a
+        # pipeline_warning, never blocking generation (same "detect and surface, never
+        # gate" precedent as reference_format.py's bundle-offer flag / the output
+        # critic's own findings) - a real customer testimonial elsewhere in this same
+        # draft can legitimately share wording with nothing, and re-running the whole
+        # copy loop over a distinctness defect alone risks the same demand-and-forbid
+        # contradiction shape that produced artifact 1136.
+        collisions = generate_copy.find_object_copy_collisions(
+            blueprint.get("objects"), copy.get("object_copy"))
+        if collisions:
+            dedupe.init_pipeline_warnings()
+            dedupe.record_warning(
+                "object_copy_collision",
+                f"Ad {ad_id} ({ad.get('page_name', '?')}): {len(collisions)} text object "
+                f"pair(s) with different object_ids resolved to identical generated copy "
+                f"despite different role/description/persuasive_function - {collisions}",
+            )
         # Recorded ONCE the copy actually passed compliance - never a rejected/retried
         # attempt's copy - so the next ad in this run sees only real, final wording, not
         # something already discarded. Mutates the caller's own list in place (see this
@@ -1505,6 +1550,13 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
                     # sub_line/body_copy routing in edit mode, a no-op everywhere else, same
                     # forwarding pattern as cta_text.
                     panel_copy=copy.get("panel_copy") or None,
+                    # object_copy (2026-08-17 restoration, root-cause fix): generate_
+                    # copy_live's per-object output for any kind=="text" object with no
+                    # recognised text_purpose (see generate_copy.text_objects_needing_
+                    # copy) - consumed by generate_image_prompt._substitute_object_line's
+                    # fallback branch, keyed by object_id, a no-op everywhere else, same
+                    # forwarding pattern as cta_text/panel_copy.
+                    object_copy=copy.get("object_copy") or None,
                     testimonial=testimonial,
                     product_count=product_count,
                     clone_mode=clone_mode,

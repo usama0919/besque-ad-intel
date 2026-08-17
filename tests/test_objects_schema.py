@@ -1,7 +1,7 @@
 """Tests for the objects-array schema replacement (2026-08-17): resolve_disposition's
 mechanical enforcement, the SCENE OBJECTS closure sentence, and legacy (no `objects`
 key) blueprints not raising when read by the edit-capability/dashboard path."""
-from src import deconstruct, generate_image_prompt, validator
+from src import deconstruct, generate_copy, generate_image_prompt, validator
 from src.edit_capability import derive_edit_capabilities, legacy_scene_summary, find_control
 
 
@@ -42,9 +42,40 @@ def test_resolve_disposition_besque_product_passes_through_unchanged():
     assert deconstruct.resolve_disposition(obj) == "keep"
 
 
-def test_resolve_disposition_person_passes_through_unchanged():
+# 2026-08-17: a person in a competitor reference must NEVER resolve to "keep" - she is
+# that competitor's own model by definition, and reproducing her pixel-identical is
+# never correct. Rule 10's prompt-only age/skin-texture requirements cannot bind
+# against a "keep" disposition sitting closer to the point of use in the assembled
+# prompt - the same "prompt-only rules do not reliably bind" failure class this
+# codebase has hit repeatedly (see CLAUDE.md). Fixed mechanically here, not by adding
+# another prompt sentence - replaces the old passthrough-unchanged test below, which
+# encoded the exact behaviour that produced the live failure.
+
+def test_resolve_disposition_person_keep_forces_substitute():
     obj = _obj(kind="person", ownership="person", carries_brand_mark=False, disposition="keep")
-    assert deconstruct.resolve_disposition(obj) == "keep"
+    assert deconstruct.resolve_disposition(obj) == "substitute"
+
+
+def test_resolve_disposition_person_already_substitute_unchanged():
+    obj = _obj(kind="person", ownership="person", carries_brand_mark=False, disposition="substitute")
+    assert deconstruct.resolve_disposition(obj) == "substitute"
+
+
+def test_resolve_disposition_person_drop_still_forces_substitute():
+    # Unconditional, per the task's own wording - never gated on what the model itself
+    # guessed, unlike the generic ownership/carries_brand_mark passthrough below.
+    obj = _obj(kind="person", ownership="person", carries_brand_mark=False, disposition="drop")
+    assert deconstruct.resolve_disposition(obj) == "substitute"
+
+
+def test_resolve_disposition_person_never_drops_even_when_branded():
+    # A person object visibly carrying a brand mark (e.g. a competitor's logo on a
+    # model's t-shirt) must still SUBSTITUTE, never DROP the way a branded prop/logo
+    # does - the person dispatch is checked before the is_branded branch, so branding
+    # can never redirect a person to "drop".
+    obj = _obj(kind="person", ownership="competitor_branded", carries_brand_mark=True,
+               disposition="keep")
+    assert deconstruct.resolve_disposition(obj) == "substitute"
 
 
 def test_resolve_disposition_carries_brand_mark_forces_regardless_of_kind():
@@ -280,6 +311,25 @@ def test_dropped_object_named_as_absent_not_silently_omitted():
     assert "REMOVED" in prompt
 
 
+def test_person_object_substitute_disposition_survives_objects_clause_second_pass():
+    """_objects_clause re-resolves via deconstruct.resolve_disposition a SECOND time,
+    with this run's real context - but ONLY for a kind=="text" object with a real
+    text_purpose (text_purpose is forced to None for every other kind, see
+    _objects_clause's own dispatch: `text_purpose = obj.get("text_purpose") if kind ==
+    "text" else None`). A kind=="person" object is never routed through that second
+    call at all - it simply trusts obj.get("disposition") as already resolved. This
+    confirms the person object's disposition (already "substitute" by the time a real
+    blueprint reaches this function, per resolve_disposition's own unconditional person
+    dispatch at deconstruct time) reaches the assembled prompt unchanged - never
+    silently re-flipped toward "keep" by this second pass."""
+    bp = _blueprint_with_objects()
+    bp["objects"].append(_obj(object_id="obj_03", kind="person", ownership="person",
+                              description="the competitor's model", disposition="substitute"))
+    prompt = generate_image_prompt.build_image_prompt(bp)
+    assert "SUBSTITUTE: replace this person (\"the competitor's model\")" in prompt
+    assert "KEEP: the competitor's model" not in prompt
+
+
 # ---- Stage 5: a legacy blueprint (no `objects` key) never raises on read ----
 
 def _legacy_blueprint():
@@ -410,3 +460,263 @@ def test_prompt_length_template_within_25_percent_of_pre_refactor_baseline():
         f"template prompt grew to {len(prompt)} chars, more than "
         f"{_MAX_GROWTH_RATIO}x the {_PRE_REFACTOR_TEMPLATE_LEN}-char pre-refactor baseline"
     )
+
+
+# ---- Per-object copy generation restoration (2026-08-17): root-cause fix for a live
+# failure - a reference with four Instagram DM bubbles produced a draft where all four
+# carried the IDENTICAL generated sentence. Every such bubble is a kind=="text" object
+# with no recognised text_purpose ("other", or the field absent) - every OTHER purpose
+# already has its own dedicated content source (rule 6, offer_text, certifications,
+# testimonial, product_name, cta_text) and is unaffected by any of this.
+#
+# Restores text_zone_targets/_text_zone_copy_clause (per-zone copy, deleted a9b1e9f) and
+# _text_purpose_clause's job-inheritance rule (deleted a9b1e9f), recovered from git
+# history rather than reinvented - re-keyed to object_id instead of a free-text position
+# string, since blueprint.objects makes a real, stable identifier available. ----
+
+def _other_text_obj(object_id, description, persuasive_function, bbox, role="secondary", **overrides):
+    overrides.setdefault("disposition", "substitute")
+    return _text_obj(
+        "other", object_id=object_id, description=description,
+        persuasive_function=persuasive_function, bbox=bbox, role=role,
+        **overrides,
+    )
+
+
+def _four_bubbles():
+    return [
+        _other_text_obj("obj_01", "DM bubble asking if it works on stretch marks",
+                         "raises a doubt about efficacy", [0.1, 0.1, 0.5, 0.1]),
+        _other_text_obj("obj_02", "DM bubble replying yes, within two weeks",
+                         "answers the doubt with a benefit claim", [0.4, 0.25, 0.5, 0.1]),
+        _other_text_obj("obj_03", "DM bubble asking about the smell",
+                         "raises a second, different doubt", [0.1, 0.4, 0.5, 0.1]),
+        _other_text_obj("obj_04", "DM bubble replying it smells like fresh citrus",
+                         "answers the second doubt with a sensory detail", [0.4, 0.55, 0.5, 0.1]),
+    ]
+
+
+# ---- text_objects_needing_copy: identifies exactly the right candidates ----
+
+def test_text_objects_needing_copy_finds_all_four_bubbles():
+    bp = {"objects": _four_bubbles()}
+    candidates = generate_copy.text_objects_needing_copy(bp)
+    assert {c["object_id"] for c in candidates} == {"obj_01", "obj_02", "obj_03", "obj_04"}
+
+
+def test_text_objects_needing_copy_empty_for_a_headline_only_blueprint():
+    # "a blueprint with one text object is unaffected" - a single HEADLINE-purposed
+    # object already has its own dedicated content source (rule 6 TEXT POLICY) and must
+    # never be treated as an object-copy candidate.
+    bp = {"objects": [_text_obj("headline", disposition="substitute")]}
+    assert generate_copy.text_objects_needing_copy(bp) == []
+
+
+def test_text_objects_needing_copy_excludes_non_substitute_disposition():
+    bp = {"objects": [_other_text_obj("obj_01", "a bubble", "some job", [0, 0, 0.1, 0.1],
+                                       disposition="drop")]}
+    assert generate_copy.text_objects_needing_copy(bp) == []
+
+
+def test_text_objects_needing_copy_excludes_recognised_purposes():
+    bp = {"objects": [
+        _text_obj("headline", object_id="obj_01", disposition="substitute"),
+        _text_obj("testimonial", object_id="obj_02", disposition="substitute"),
+        _other_text_obj("obj_03", "a bubble", "some job", [0, 0, 0.1, 0.1]),
+    ]}
+    candidates = generate_copy.text_objects_needing_copy(bp)
+    assert {c["object_id"] for c in candidates} == {"obj_03"}
+
+
+def test_text_objects_needing_copy_none_purpose_treated_same_as_other():
+    # A text object with NO text_purpose key at all (legacy, or the model genuinely
+    # omitted it) reaches the exact same content-free fallback in
+    # _substitute_object_line as an explicit "other" - text_objects_needing_copy must
+    # catch it too, not just the literal string "other".
+    bp = {"objects": [_obj(object_id="obj_01", kind="text", description="a bubble",
+                            disposition="substitute")]}
+    assert "text_purpose" not in bp["objects"][0]
+    candidates = generate_copy.text_objects_needing_copy(bp)
+    assert {c["object_id"] for c in candidates} == {"obj_01"}
+
+
+# ---- _object_copy_clause: reading order, single-vs-multi wording, empty case ----
+
+def test_object_copy_clause_empty_when_no_candidates():
+    assert generate_copy._object_copy_clause([]) == ""
+
+
+def test_object_copy_clause_lists_all_four_object_ids_in_reading_order():
+    clause = generate_copy._object_copy_clause(_four_bubbles())
+    for oid in ("obj_01", "obj_02", "obj_03", "obj_04"):
+        assert f'object_id "{oid}"' in clause
+    # Reading order (top-to-bottom from each bbox's own y) must be preserved, not
+    # blueprint list order - _four_bubbles() is already in order, so this also holds
+    # for a deliberately out-of-order input.
+    shuffled = list(reversed(_four_bubbles()))
+    clause2 = generate_copy._object_copy_clause(shuffled)
+    pos1 = clause2.index('object_id "obj_01"')
+    pos4 = clause2.index('object_id "obj_04"')
+    assert pos1 < pos4
+    assert "EXACTLY 4 objects" in clause2
+
+
+def test_object_copy_clause_single_candidate_has_no_repeat_rule():
+    one = [_other_text_obj("obj_01", "a single bubble", "makes one point", [0, 0, 0.5, 0.1])]
+    clause = generate_copy._object_copy_clause(one)
+    assert "EXACTLY 1 objects" in clause
+    assert "never repeat the same phrase across objects" not in clause
+
+
+def test_object_copy_clause_multi_candidate_states_job_inheritance_rule():
+    clause = generate_copy._object_copy_clause(_four_bubbles())
+    assert "Inherit the JOB" in clause
+    assert "never its WORDING" in clause
+    assert "never repeat the same phrase across objects" in clause
+
+
+def test_object_copy_clause_redacts_personal_attribution():
+    # The clause's OWN boilerplate rule text legitimately names "Sean R." as an example
+    # of a shape to never write - so this checks the specific combination that would
+    # only appear if the OBJECT's own description leaked through unredacted, not the
+    # bare substring "Sean R." (which the rule text contains on purpose).
+    bubble = _other_text_obj("obj_01", "DM bubble signed Sean R.", "endorses the product",
+                              [0, 0, 0.5, 0.1])
+    clause = generate_copy._object_copy_clause([bubble])
+    assert "signed Sean R." not in clause
+    assert "the reference shows - DM bubble signed" in clause
+
+
+# ---- build_copy_prompt: object copy coexists with angle language, never replaces it ----
+
+_ANGLE_LANGUAGE = {
+    "common_phrases": ["my skin feels so tight and dry"],
+    "core_angle": "ageing skin feels tight",
+    "main_pain_point": "dryness",
+}
+
+
+def test_build_copy_prompt_object_copy_coexists_with_angle_language():
+    # "angle language rules still hold per object" - TIER 1/2/3's governing text must
+    # still be present, byte-for-byte, alongside the new OBJECT COPY section - one must
+    # never replace or weaken the other.
+    bp = {"objects": _four_bubbles()}
+    prompt = generate_copy.build_copy_prompt(bp, angle_language=_ANGLE_LANGUAGE)
+    assert "TIER 1 - WRITE FROM THIS (REQUIRED)" in prompt
+    assert "TIER 2 - TONE ONLY, NEVER EMIT" in prompt
+    assert "No statistic and no timeframe" in prompt
+    assert "my skin feels so tight and dry" in prompt
+    assert "OBJECT COPY (STRICT)" in prompt
+    assert 'object_id "obj_01"' in prompt
+
+
+def test_build_copy_prompt_no_object_copy_section_without_candidates():
+    bp = {"objects": [_text_obj("headline", disposition="substitute")]}
+    prompt = generate_copy.build_copy_prompt(bp, angle_language=_ANGLE_LANGUAGE)
+    assert "OBJECT COPY" not in prompt
+    assert "TIER 1 - WRITE FROM THIS (REQUIRED)" in prompt
+
+
+# ---- validate_copy: mechanical backstop for object_copy completeness ----
+
+def test_validate_copy_accepts_four_distinct_object_copy_entries():
+    copy = {
+        "headline": "H", "primary_text": "P", "cta": "C",
+        "object_copy": [
+            {"object_id": "obj_01", "text": "Does it help with stretch marks?"},
+            {"object_id": "obj_02", "text": "Most see softer skin within two weeks."},
+            {"object_id": "obj_03", "text": "What's the scent like?"},
+            {"object_id": "obj_04", "text": "A light, fresh citrus."},
+        ],
+    }
+    generate_copy.validate_copy(copy, required_object_ids={"obj_01", "obj_02", "obj_03", "obj_04"})
+
+
+def test_validate_copy_raises_when_object_copy_missing_entirely():
+    copy = {"headline": "H", "primary_text": "P", "cta": "C"}
+    try:
+        generate_copy.validate_copy(copy, required_object_ids={"obj_01"})
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert "obj_01" in str(e)
+
+
+def test_validate_copy_raises_when_object_copy_missing_some_ids():
+    copy = {"headline": "H", "primary_text": "P", "cta": "C",
+            "object_copy": [{"object_id": "obj_01", "text": "Yes it does."}]}
+    try:
+        generate_copy.validate_copy(copy, required_object_ids={"obj_01", "obj_02"})
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert "obj_02" in str(e)
+
+
+def test_validate_copy_raises_when_object_copy_entry_is_empty():
+    copy = {"headline": "H", "primary_text": "P", "cta": "C",
+            "object_copy": [{"object_id": "obj_01", "text": "   "}]}
+    try:
+        generate_copy.validate_copy(copy, required_object_ids={"obj_01"})
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert "obj_01" in str(e)
+
+
+def test_validate_copy_ignores_object_copy_when_nothing_required():
+    # No candidates this run - object_copy absent must not raise, byte-identical to
+    # before this feature existed.
+    copy = {"headline": "H", "primary_text": "P", "cta": "C"}
+    generate_copy.validate_copy(copy)  # must not raise
+
+
+# ---- find_object_copy_collisions: distinctness enforced in CODE ----
+
+def test_find_object_copy_collisions_none_for_four_distinct_strings():
+    objects = _four_bubbles()
+    object_copy = [
+        {"object_id": "obj_01", "text": "Does it help with stretch marks?"},
+        {"object_id": "obj_02", "text": "Most see softer skin within two weeks."},
+        {"object_id": "obj_03", "text": "What's the scent like?"},
+        {"object_id": "obj_04", "text": "A light, fresh citrus."},
+    ]
+    assert generate_copy.find_object_copy_collisions(objects, object_copy) == []
+
+
+def test_find_object_copy_collisions_detects_defect_for_different_inputs():
+    # The exact live-failure shape: four objects with genuinely DIFFERENT description/
+    # persuasive_function all resolving to the identical generated text.
+    objects = _four_bubbles()
+    same_line = "Love it - it absorbs very well into the skin !!"
+    object_copy = [{"object_id": o["object_id"], "text": same_line} for o in objects]
+    collisions = generate_copy.find_object_copy_collisions(objects, object_copy)
+    assert len(collisions) == 6  # every pair among 4 objects: 4 choose 2
+    assert all(c["text"] == same_line for c in collisions)
+
+
+def test_find_object_copy_collisions_allows_shared_line_for_identical_inputs():
+    # "two objects with identical purpose and identical description may share a line" -
+    # the rule is distinctness-by-object, not forced variation: two objects that
+    # genuinely describe the SAME thing producing the SAME line is not a defect.
+    objects = [
+        _other_text_obj("obj_01", "a repeated small badge reading 'New'", "flags novelty",
+                         [0.1, 0.1, 0.1, 0.05]),
+        _other_text_obj("obj_02", "a repeated small badge reading 'New'", "flags novelty",
+                         [0.7, 0.1, 0.1, 0.05]),
+    ]
+    object_copy = [
+        {"object_id": "obj_01", "text": "New"},
+        {"object_id": "obj_02", "text": "New"},
+    ]
+    assert generate_copy.find_object_copy_collisions(objects, object_copy) == []
+
+
+def test_find_object_copy_collisions_ignores_empty_or_missing_entries():
+    objects = _four_bubbles()
+    object_copy = [{"object_id": "obj_01", "text": "Real line."},
+                   {"object_id": "obj_02", "text": ""},
+                   {"object_id": "obj_03"}]
+    assert generate_copy.find_object_copy_collisions(objects, object_copy) == []
+
+
+def test_find_object_copy_collisions_empty_inputs_never_raise():
+    assert generate_copy.find_object_copy_collisions([], []) == []
+    assert generate_copy.find_object_copy_collisions(None, None) == []

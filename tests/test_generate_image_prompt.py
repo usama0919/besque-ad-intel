@@ -460,6 +460,91 @@ def test_objects_clause_non_empty_does_not_log_error(caplog):
     assert not any(r.levelname == "ERROR" for r in caplog.records)
 
 
+# ---- _substitute_object_line's per-object copy lookup (2026-08-17 restoration) - the
+# root-cause fix for the four-DM-bubble bug: a text object with no recognised
+# text_purpose must use ITS OWN generated line from context["object_copy_by_id"],
+# looked up by object_id, never the shared generic fallback when one is available. ----
+
+def _other_text_object(object_id, description="a bubble"):
+    return {"object_id": object_id, "kind": "text", "text_purpose": "other",
+            "description": description, "disposition": "substitute"}
+
+
+def test_substitute_object_line_uses_object_copy_by_id():
+    obj = _other_text_object("obj_02", description="DM bubble asking about scent")
+    context = {"object_copy_by_id": {
+        "obj_01": "Does it help with stretch marks?",
+        "obj_02": "What's the scent like?",
+    }}
+    line = generate_image_prompt._substitute_object_line(obj, "text", "other", obj["description"], context)
+    assert "What's the scent like?" in line
+    assert "Does it help with stretch marks?" not in line
+    assert "Besque's own equivalent content" not in line
+
+
+def test_substitute_object_line_falls_back_to_generic_when_object_id_not_in_copy():
+    obj = _other_text_object("obj_03")
+    context = {"object_copy_by_id": {"obj_01": "Some other bubble's line."}}
+    line = generate_image_prompt._substitute_object_line(obj, "text", "other", obj["description"], context)
+    assert "Besque's own equivalent content" in line
+
+
+def test_substitute_object_line_falls_back_to_generic_when_no_object_copy_at_all():
+    obj = _other_text_object("obj_01")
+    line = generate_image_prompt._substitute_object_line(obj, "text", "other", obj["description"], {})
+    assert "Besque's own equivalent content" in line
+
+
+def test_substitute_object_line_object_copy_never_leaks_to_a_different_object_id():
+    # Two DIFFERENT objects, two DIFFERENT context entries - each must get its OWN line,
+    # never the other's (the exact defect the live four-bubble failure had: every
+    # object shared ONE value because nothing was keyed by object_id at all).
+    context = {"object_copy_by_id": {"obj_01": "Line for bubble one.",
+                                      "obj_02": "Line for bubble two."}}
+    line1 = generate_image_prompt._substitute_object_line(
+        _other_text_object("obj_01"), "text", "other", "bubble one", context)
+    line2 = generate_image_prompt._substitute_object_line(
+        _other_text_object("obj_02"), "text", "other", "bubble two", context)
+    assert "Line for bubble one." in line1
+    assert "Line for bubble two." in line2
+    assert "Line for bubble two." not in line1
+    assert "Line for bubble one." not in line2
+
+
+def test_build_image_prompt_threads_object_copy_by_object_id():
+    """End-to-end: build_image_prompt's object_copy parameter must reach each text
+    object's own SUBSTITUTE line via its object_id - closing the dead-key-shaped gap
+    where four DM bubbles previously reused build_image_prompt's shared generic
+    fallback because build_image_prompt never had an object_copy parameter at all."""
+    bp = {
+        "visual": {"layout": "flat lay", "subject": "", "palette_mood": "warm",
+                   "text_placement": "lower"},
+        "objects": [
+            _other_text_object("obj_01", description="DM bubble one"),
+            _other_text_object("obj_02", description="DM bubble two"),
+        ],
+    }
+    prompt = generate_image_prompt.build_image_prompt(
+        bp, object_copy=[
+            {"object_id": "obj_01", "text": "Does it help with stretch marks?"},
+            {"object_id": "obj_02", "text": "What's the scent like?"},
+        ],
+    )
+    assert "Does it help with stretch marks?" in prompt
+    assert "What's the scent like?" in prompt
+    assert "Besque's own equivalent content" not in prompt
+
+
+def test_build_image_prompt_object_copy_none_keeps_generic_fallback():
+    bp = {
+        "visual": {"layout": "flat lay", "subject": "", "palette_mood": "warm",
+                   "text_placement": "lower"},
+        "objects": [_other_text_object("obj_01", description="a bubble")],
+    }
+    prompt = generate_image_prompt.build_image_prompt(bp)
+    assert "Besque's own equivalent content" in prompt
+
+
 def test_non_carryover_exceptions_clause_excepts_scene_objects():
     # 2026-08-17: repointed at the SCENE OBJECTS inventory (_objects_clause), which
     # subsumed the deleted "COMPETITOR ELEMENTS TO SUBSTITUTE" instruction this

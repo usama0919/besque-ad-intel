@@ -242,23 +242,201 @@ def _redact_personal_attribution(text):
 
 # text_zone_targets/_text_zone_copy_clause/_cta_zone/_cta_zone_clause DELETED 2026-08-17:
 # their sole input, structural_zones, no longer exists (schema/blueprint.schema.json -
-# blueprint.objects replaces it). The per-zone-type copy precision they carried (a
-# DIFFERENT line of Besque copy per sub_line/body_copy/product_callout zone, matched
-# back to the image path by echoing the zone's own position string verbatim) has NO
-# equivalent in the objects model and was NOT restored - Stage 2 of the objects
-# restoration this session scoped product_callout down to a single substitution (the
-# bare Besque product name, via generate_image_prompt._substitute_object_line), not
-# per-callout benefit copy; see the handover report for this session. What WAS
-# restored is the narrower, still-load-bearing half of what these functions did:
-# telling generate_copy_live/validate_copy whether a real subtext/cta-shaped text block
-# exists in the reference at all, so an empty cta/image_subtext against one still fails
-# validation - see _has_text_purpose_object below, which replaces both existence checks
-# with one exact match against each object's own text_purpose.
+# blueprint.objects replaces it). telling generate_copy_live/validate_copy whether a
+# real subtext/cta-shaped text block exists in the reference at all, so an empty cta/
+# image_subtext against one still fails validation - see _has_text_purpose_object below,
+# which replaces both existence checks with one exact match against each object's own
+# text_purpose.
+#
+# text_zone_targets/_text_zone_copy_clause's PER-ZONE COPY PRECISION restored 2026-08-17
+# (a live regression this exact mechanism had already fixed once, for product_callout
+# specifically - see git history a9b1e9f/085eb16): a reference with four Instagram DM
+# bubbles produced a draft where all four bubbles carried the identical generated
+# sentence. Root cause: every one of those four bubbles is a kind=="text" object with
+# text_purpose "other" (no recognised purpose - headline/subtext/cta/offer/
+# certification/testimonial/price_anchor/award/disclaimer/product_callout all have their
+# OWN dedicated content source elsewhere in this pipeline; "other" alone does not), and
+# generate_image_prompt._substitute_object_line's fallback for that case supplied no
+# concrete content at all - just "replace with Besque's own equivalent content" with
+# nothing distinguishing one object_id from another. See text_objects_needing_copy/
+# _object_copy_clause below - the SAME shape as the deleted per-zone mechanism, re-keyed
+# to object_id (a real, stable identifier) instead of a keyword-parsed position string,
+# since the objects-array refactor made that available and it is strictly more precise.
 def _has_text_purpose_object(blueprint, purpose):
     return any(
         (obj or {}).get("kind") == "text" and (obj or {}).get("text_purpose") == purpose
         for obj in (blueprint or {}).get("objects") or []
     )
+
+
+def text_objects_needing_copy(blueprint):
+    """Every kind=="text" object with no recognised text_purpose ("other", or the field
+    absent - a legacy object predating text_purpose) whose disposition already resolved
+    to "substitute". Every OTHER text_purpose (headline/subtext/cta/offer/certification/
+    testimonial/price_anchor/award/disclaimer/product_callout) already has its own
+    dedicated content source elsewhere in this pipeline (rule 6 TEXT POLICY, offer_text,
+    certifications, testimonial, product_name, cta_text - see generate_image_prompt.
+    _substitute_object_line) and does not need this.
+
+    disposition is read directly from the object as already stored, never re-resolved
+    here: deconstruct.resolve_disposition's "other"/no-purpose branch never consults
+    `context` at all (only offer/price_anchor/certification/testimonial are context-
+    gated) - ownership/carries_brand_mark and the model's own guess are the only inputs,
+    both already resolved once at deconstruct time, so the stored value is final and
+    stable regardless of which run reads it.
+
+    Returns [] when there are none at all - callers must treat that as "nothing to
+    generate copy for", never a target with nothing in it. This is the direct fix for
+    the live multi-bubble failure: four Instagram DM bubbles, each its own kind=="text"
+    object with text_purpose "other", all resolved to "substitute" and all received the
+    IDENTICAL generated line, because nothing gave each one its OWN copy to
+    substitute - the same failure shape the deleted text_zone_targets/
+    _text_zone_copy_clause already fixed once for product_callout (git history
+    a9b1e9f/085eb16), never restored for this case until now."""
+    objects = (blueprint or {}).get("objects") or []
+    return [
+        obj for obj in objects
+        if (obj or {}).get("kind") == "text"
+        and (obj or {}).get("text_purpose") in (None, "other")
+        and (obj or {}).get("disposition") == "substitute"
+    ]
+
+
+def _reading_order_key(obj):
+    """Top-to-bottom, then left-to-right, from the object's own bbox ([x, y, w, h] as
+    fractions of the frame - schema/blueprint.schema.json). A genuinely conversational
+    reference (a DM exchange) needs its objects addressed in the order a viewer actually
+    reads them, not blueprint list order, so Besque's replacement copy can read as a
+    coherent sequence rather than four independently-written lines that happen to share
+    a frame. Missing/malformed bbox sorts to the top-left corner - never raises, never
+    guesses a position beyond that."""
+    bbox = (obj or {}).get("bbox") or [0, 0, 0, 0]
+    y = bbox[1] if len(bbox) > 1 else 0
+    x = bbox[0] if len(bbox) > 0 else 0
+    return (y, x)
+
+
+def _object_copy_clause(objects):
+    """Per-object copy generation for text_objects_needing_copy's candidates - restores
+    text_zone_targets/_text_zone_copy_clause (deleted a9b1e9f, recovered from git
+    history rather than reinvented), re-keyed to object_id instead of a free-text
+    position string now that blueprint.objects makes a real, stable identifier
+    available - genuinely more precise than the old position-string match, not just an
+    equivalent rewire.
+
+    Also restores _text_purpose_clause's job-inheritance rule (deleted a9b1e9f) at the
+    point of use: each object's own `persuasive_function` names the JOB it does in the
+    reference's argument - the generated line must accomplish that SAME job, in Besque's
+    own words, never the reference's sentence structure or specific nouns. text_purpose_
+    clause's top-level "communicative purpose" framing doesn't fit the per-object model
+    (there is no longer a single blueprint-wide list of {text, purpose, placement}
+    entries to enumerate) - the JOB-inheritance RULE is restored, not the deleted
+    function's exact shape.
+
+    Objects are listed in READING ORDER (_reading_order_key, from each object's own
+    bbox) so a conversational reference gets a coherent sequence, not four
+    independently-generated lines.
+
+    This clause states the DIFFERENTIATING FACTS (description, persuasive_function,
+    role, reading order) and asks for genuinely different wording when there is more
+    than one object - it is NOT the enforcement mechanism. Distinctness is enforced in
+    CODE (see find_object_copy_collisions), never trusted to a prompt sentence alone -
+    this codebase's own standing finding is that prompt-only rules do not reliably bind
+    (see CLAUDE.md's guardrails note); giving the model genuinely different per-object
+    facts to write from is what actually produces different output, the sentence below
+    is reinforcement on top of that, not a substitute for it.
+
+    description/persuasive_function are redacted via _redact_personal_attribution before
+    being printed here - a reference object's own fields can carry a personal-name-
+    shaped construct straight from the reference, the same risk _text_zone_copy_clause's
+    `detail` field already had.
+
+    Returns "" when objects is empty - callers get byte-identical prompt output for any
+    blueprint with no text_purpose=="other"/unset substitute-marked object, exactly as
+    before this existed."""
+    if not objects:
+        return ""
+    ordered = sorted(objects, key=_reading_order_key)
+    lines = "\n".join(
+        f'  - object_id "{obj.get("object_id", "")}" (role: {obj.get("role") or "unspecified"}): '
+        f'the reference shows - {_redact_personal_attribution(obj.get("description") or "")} '
+        f'- its JOB in the reference\'s argument: '
+        f'{_redact_personal_attribution(obj.get("persuasive_function") or "unspecified")}'
+        for obj in ordered
+    )
+    repeat_rule = (
+        " Every object must get genuinely different wording matching its own described "
+        "content and JOB - never repeat the same phrase across objects, and never let "
+        "one object's text describe what a DIFFERENT object shows. Two objects that "
+        "genuinely share the same role, description, and job may share the same line - "
+        "that is correct, not a defect; the rule is distinctness matching what each "
+        "object actually shows, never variation for its own sake."
+    ) if len(ordered) > 1 else ""
+    return (
+        "\n\nOBJECT COPY (STRICT): this reference has "
+        f"{len(ordered)} distinct text object(s) with no single recognised purpose "
+        f"(headline/subtext/cta/offer/certification/testimonial/product_callout/etc.) "
+        f"that each need their OWN matching Besque copy - not the reference's own words, "
+        f"and not a generic substitution - listed below in reading order (top-to-bottom, "
+        f"then left-to-right):\n{lines}\n"
+        "Inherit the JOB each object does in the reference's argument, never its "
+        "WORDING: write an ENTIRELY NEW sentence for every object above - never reuse "
+        "the reference's own sentence structure, phrasing, or specific nouns/subjects it "
+        "named, even when the job itself carries over exactly. Any personal name, "
+        "initial-surname construction (e.g. \"Sean R.\"), handle, or signature is never "
+        "written into object_copy under any circumstances, even if one appeared in the "
+        "description/job above - the only personal attribution this copy may ever carry "
+        "is the one supplied in APPROVED TESTIMONIALS, and that never flows through this "
+        "field. "
+        "Also return an ADDITIONAL field, object_copy: a list of EXACTLY "
+        f"{len(ordered)} objects, one per object above, each "
+        '{"object_id": "<the exact object_id from the list above, verbatim>", '
+        '"text": "<a short line of Besque copy matching what THAT object specifically '
+        f'shows and its own JOB>"}}.{repeat_rule}'
+    )
+
+
+def find_object_copy_collisions(objects, object_copy):
+    """Detects a DEFECT: two DIFFERENT text objects (different object_id) whose
+    generated object_copy text is byte-identical, despite their own differentiating
+    fields (role, description, persuasive_function) NOT all being identical - the exact
+    mechanism shape of the live four-DM-bubble bug this restoration fixes. Two objects
+    that genuinely share the same role/description/persuasive_function ARE allowed to
+    share a line - that is not a defect, it is two equivalent inputs correctly producing
+    the same output; this function only flags a collision when the INPUTS differ but
+    the OUTPUT didn't.
+
+    Enforced in CODE, never a prompt sentence asking the model to avoid repetition -
+    this codebase's own standing finding is that prompt-only rules do not reliably bind
+    (see CLAUDE.md's guardrails note): _object_copy_clause's own "genuinely different
+    wording" sentence is reinforcement, not the enforcement mechanism - this function is.
+
+    Never raises, never mutates either argument - a pure detection function. Returns a
+    list of {"object_ids": (id_a, id_b), "text": shared_text} dicts, one per colliding
+    pair, [] when nothing collides (including when object_copy is empty/absent, or has
+    fewer than two non-empty entries - nothing to compare)."""
+    by_id = {obj.get("object_id"): (obj or {}) for obj in (objects or []) if (obj or {}).get("object_id")}
+    text_by_id = {
+        entry.get("object_id"): (entry.get("text") or "").strip()
+        for entry in (object_copy or [])
+        if isinstance(entry, dict) and entry.get("object_id")
+    }
+    ids = [oid for oid, text in text_by_id.items() if text]
+    collisions = []
+    for i in range(len(ids)):
+        for j in range(i + 1, len(ids)):
+            a, b = ids[i], ids[j]
+            if text_by_id[a] != text_by_id[b]:
+                continue
+            obj_a, obj_b = by_id.get(a) or {}, by_id.get(b) or {}
+            same_inputs = (
+                obj_a.get("role") == obj_b.get("role")
+                and obj_a.get("description") == obj_b.get("description")
+                and obj_a.get("persuasive_function") == obj_b.get("persuasive_function")
+            )
+            if not same_inputs:
+                collisions.append({"object_ids": (a, b), "text": text_by_id[a]})
+    return collisions
 
 
 def _used_copy_clause(used_headlines):
@@ -351,7 +529,16 @@ def build_copy_prompt(blueprint, brand_voice="", approved_claims="", product=Non
     text, etc.) would otherwise reach Claude with no clause governing it at all. One
     redaction pass over the whole dumped JSON covers this and any other current or
     future field with the same shape, rather than a per-field filter that could miss
-    one."""
+    one.
+
+    object_copy (2026-08-17 restoration, see text_objects_needing_copy/
+    _object_copy_clause) is appended the same additive way as used_headlines/
+    compliance_feedback below - a blueprint with no text_purpose=="other"/unset
+    substitute-marked object sees a byte-identical prompt to before this existed. Kept
+    OUTSIDE the ANGLE LANGUAGE/TIER rules above deliberately, never replacing them:
+    TIER 1/2/3's governing text applies to the model's entire JSON response, object_copy
+    included - this only adds a further, per-object instruction on top, never a
+    competing one."""
     prompt = COPY_PROMPT.format(
         image_subtext_field=_image_subtext_field(_has_text_purpose_object(blueprint, "subtext")),
         brand_voice=brand_voice or NO_BRAND_VOICE,
@@ -365,6 +552,7 @@ def build_copy_prompt(blueprint, brand_voice="", approved_claims="", product=Non
     )
     if used_headlines:
         prompt += _used_copy_clause(used_headlines)
+    prompt += _object_copy_clause(text_objects_needing_copy(blueprint))
     if compliance_feedback:
         issues_text = "\n".join(f"- {issue}" for issue in compliance_feedback)
         prompt += (
@@ -397,16 +585,17 @@ BANNED_DASH_PATTERN = re.compile(r"\s*(?:--|—|–)\s*")
 def strip_banned_dashes(copy):
     """Mechanically replaces every em dash/en dash/double-hyphen in every string value of
     a parsed copy dict with a plain comma - applied uniformly to every field, never
-    guessing which ones might contain one. panel_copy (see _text_zone_copy_clause) is the
-    one field whose real copy text sits nested inside a list of {"position", "text"}
-    dicts rather than as a plain string value - handled by name, the same way this
-    module's other panel_copy-aware code already does, rather than generic recursion into
-    every possible nested shape."""
+    guessing which ones might contain one. panel_copy (see _text_zone_copy_clause) and
+    object_copy (see _object_copy_clause, 2026-08-17 restoration, re-keyed to object_id)
+    are both fields whose real copy text sits nested inside a list of dicts rather than
+    as a plain string value - handled by name, the same way this module's other
+    panel_copy-aware code already does, rather than generic recursion into every
+    possible nested shape."""
     result = {}
     for k, v in copy.items():
         if isinstance(v, str):
             result[k] = BANNED_DASH_PATTERN.sub(", ", v)
-        elif k == "panel_copy" and isinstance(v, list):
+        elif k in ("panel_copy", "object_copy") and isinstance(v, list):
             result[k] = [
                 {**entry, "text": BANNED_DASH_PATTERN.sub(", ", entry["text"])}
                 if isinstance(entry, dict) and isinstance(entry.get("text"), str)
@@ -449,7 +638,7 @@ def _seasons_mentioned(text):
             if any(re.search(p, text) for p in patterns)}
 
 
-def validate_copy(copy, require_cta=False, require_image_subtext=False):
+def validate_copy(copy, require_cta=False, require_image_subtext=False, required_object_ids=None):
     """require_cta/require_image_subtext (2026-08-11): mechanical backstop for the same
     condition _image_subtext_field's prompt text already asks for - a
     prompt instruction alone is the exact pattern that has repeatedly failed on this
@@ -458,7 +647,16 @@ def validate_copy(copy, require_cta=False, require_image_subtext=False):
     value is non-empty, so a model that decided no CTA was needed could return cta=""
     with nothing here ever noticing. Callers pass True only when the reference actually
     has a matching zone (see generate_copy_live) - the empty string is perfectly valid
-    whenever no such zone exists, exactly like today."""
+    whenever no such zone exists, exactly like today.
+
+    required_object_ids (2026-08-17 restoration): the set of object_id values
+    text_objects_needing_copy(blueprint) identified for THIS blueprint - the same
+    mechanical-backstop reasoning as require_cta/require_image_subtext above, applied
+    per object instead of once per draft: a model that supplies object_copy for some
+    bubbles but not others (or omits the field entirely) must fail validation and retry,
+    never silently leave a bubble to fall back to the content-free generic substitution
+    that caused the original live failure. None/empty means no such object exists this
+    run - byte-identical behaviour to before this existed."""
     missing = REQUIRED_COPY_FIELDS - copy.keys()
     if missing:
         raise ValueError("Copy missing required fields: " + str(missing))
@@ -472,6 +670,29 @@ def validate_copy(copy, require_cta=False, require_image_subtext=False):
             "image_subtext is empty but this reference has a sub_line/body_copy zone that "
             "needs matching wording - the zone will be removed from the image otherwise."
         )
+    required_object_ids = required_object_ids or set()
+    if required_object_ids:
+        object_copy = copy.get("object_copy")
+        if not isinstance(object_copy, list):
+            raise ValueError(
+                f"object_copy missing or not a list, but {len(required_object_ids)} text "
+                f"object(s) with no recognised purpose need per-object copy: "
+                f"{sorted(required_object_ids)}"
+            )
+        got_ids = {(entry or {}).get("object_id") for entry in object_copy if isinstance(entry, dict)}
+        missing_ids = required_object_ids - got_ids
+        if missing_ids:
+            raise ValueError(
+                f"object_copy is missing entries for object_id(s) {sorted(missing_ids)} - "
+                f"every text object with no recognised purpose needs its own matching line."
+            )
+        empty_ids = {
+            (entry or {}).get("object_id") for entry in object_copy
+            if isinstance(entry, dict) and entry.get("object_id") in required_object_ids
+            and not (entry.get("text") or "").strip()
+        }
+        if empty_ids:
+            raise ValueError(f"object_copy has empty text for object_id(s) {sorted(empty_ids)}")
     combined = " ".join([copy.get("headline") or "", copy.get("primary_text") or "",
                           copy.get("image_subtext") or ""])
     seasons = _seasons_mentioned(combined)
@@ -485,10 +706,11 @@ def validate_copy(copy, require_cta=False, require_image_subtext=False):
         )
 
 
-def copy_from_response(raw_text, require_cta=False, require_image_subtext=False):
+def copy_from_response(raw_text, require_cta=False, require_image_subtext=False, required_object_ids=None):
     copy = parse_copy(raw_text)
     copy = strip_banned_dashes(copy)
-    validate_copy(copy, require_cta=require_cta, require_image_subtext=require_image_subtext)
+    validate_copy(copy, require_cta=require_cta, require_image_subtext=require_image_subtext,
+                   required_object_ids=required_object_ids)
     return copy
 
 
@@ -557,13 +779,22 @@ def generate_copy_live(blueprint, brand_voice="", approved_claims="", product=No
     see _has_text_purpose_object. A raised ValueError is caught by this function's OWN
     retry loop below exactly like any other validation failure - an empty cta/
     image_subtext against a real zone gets the same second attempt a malformed-JSON
-    response would, no separate retry path invented for this."""
+    response would, no separate retry path invented for this.
+
+    required_object_ids (2026-08-17 restoration): derived from the SAME blueprint,
+    same reasoning as require_cta/require_image_subtext above - text_objects_needing_
+    copy(blueprint) is the identical call _object_copy_clause used to build the prompt's
+    own OBJECT COPY section, so the mechanical check and the prompt's own request can
+    never name a different set of objects."""
     prompt = build_copy_prompt(blueprint, brand_voice, approved_claims, product=product,
                                 approved_testimonials=approved_testimonials,
                                 compliance_feedback=compliance_feedback, offer_text=offer_text,
                                 angle_language=angle_language, used_headlines=used_headlines)
     require_cta = _has_text_purpose_object(blueprint, "cta")
     require_image_subtext = _has_text_purpose_object(blueprint, "subtext")
+    required_object_ids = {
+        obj.get("object_id") for obj in text_objects_needing_copy(blueprint) if obj.get("object_id")
+    }
     client = anthropic.Anthropic(timeout=60.0, max_retries=1)  # reads ANTHROPIC_API_KEY from env
 
     total = len(_COPY_ATTEMPTS)
@@ -581,7 +812,8 @@ def generate_copy_live(blueprint, brand_voice="", approved_claims="", product=No
         raw_text = ""
         try:
             raw_text = message.content[0].text if message.content else ""
-            return copy_from_response(raw_text, require_cta=require_cta, require_image_subtext=require_image_subtext)
+            return copy_from_response(raw_text, require_cta=require_cta, require_image_subtext=require_image_subtext,
+                                       required_object_ids=required_object_ids)
         except Exception as e:
             _log_parse_failure(attempt, total, max_tokens, message, raw_text, e)
             if attempt == total:

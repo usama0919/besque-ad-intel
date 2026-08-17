@@ -156,7 +156,7 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
                         realism: str = None, critic_feedback: list = None,
                         cta_text: str = None, panel_copy: list = None,
                         testimonial: dict = None, product_count: int = None,
-                        clone_mode: bool = False) -> str:
+                        clone_mode: bool = False, object_copy: list = None) -> str:
     """Construct a Besque-adapted image generation prompt from the blueprint's visual notes.
     include_product=True, text_in_image=False, creative_description=None, edit_mode=False,
     offer_text=None, operator_instruction=None (today's defaults) reproduce the prior
@@ -361,12 +361,26 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
     # Built once here, reused identically across all three branches below, so an offer/
     # certification/testimonial/cta object is judged against the SAME facts regardless
     # of which branch renders the prompt.
+    #
+    # object_copy_by_id (2026-08-17, second restoration): keyed by object_id, not the
+    # object's own kind/purpose - generate_copy.text_objects_needing_copy/
+    # _object_copy_clause generate ONE line per text object with no recognised
+    # text_purpose ("other"/absent); this is the root-cause fix for a live failure where
+    # every such object (four Instagram DM bubbles, in the reported case) received the
+    # IDENTICAL generic fallback line in _substitute_object_line, because nothing
+    # differentiated one object_id's substitution from another's.
+    object_copy_by_id = {
+        entry.get("object_id"): entry.get("text")
+        for entry in (object_copy or [])
+        if isinstance(entry, dict) and entry.get("object_id") and entry.get("text")
+    }
     objects_context = {
         "offer_text": offer_text,
         "certifications": (product or {}).get("certifications"),
         "testimonial": testimonial,
         "cta_text": cta_text,
         "product_name": (product or {}).get("name"),
+        "object_copy_by_id": object_copy_by_id,
     }
 
     if text_in_image:
@@ -765,15 +779,24 @@ def _substitute_object_line(obj, kind, text_purpose, description, context):
     "substitute" - dispatches on text_purpose (2026-08-17 restoration of the deleted
     _structural_zones_clause's per-zone-type rules) for a kind=="text" object with a
     recognised purpose, kind=="product" for the bottle (deferred to BOTTLE IDENTITY/
-    GEOMETRY, unchanged from before this restoration), and a generic fallback for
-    everything else (a non-text prop/logo/graphic being substituted, or a legacy text
-    object with no text_purpose recorded at all - back-compat, byte-for-byte the
-    original generic wording).
+    GEOMETRY, unchanged from before this restoration), and a per-object copy lookup for
+    everything else that reaches the fallback below (2026-08-17, second restoration -
+    root-cause fix for a live failure: a four-Instagram-DM-bubble reference produced a
+    draft where all four bubbles carried the IDENTICAL generated sentence, because this
+    fallback previously supplied no concrete content at all - "replace with Besque's own
+    equivalent content", nothing distinguishing one object_id from another. Every one of
+    those four bubbles is a kind=="text" object with text_purpose "other" - no other
+    recognised purpose reaches this fallback for a text object; a non-text kind being
+    substituted (a prop/logo/graphic) still gets the original generic wording, since
+    generate_copy.text_objects_needing_copy only ever generates copy for kind=="text").
 
     context supplies the actual Besque-side values to substitute WITH - see
     _objects_clause's own docstring for its shape. A purpose whose value is missing
     this run (no cta_text produced, e.g.) renders as an explicit removal instead of a
-    substitution with nothing to put there - never an empty or invented value."""
+    substitution with nothing to put there - never an empty or invented value.
+    object_copy_by_id (this object's own generated line, keyed by object_id, built by
+    build_image_prompt from generate_copy_live's `object_copy` field) is looked up by
+    THIS object's own object_id, never a shared value - see the fallback branch below."""
     if kind == "product":
         return (
             "SUBSTITUTE: this position held a competitor product - place the "
@@ -836,6 +859,14 @@ def _substitute_object_line(obj, kind, text_purpose, description, context):
             f"{description} that appeared here is REMOVED, not left as an empty "
             f"button; close the space naturally with the surrounding surface."
         )
+    object_copy_text = (context.get("object_copy_by_id") or {}).get(obj.get("object_id"))
+    if object_copy_text:
+        return (
+            f"SUBSTITUTE: replace this {kind or 'object'} "
+            f"(\"{description}\") with this run's generated Besque copy for THIS "
+            f"specific object: \"{object_copy_text}\" - same position, our words only, "
+            f"never the reference's own wording and never a different object's text."
+        )
     return (
         f"SUBSTITUTE: replace this {kind or 'object'} "
         f"(\"{description}\") with Besque's own equivalent content, in the "
@@ -862,9 +893,14 @@ def _objects_clause(objects=None, context=None, ad_id=None):
 
     context (2026-08-17, restoring the per-zone-type rules the deleted
     _structural_zones_clause used to encode) is {"offer_text", "certifications",
-    "testimonial", "cta_text", "product_name"} - the real Besque-side values THIS run
-    actually has to substitute with. None (the default) is treated as "nothing
-    supplied", same as deconstruct.resolve_disposition's own default.
+    "testimonial", "cta_text", "product_name", "object_copy_by_id"} - the real
+    Besque-side values THIS run actually has to substitute with. None (the default) is
+    treated as "nothing supplied", same as deconstruct.resolve_disposition's own
+    default. object_copy_by_id (2026-08-17, second restoration) is a dict of
+    {object_id: generated_text} - generate_copy.text_objects_needing_copy's per-object
+    restoration for text objects with no recognised text_purpose ("other"/absent), the
+    root-cause fix for a live failure where every such object received the identical
+    generic fallback line - see _substitute_object_line's own docstring.
 
     - keep: reproduced exactly as shown, unchanged - the analogue of the old
       MUST-INCLUDE list, but for every object the resolved disposition says to keep,
@@ -2445,7 +2481,7 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
                     messaging_angle=None, realism=None, body_area=None, offer_text=None,
                     edit_mode=False, competitor_image_bytes=None, operator_instruction=None,
                     retheme_colours=True, critic_feedback=None, cta_text=None, panel_copy=None,
-                    testimonial=None, product_count=None, clone_mode=False):
+                    testimonial=None, product_count=None, clone_mode=False, object_copy=None):
     """Single-pass image generation from the blueprint. One image, no iteration.
     Saves to assets/<stem>_draft.png (stem = ad_id, or ad_id+angle if angle_slug is given)
     and returns the path. Returns None on failure. include_product/text_in_image/headline/
@@ -2549,7 +2585,8 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
                                  retheme_colours=retheme_colours, brand_palette=brand_palette,
                                  realism=realism, critic_feedback=critic_feedback, cta_text=cta_text,
                                  panel_copy=panel_copy, testimonial=testimonial,
-                                 product_count=product_count, clone_mode=clone_mode)
+                                 product_count=product_count, clone_mode=clone_mode,
+                                 object_copy=object_copy)
     stem = _draft_stem(ad_id, angle_slug)
     # OCCLUDE_PERSON (Item 1, 2026-08-12): applied to the IN-MEMORY bytes only, right
     # before they're attached to Gemini - never to the on-disk image_path fetch, which
