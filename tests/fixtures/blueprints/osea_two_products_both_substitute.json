@@ -1,0 +1,226 @@
+{
+  "cta": "SHOP NOW",
+  "hook": {
+    "type": "bold_claim",
+    "headline_structure": "Second-person aspirational regret framing ('You'll Wish You Went Jumbo') implying the larger size is the obvious better choice"
+  },
+  "ad_id": "2278987709595623",
+  "angle": "Size-up savings: buy the jumbo format of a bestselling body oil and save 16% while doubling your summer glow",
+  "offer": {
+    "type": "percentage_discount",
+    "value": "16%",
+    "mechanic": "Buy the jumbo size of Undaria Algae Body Oil to save 16% plus free shipping"
+  },
+  "claims": [
+    "efficacy",
+    "sensory",
+    "ingredient",
+    "offer"
+  ],
+  "format": "offer_led",
+  "visual": {
+    "layout": "Two pump bottles of the same product side by side, smaller on the left and larger on the right, with headline text above and a savings badge overlaid on the right bottle",
+    "subject": "OSEA Undaria Algae Body Oil in standard and jumbo sizes",
+    "palette_mood": "Warm golden amber with clean white accents on a neutral off-white background; bright and summery",
+    "text_placement": "Headline and subhead at top-center; savings badge mid-right overlaid on the larger bottle"
+  },
+  "objects": [
+    {
+      "bbox": [
+        0.1,
+        0.02,
+        0.8,
+        0.18
+      ],
+      "kind": "text",
+      "role": "hero",
+      "colours": [
+        "dark green"
+      ],
+      "object_id": "obj_01",
+      "ownership": "competitor_branded",
+      "description": "Main headline reading 'You'll Wish You Went Jumbo'",
+      "disposition": "substitute",
+      "text_purpose": "headline",
+      "carries_brand_mark": false,
+      "persuasive_function": "Hooks attention with aspirational regret framing to push the jumbo size"
+    },
+    {
+      "bbox": [
+        0.15,
+        0.19,
+        0.7,
+        0.07
+      ],
+      "kind": "text",
+      "role": "secondary",
+      "colours": [
+        "dark green"
+      ],
+      "object_id": "obj_02",
+      "ownership": "competitor_branded",
+      "description": "Subhead reading 'Double your summer glow.'",
+      "disposition": "substitute",
+      "text_purpose": "subtext",
+      "carries_brand_mark": false,
+      "persuasive_function": "Reinforces the seasonal benefit and doubles-down on the glow promise"
+    },
+    {
+      "bbox": [
+        0.05,
+        0.28,
+        0.42,
+        0.68
+      ],
+      "kind": "product",
+      "role": "secondary",
+      "colours": [
+        "amber",
+        "golden yellow",
+        "white"
+      ],
+      "object_id": "obj_03",
+      "ownership": "competitor_branded",
+      "description": "OSEA Undaria Algae Body Oil standard-size pump bottle, smaller of the two, positioned on the left",
+      "disposition": "substitute",
+      "carries_brand_mark": true,
+      "persuasive_function": "Provides size comparison reference to make the jumbo bottle look like the obvious upgrade"
+    },
+    {
+      "bbox": [
+        0.35,
+        0.32,
+        0.52,
+        0.65
+      ],
+      "kind": "product",
+      "role": "hero",
+      "colours": [
+        "amber",
+        "golden orange",
+        "white"
+      ],
+      "object_id": "obj_04",
+      "ownership": "competitor_branded",
+      "description": "OSEA Undaria Algae Body Oil jumbo-size pump bottle, larger of the two, positioned on the right and slightly forward",
+      "disposition": "substitute",
+      "carries_brand_mark": true,
+      "persuasive_function": "The hero product being sold; its larger size visually justifies the offer"
+    },
+    {
+      "bbox": [
+        0.62,
+        0.33,
+        0.28,
+        0.22
+      ],
+      "kind": "graphic",
+      "role": "secondary",
+      "colours": [
+        "gold",
+        "yellow",
+        "dark brown"
+      ],
+      "object_id": "obj_05",
+      "ownership": "competitor_branded",
+      "description": "Circular gold badge shape with dark border overlaid on the upper-right area of the jumbo bottle",
+      "disposition": "drop",
+      "carries_brand_mark": false,
+      "persuasive_function": "Draws the eye to the savings claim and signals a deal"
+    },
+    {
+      "bbox": [
+        0.65,
+        0.37,
+        0.22,
+        0.14
+      ],
+      "kind": "text",
+      "role": "secondary",
+      "colours": [
+        "dark green"
+      ],
+      "object_id": "obj_06",
+      "ownership": "competitor_branded",
+      "description": "Text inside the gold badge reading 'SAVE 16%'",
+      "disposition": "drop",
+      "text_purpose": "offer",
+      "carries_brand_mark": false,
+      "persuasive_function": "States the discount value to create purchase incentive"
+    }
+  ],
+  "background": {
+    "light": "Soft, even diffused light with no strong directional shadow, slightly warm",
+    "colour": "off-white / light grey",
+    "surface": "White ceramic subway-tile wall"
+  },
+  "typography": {
+    "headline_face": "serif",
+    "case_treatment": "Title case headline, sentence case subhead, all-caps savings badge",
+    "headline_weight": "regular",
+    "hierarchy_levels": [
+      "large serif headline top-center",
+      "medium bold sans-serif subhead below headline",
+      "bold sans-serif savings badge text mid-right"
+    ]
+  },
+  "captured_at": "2026-07-16",
+  "source_page": "OSEA",
+  "face_present": {
+    "has_face": false,
+    "location": "",
+    "prominence": "none"
+  },
+  "social_proof": {
+    "type": "bestseller_claim",
+    "owner": "OSEA"
+  },
+  "layout_detail": {
+    "text_zone": "Top third of frame for headline and subhead; mid-right for savings badge",
+    "product_count": 2,
+    "frame_division": "Upper text band over a single uninterrupted product display zone; no hard horizontal divisions",
+    "zone_positions": [
+      "headline top-center",
+      "subhead upper-center below headline",
+      "two product bottles mid-frame side by side",
+      "savings badge mid-right overlaid on larger bottle"
+    ],
+    "has_corner_badge": false,
+    "has_bottom_banner": false
+  },
+  "semantic_split": {
+    "is_split": false,
+    "split_axis": null,
+    "left_or_before": "",
+    "right_or_after": ""
+  },
+  "awareness_stage": "product",
+  "body_area_shown": "none",
+  "creative_format": "offer_led",
+  "destination_url": "https://oseamalibu.com/products/undaria-algae-oil",
+  "target_audience": "Existing or warm OSEA customers who already use or are considering the Undaria Algae Body Oil and are motivated by value",
+  "legibility_notes": "Headline and subhead are large and clearly legible at feed size; product label text ('undaria algae body oil') is small and may be difficult to read at feed size but is not critical; savings badge text is bold and legible",
+  "product_category": {
+    "signals": [
+      "Product label explicitly reads 'undaria algae body oil'",
+      "Brand name OSEA visible on both bottles",
+      "Golden amber oil visible through translucent bottle",
+      "Ad copy references 'silky-soft skin all over' confirming body application"
+    ],
+    "category": "body_oil",
+    "confidence": "high"
+  },
+  "production_style": {
+    "style": "high_spec",
+    "signals": [
+      "Controlled soft diffused studio lighting with no harsh shadows",
+      "Deliberate symmetrical product composition with intentional size contrast",
+      "Clean white tile backdrop is art-directed, not incidental",
+      "Precise typographic hierarchy with brand-consistent serif headline",
+      "No grain, blur, or handheld camera artefacts visible"
+    ],
+    "confidence": "high"
+  },
+  "headline_verbatim": "You'll Wish You Went Jumbo",
+  "creative_objective": "Drive purchase of the jumbo size by anchoring a 16% saving and free shipping incentive"
+}
