@@ -1,5 +1,22 @@
 # besque-ad-intel — working notes for Claude
 
+## STANDING RULE (2026-08-17): never delete anything without asking first
+**Never delete a function, clause, constant, or test without asking first.** If a
+refactor makes something unreachable, STOP and report it — do not remove it and
+record the loss in a commit message. "A real, documented capability loss" shipped
+unasked is not an acceptable thing to ship. This is not a style preference: it is
+what caused six confirmed capability losses across `6b82f60`/`a9b1e9f` (the
+objects-array refactor), found only by a dedicated audit days later, one of them
+already live in a real draft by the time it was found (a duplicate testimonial
+rendered in two boxes on the same image).
+
+**Corollary: never delete a test in the same commit as the code it covers.** Delete
+the code, let the test fail, then decide what to do about the failure. A failing
+test is information — it tells you exactly what behaviour the deletion removed, and
+gives you one last chance to notice it mattered before it's too late to ask. A
+deleted test is not information; it is silence, and silence is how six capability
+losses shipped undetected long enough to need a forensic audit to find them.
+
 ## Prompt-only guardrails do not bind on the image path — read this before adding
 ## an eighth instruction
 Four rounds of increasingly explicit `brand_rules()`/writer instructions failed to stop
@@ -1905,3 +1922,273 @@ either call site, since they carry no context-gated purpose.
   it in). Next step, not started: either restore the six-field detail to `background`
   (a deconstruct.py prompt change) or rewrite `_scene_lighting_facts` et al. to work
   from `background.light`'s single free-text phrase instead.
+
+## 2026-08-17 — SESSION 2: legacy re-deconstruct, per-object copy restored, Route B
+## compositing verified live, Layer A regression protection, deletion audit, three-
+## voices product-count fix, three more safeguards restored
+
+**Pushed today (all timestamps confirmed via `git show`, all same calendar date
+despite this session's own code comments wrongly dating some of this work
+2026-08-18/2026-08-19 — those are typos in source comments, not real dates; fix
+them next time that file is touched, not urgent enough to justify a code-only
+edit on its own):**
+
+`f13971f` (09:52) → `584c1f8` (10:40) → `af9ee8b` (12:44) → `0a703d5` (13:42) →
+`2eed7e3` (15:02) → `4fcdd30` (15:34) → `57a39e0` (15:39) → `8a50fd7` (17:24).
+
+None of these are merged to `main` or deployed — still on `feat/dynamic-edit-system`,
+same standing status as every prior session on this branch. Only ONE thing below is
+confirmed **VERIFIED LIVE** against a real Gemini call (the Route B gate firing);
+everything else this session was proven by unit/integration test and direct
+interpreter sanity-checks, not yet by a real Generate call. The standing rule on this
+(verify via Generate on a never-drafted ad, never Regenerate) still hasn't been
+exercised for most of today's work — first action next session.
+
+### `f13971f` — dead-key consumers repointed at `background`, per-object bboxes
+Fixes the exact gap the PRIOR "2026-08-17" session (above) flagged as still open:
+"`Scene lighting facts are always empty, and nothing downstream knows it`."
+`_scene_lighting_facts`/`_bottle_register_clause`/`_register_clause`/`drift_check.py`
+were still reading `visual.scene_lighting`'s old six-field shape, which no blueprint
+produced by the objects-array refactor (`6b82f60`) ever populates - silently
+degrading to the "not extracted" fallback on every single new ad, not just genuine
+gaps. Repointed at `background.{surface,colour,light}` (the field the refactor
+actually collapsed everything into) and at real per-object `bbox` values for
+zone-position facts, instead of the deleted `layout_detail.zone_positions` free-text
+list. **The known-open note above about this exact gap is now stale - left in place
+rather than deleted (per the standing rule this session added), corrected here
+instead.**
+
+### `584c1f8` — legacy blueprints re-deconstruct on the regenerate path
+**Why this mattered, not just what it did**: the objects-array refactor (`6b82f60`,
+2026-08-17 earlier session) shipped a NEW required schema field (`objects[]`) with
+**no backfill and no migration** - confirmed then, ~300 existing artifact rows had no
+`objects` key at all. `_regenerate_existing_draft` (`pipeline.py`) rebuilds its prompt
+from the artifact's OWN stored blueprint - meaning every one of those ~300 rows had
+been running the objects model against **zero real data** since the refactor
+shipped, silently degrading through `_objects_clause`'s own empty-objects fallback
+(no SUBSTITUTE/KEEP/DROP lines, no closure sentence) on every Regenerate click, with
+nothing surfacing that this was happening. Fixed: a legacy blueprint (no `objects`
+key) is now re-deconstructed from the source ad image before the prompt rebuilds,
+so Regenerate on an old artifact actually exercises the objects model for the first
+time rather than perpetuating a blueprint that predates it. `_objects_clause`'s
+empty-objects case (a blueprint that STILL has no `objects` after this, e.g. a
+re-deconstruct failure) now logs at ERROR by name instead of silently degrading -
+the same "make silent returns loud" principle as everywhere else this codebase has
+applied it this session.
+
+### `af9ee8b` — per-object copy generation restored, job-inheritance rule
+Root-cause fix for identical generated copy repeating across multiple text objects on
+one draft (confirmed live shape: four Instagram-DM-bubble objects on one reference,
+all four rendered the IDENTICAL generated sentence) - the deleted
+`generate_copy.text_zone_targets`/`_text_zone_copy_clause` machinery restored from
+git history, re-keyed to `object_id` (never a free-text position string, which the
+old pre-objects-model version matched by - object_id is exact, position strings
+never were). Per the operator's explicit amendment this session: the `text_purpose ==
+"other"` bucket is the PRIMARY failure path (the four DM bubbles are all
+`text_purpose="other"`, no other recognised purpose reaches this fallback for a text
+object) and now gets real, per-object generated copy driven by
+description/persuasive_function/role/reading-order, never a shared generic line.
+Restored from history, not reinvented, per the operator's explicit instruction that
+session.
+
+### `0a703d5` — `serves_object_id` re-evaluation, object removal rebuilds the prompt, bbox leak fixed
+Two related problems, one mechanism (an object existing "in service of" another -
+e.g. a hand holding a product - has no relational field and doesn't get re-evaluated
+when the object it serves changes disposition), plus one bug found while in this
+code:
+- `serves_object_id` (schema addition) records which OTHER object a text/prop object
+  exists only to support. `deconstruct._resolve_object_dispositions` now runs a
+  second pass: any object naming a `serves_object_id` is re-resolved against what the
+  object it serves ACTUALLY resolved to (substituted/dropped) - a hand serving a
+  product that gets substituted or dropped has no independent reason to survive
+  unchanged, closing the "the hand carries over unchanged" leak observed repeatedly
+  before this (also seen with hair). Single-hop only, documented as a scoping limit,
+  not a silent gap.
+- The operator's object-removal edit control previously only inpainted v1 pixels with
+  an isolated delta instruction, no view of the rest of the composition. Now marks
+  the target object's disposition `"drop"` in a COPY of the blueprint
+  (`generate_image_prompt.blueprint_with_object_dropped`), rebuilds the FULL prompt
+  via `build_image_prompt` (so `_objects_clause` emits a real ABSENT line plus the
+  closure sentence - the same mechanism a fresh generation already uses to remove an
+  object cleanly), then regenerates against the v1 draft, following
+  `_regenerate_existing_draft`'s own shape for resolving stored inputs.
+- **Bug found and fixed while in this code**: the literal text `"0.38 0.43"` (a raw
+  bbox fragment) was rendering into generated images, traced to the raw blueprint
+  JSON dump leaking into the copy prompt - fixed and covered by a dedicated test.
+
+### `2eed7e3` — Route B Pillow compositing, **gate fired live for the first time at 16:29 on ad `2767866756880226`**
+Gate-scoped Pillow compositing of the real bottle cutout into the generated draft
+(`composite_product`), instead of letting Gemini redraw the bottle freehand -
+`_composite_gate` decides, from blueprint-level facts alone (never the generated
+image), whether compositing is safe: exactly one substitute-marked product object
+with a usable bbox, not held/gripped, and `background.light` not hard/directional.
+Composites bottom-anchored/horizontally-centred with a conservative brightness match
+and a subtle contact shadow; `_bottle_geometry_clause`/`_bottle_identity_clause` are
+suppressed from the prompt ONLY when compositing will proceed (decided BEFORE
+`build_image_prompt` is called, since the gate is a pure function of blueprint
+facts - the ordering problem this required solving). Generate path only; regenerate/
+targeted-edit paths deliberately untouched this session. **Confirmed live at 16:29 on
+ad `2767866756880226`: the gate fired and the composite ran** - the first real
+evidence this mechanism actually engages against a real ad, not just its own test
+suite.
+
+### `4fcdd30` / `57a39e0` — Layer A regression protection
+**What it covers**: (1) `tests/fixtures/blueprints/` - real-shaped blueprint fixtures
+(one general-purpose, one the real OSEA "You'll Wish You Went Jumbo" two-product
+reference) asserting schema validity, every `objects[]` entry has required fields,
+and - critically, per an explicit correction this session - disposition assertions
+call `deconstruct.resolve_disposition(obj, context)` directly rather than reading the
+STORED `disposition` field, since the dual-resolution design means the stored value
+can legitimately disagree with what a real run actually resolves. (2) A non-empty
+clause guard: every `_..._clause`/`_..._facts`/`brand_rules` function in
+`generate_image_prompt.py`, found by INTROSPECTION (name pattern, not a hand-
+maintained list), must return non-empty text given a fully-populated valid scenario.
+(3) Silent returns made loud: of 9 total `return ""` sites found by systematic grep,
+4 got a new `log.error` (missing data that should normally be present -
+`_scene_lighting_facts`, `_scene_composition_facts`, `_register_clause`, one
+`_objects_clause` defensive path) and 4 were deliberately left silent (normal,
+frequently-empty per-run toggles - `_operator_instruction_clause`,
+`_critic_feedback_clause`, `_semantic_split_clause`,
+`_suppressed_container_exception` - logging ERROR on these would fire on the common
+case and bury real signal, the opposite of this task's own purpose).
+
+**What it does NOT cover** - said plainly, since "regression protection" invites
+assuming more coverage than exists: no Gemini/Claude calls, no image bytes, no live
+generation of any kind. It cannot catch a prompt that assembles correctly but
+produces a bad IMAGE, a compliance leak that only shows up in real pixels, or
+anything the output critic exists for. It also only fully covers the ONE real
+fixture (OSEA) in depth - the general-purpose fixture is synthetic, not drawn from a
+real ad, pending the operator supplying more real `ad_id`s for future fixtures.
+
+### Deletion audit — six GONE items found, three restored today, three still open
+A dedicated audit (two parallel forks, one for `src/`, one for deleted tests) of
+everything `6b82f60`/`a9b1e9f` removed from `src/` with no replacement, cross-checked
+against actual current file contents. Six confirmed GONE with no equivalent
+anywhere: **(1)** the duplicate-testimonial guard (`testimonial_placed`, old
+`_structural_zones_clause`) - **CONFIRMED LIVE**, a real draft rendered the identical
+review ("Nice and smooth... — Margaret P.") in two boxes; **(2)** the stat-claim
+badge force-removal (`STAT_CLAIM_PATTERNS`/`_is_stat_shaped_zone`) - worse than
+merely gone, a stat-shaped badge falling to `text_purpose="other"` with disposition
+`substitute` was getting FRESH Besque wording written into it by `_object_copy_clause`,
+an unsubstantiated efficacy claim, the exact violation class from 31 Jul; **(3)** the
+aggregate-review-bar-vs-single-quote distinction
+(`structural_zones[].social_proof_kind`); **(4)** per-zone typography detail
+(`typography_zones`); **(5)** testimonial card/rating styling detail
+(`testimonial_zones` - content is restored via `text_purpose="testimonial"`, HOW it
+was visually presented is not); **(6)** the copy "communicative purpose" steering
+clause (`_text_purpose_clause` - the pre-existing "Known open" note directly above
+this section, already correctly flagged as not fixed).
+
+**Restored this session** (see `8a50fd7` below): (1) and (3), the two confirmed
+compliance/duplication risks, plus (2) the stat-claim guard given the severity of the
+"gets fresh wording written into it" finding. **Still open, not restored, no fix
+direction chosen yet**: typography zones, testimonial styling detail, and the copy
+purpose-steering clause - all three are capability losses, correctly still
+documented as such per the standing rule at the top of this file, not silently
+re-deleted from the record just because they're not this session's fix.
+
+### `8a50fd7`, part 1 — three-voices product-count fix + contradiction guard
+Diagnosed and fixed a live failure on the real OSEA two-product reference: rule 7
+(`_rule7_product_policy`) said "exactly one bottle... NEVER add a second"; SCENE
+OBJECTS emitted two byte-identical SUBSTITUTE bullets for the two competitor product
+objects; `_edit_mode_instruction` said "substitute a Besque item [for each]" - three
+voices, two answers, in the SAME prompt. The critic reported neither bottle was ever
+replaced - not "one wins" (the older 8-bottle failure shape), literally neither.
+
+Fix: `deconstruct.resolve_product_group_dispositions` computes, from the objects
+inventory alone (a new optional `same_product_as` field distinguishing "same product,
+different size/format" from "genuinely different products"), whether multiple
+product objects should ALL substitute (matching the reference's own count) or exactly
+ONE should (the rest dropping, freed space closing into the composition). Every
+clause that used to independently claim a count - rule 7, `_edit_mode_instruction`,
+`product_clause`'s `>1` branch, `_substitute_object_line`'s per-object text - now
+reads the SAME computed value. Important nuance found mid-fix: a `>1` count is only
+trusted for "render N bottles" when it's genuinely grounded in objects-model evidence
+(`product_count_source == "objects"`) - a legacy blueprint with no `objects` array
+still collapses to exactly one bottle, unchanged since the original 2026-08-12 fix,
+or this restoration would have reintroduced the 8-bottle bug for every pre-objects-
+model row.
+
+**The regression lock this task explicitly required**: a generic contradiction-guard
+scanner (`tests/test_product_count_contradiction.py`) extracts every "exactly N
+bottle(s)" statement from a BUILT prompt and fails if any two disagree, or if the old
+unconditional "NEVER add a second bottle" phrasing coexists with a resolved count
+above 1 - scoped to catch a disagreement between ANY two sections, not tied to the
+three specific clauses this session happened to fix. Cross-path invariant tests
+confirm fresh generate, regenerate, and object removal all inherit the fix
+automatically (none of them pass `product_count` explicitly); targeted edit and the
+object-removal delta template are confirmed structurally exempt (they never state a
+bottle count at all).
+
+### `8a50fd7`, part 2 — duplicate-testimonial guard, stat-claim removal, aggregate-vs-quote restored
+The three items from the deletion audit above, restored purely additively (nothing
+deleted, per the standing rule this session added):
+- `deconstruct.resolve_testimonial_dispositions(objects, context)` - coordinates
+  across ALL `text_purpose=="testimonial"` objects in one call; at most one ever
+  resolves to `"substitute"` (the first eligible one, when a real testimonial was
+  supplied this run), every other one drops. Fixes the confirmed-live duplicate-quote
+  bug directly.
+- New optional schema field `objects[].social_proof_kind` (`"single_quote"` |
+  `"aggregate"` | null, absent defaults to `"single_quote"` for back-compat with
+  every pre-existing blueprint). An `"aggregate"`-marked object (a review-count/star-
+  average bar, e.g. "Rated 4.8 by 12,000 customers") is NEVER eligible to win the one
+  substitute slot, even when it's the only testimonial-purposed object present -
+  Besque has no approved aggregate figure (still "HELD pending Harry", unchanged from
+  earlier sessions).
+- `deconstruct.STAT_CLAIM_PATTERNS`/`_is_stat_shaped_text` recovered verbatim from
+  `6b82f60~1` (reuses `compliance.py`'s own numeric/ratio/timescale patterns,
+  unchanged). Wired into `_resolve_text_disposition`, checked BEFORE
+  `_TEXT_PURPOSE_ALWAYS_SUBSTITUTE` (`product_callout` is unconditionally in that
+  set, so a stat-shaped callout must be intercepted before reaching it). Deliberately
+  scoped to `product_callout`/`other`/no-purpose only, matching the original code's
+  exact scope - NOT headline/subtext, whose wording is already governed elsewhere and
+  never copies the reference's claim verbatim; forcing those SLOTS to drop would
+  delete a headline position Besque's own wording still needs to occupy.
+
+All three: `tests/test_restored_safeguards.py`, 18 tests, each naming the specific
+pre-`6b82f60` test it restores (verified against `git show 6b82f60~1` directly, not
+taken from the audit summary on trust).
+
+### Still open, not fixed this session
+- **Bottle fidelity beyond surface-placed compositing.** Route B only composites the
+  real cutout for the narrow gate `_composite_gate` clears (one substitute product,
+  usable bbox, not held, non-directional light) - held/gripped placements and
+  anything the gate rejects still depend entirely on Gemini drawing the bottle from
+  `_bottle_geometry_clause`/`_bottle_identity_clause` text alone, same reliability as
+  before this session.
+- **Inherited hand / `serves_object_id` coverage gap.** The relational field only
+  exists on blueprints deconstructed AFTER `0a703d5` - every pre-existing row has no
+  `serves_object_id` on any object and gets none of the re-evaluation benefit; never
+  backfilled, same "coverage gap, not yet closed" shape as every other schema
+  addition this branch has made.
+- **The unadaptable-reference gate**, and the staged-progression detector that should
+  feed it - recommended shape (a `argument_adaptable` boolean + `unadaptable_reason`,
+  plus `mark_seen` so a future run doesn't re-pay for the same unadaptable reference)
+  was written up in an earlier session; still not built.
+- **Women-only product constraint** - not audited or enforced anywhere this session;
+  flagged as open, no fix direction chosen.
+- **Vertex image-call retry** - the 12 Aug finding (a 429/`RESOURCE_EXHAUSTED` burst
+  discards deconstruct AND copy work for that ad, not just the image step) still has
+  no dedicated long-backoff/retryable-failure handling; unchanged this session.
+- **DB connection pool liveness** - the `ThreadedConnectionPool` (`maxconn=10`) has no
+  liveness/health check; a dropped pooled connection mid-run still surfaces as
+  "random 500s and blank pool-card images," same diagnosis as the 2026-08-10 note,
+  no fix attempted this session.
+- **`already_generated` guard** - not investigated this session; flagged as open by
+  name only, no detail recorded yet on what gap this actually covers or doesn't.
+- **Test hygiene for CI** - the ~40 untracked scratch files at repo root, the
+  `TEST_`/`PIPE_`/`ART_`-prefixed rows in `seen_ads` (1,497 of 1,670 as of the last
+  count), and the port-5433 local-Postgres dependency for `tests/` all remain
+  exactly as documented in earlier sessions - none touched today.
+- **Layer B golden set** - Layer A (this session) is unit/fixture-level regression
+  protection only; a golden set of real generated drafts checked against expected
+  visual/compliance outcomes (the actual gap a fixture can't close - see "what Layer A
+  does NOT cover" above) does not exist yet and wasn't started this session.
+
+### A note on the auto-commit anomaly, again
+Every commit this session (`f13971f` through `8a50fd7`) landed in `git log` without
+an explicit `git commit` call at the point of the corresponding task - reported
+transparently at the end of each task in-session, consistent with every prior
+occurrence of this same unexplained mechanism. Still no hook or setting found that
+explains it. Not investigated further this session; recorded here so the pattern
+stays visible across sessions rather than being re-discovered from scratch each time.
