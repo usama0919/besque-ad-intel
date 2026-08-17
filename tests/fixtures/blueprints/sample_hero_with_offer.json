@@ -1,0 +1,203 @@
+{
+  "ad_id": "FIXTURE_sample_hero_with_offer",
+  "source_page": "Example Competitor Co",
+  "captured_at": "2026-08-01T00:00:00Z",
+  "format": "single_image",
+  "hook": {
+    "type": "problem_agitate",
+    "headline_structure": "benefit-led statement over a lifestyle scene"
+  },
+  "angle": "crepey_skin",
+  "awareness_stage": "problem",
+  "claims": ["efficacy", "sensory", "offer"],
+  "visual": {
+    "layout": "product hero left-of-frame, headline top-right, offer badge bottom-right",
+    "subject": "a woman applying oil to her forearm over a bathroom counter",
+    "palette_mood": "warm neutral, soft morning light",
+    "text_placement": "headline upper third, offer badge lower-right corner"
+  },
+  "background": {
+    "surface": "marble bathroom counter",
+    "colour": "warm cream and grey veining",
+    "light": "soft warm light from upper-left, low contrast"
+  },
+  "objects": [
+    {
+      "object_id": "obj_01",
+      "kind": "product",
+      "description": "competitor's own body oil bottle, tall frosted glass with a black pump",
+      "bbox": [0.05, 0.30, 0.22, 0.55],
+      "colours": ["frosted white", "black"],
+      "ownership": "competitor_branded",
+      "role": "hero",
+      "carries_brand_mark": true,
+      "persuasive_function": "the product being sold",
+      "disposition": "keep"
+    },
+    {
+      "object_id": "obj_02",
+      "kind": "logo",
+      "description": "competitor wordmark printed on the bottle's front label",
+      "bbox": [0.08, 0.42, 0.12, 0.06],
+      "colours": ["black"],
+      "ownership": "competitor_branded",
+      "role": "secondary",
+      "carries_brand_mark": true,
+      "persuasive_function": "brand identification",
+      "disposition": "keep"
+    },
+    {
+      "object_id": "obj_03",
+      "kind": "prop",
+      "description": "a small ceramic dish stamped with the competitor's own logo",
+      "bbox": [0.30, 0.70, 0.10, 0.08],
+      "colours": ["white", "gold"],
+      "ownership": "generic",
+      "role": "supporting_prop",
+      "carries_brand_mark": true,
+      "persuasive_function": "styling prop",
+      "disposition": "keep"
+    },
+    {
+      "object_id": "obj_04",
+      "kind": "person",
+      "description": "a woman in her 30s applying oil to her forearm",
+      "bbox": [0.35, 0.10, 0.60, 0.85],
+      "colours": ["skin tone", "cream robe"],
+      "ownership": "person",
+      "role": "hero",
+      "carries_brand_mark": false,
+      "persuasive_function": "demonstrates the application ritual",
+      "disposition": "keep"
+    },
+    {
+      "object_id": "obj_05",
+      "kind": "text",
+      "description": "large headline text across the top third of the frame",
+      "bbox": [0.10, 0.02, 0.80, 0.12],
+      "colours": ["white"],
+      "ownership": "generic",
+      "role": "secondary",
+      "carries_brand_mark": false,
+      "persuasive_function": "primary hook",
+      "disposition": "substitute",
+      "text_purpose": "headline"
+    },
+    {
+      "object_id": "obj_06",
+      "kind": "text",
+      "description": "a rounded badge in the lower-right corner reading a discount amount",
+      "bbox": [0.72, 0.80, 0.20, 0.12],
+      "colours": ["red", "white"],
+      "ownership": "generic",
+      "role": "secondary",
+      "carries_brand_mark": false,
+      "persuasive_function": "promotional offer",
+      "disposition": "drop",
+      "text_purpose": "offer"
+    },
+    {
+      "object_id": "obj_07",
+      "kind": "text",
+      "description": "small text beneath the offer badge showing a struck-through original price",
+      "bbox": [0.72, 0.92, 0.20, 0.05],
+      "colours": ["grey"],
+      "ownership": "generic",
+      "role": "secondary",
+      "carries_brand_mark": false,
+      "persuasive_function": "price contrast",
+      "disposition": "drop",
+      "text_purpose": "price_anchor"
+    },
+    {
+      "object_id": "obj_08",
+      "kind": "text",
+      "description": "a small row of certification icons and captions along the bottom edge",
+      "bbox": [0.05, 0.94, 0.40, 0.05],
+      "colours": ["grey"],
+      "ownership": "generic",
+      "role": "supporting_prop",
+      "carries_brand_mark": false,
+      "persuasive_function": "trust signal",
+      "disposition": "drop",
+      "text_purpose": "certification"
+    },
+    {
+      "object_id": "obj_09",
+      "kind": "text",
+      "description": "a short quoted customer line in italic script near the middle of the frame",
+      "bbox": [0.40, 0.55, 0.35, 0.10],
+      "colours": ["white"],
+      "ownership": "generic",
+      "role": "secondary",
+      "carries_brand_mark": false,
+      "persuasive_function": "social proof",
+      "disposition": "drop",
+      "text_purpose": "testimonial"
+    },
+    {
+      "object_id": "obj_10",
+      "kind": "prop",
+      "description": "a folded linen towel resting on the counter beside the bottle",
+      "bbox": [0.28, 0.80, 0.12, 0.08],
+      "colours": ["cream"],
+      "ownership": "generic",
+      "role": "environment",
+      "carries_brand_mark": false,
+      "persuasive_function": "styling detail",
+      "disposition": "keep"
+    }
+  ],
+  "cta": "Shop now",
+  "destination_url": "https://example.com/shop",
+  "headline_verbatim": "Bye-bye, crepey skin",
+  "offer": {
+    "type": "percentage_discount",
+    "value": "20% off",
+    "mechanic": "code at checkout"
+  },
+  "social_proof": {
+    "type": "single_quote",
+    "owner": "reference"
+  },
+  "layout_detail": {
+    "text_zone": "top third and lower-right corner",
+    "product_count": 1,
+    "zone_positions": ["headline top-right", "offer badge bottom-right", "product mid-left"],
+    "has_bottom_banner": false,
+    "has_corner_badge": true,
+    "frame_division": "product left half, person right half"
+  },
+  "legibility_notes": "headline and offer badge both legible at feed scale",
+  "body_area_shown": "forearm",
+  "creative_objective": "drive a discounted first purchase",
+  "target_audience": "women 35-55 concerned about skin firmness",
+  "typography": {
+    "headline_face": "condensed sans-serif",
+    "headline_weight": "bold",
+    "hierarchy_levels": ["headline", "offer badge", "certification captions"],
+    "case_treatment": "sentence case"
+  },
+  "production_style": {
+    "style": "high_spec",
+    "confidence": "high",
+    "signals": ["studio lighting", "styled counter surface", "professional retouching"]
+  },
+  "face_present": {
+    "has_face": false,
+    "prominence": "none",
+    "location": ""
+  },
+  "semantic_split": {
+    "is_split": false,
+    "split_axis": null,
+    "left_or_before": "",
+    "right_or_after": ""
+  },
+  "creative_format": "product_hero",
+  "product_category": {
+    "category": "body_oil",
+    "confidence": "high",
+    "signals": ["pump-top bottle", "applied to skin", "body oil terminology in copy"]
+  }
+}

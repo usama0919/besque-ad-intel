@@ -1017,6 +1017,13 @@ def _objects_clause(objects=None, context=None, ad_id=None):
                 f"surrounding surface and lighting."
             )
     if not lines:
+        log.error(
+            "Ad %s: SCENE OBJECTS clause skipped - blueprint has a non-empty 'objects' "
+            "list but every entry resolved to a disposition other than keep/substitute/"
+            "drop (or resolve_disposition returned something unexpected). No object line "
+            "was built for any of %d object(s); the closure sentence was also dropped.",
+            ad_id, len(objects),
+        )
         return ""
     bullets = " ".join(f"({i}) {line}" for i, line in enumerate(lines, start=1))
     return (
@@ -1767,6 +1774,13 @@ def _scene_lighting_facts(background):
     background = background or {}
     light = background.get("light")
     if not light:
+        log.error(
+            "_scene_lighting_facts skipped - background.light is missing/empty on this "
+            "blueprint. Callers fall back to generic register-matching wording with no "
+            "observed lighting fact at all; this is the exact 'field collapsed by the "
+            "2026-08-17 objects-array refactor and nothing downstream knows it' gap "
+            "flagged in CLAUDE.md, not an expected per-run absence."
+        )
         return ""
     return f"OBSERVED SCENE LIGHTING (a fact about this reference, not a style label): {light}. "
 
@@ -1807,6 +1821,13 @@ def _scene_composition_facts(layout_detail=None, visual=None, background=None):
             bg_fact += f" ({background['colour']})"
         facts.append(bg_fact)
     if not facts:
+        log.error(
+            "_scene_composition_facts skipped - none of visual.layout, layout_detail."
+            "frame_division, layout_detail.zone_positions, or background.surface is "
+            "present on this blueprint. Callers fall back to a generic composition-aware "
+            "instruction with no observed placement fact at all for a new element being "
+            "added to the scene."
+        )
         return ""
     return ("OBSERVED SCENE COMPOSITION (facts about THIS reference's existing layout, "
             "never a fixed position): " + "; ".join(facts) + ". ")
@@ -1894,6 +1915,13 @@ def _register_clause(style, background=None):
     wins - stated explicitly so a phrase like "casual and unposed" or "propped on a
     surface" is read as texture, not as license to re-stage the shot."""
     if not style:
+        log.error(
+            "_register_clause skipped - no style/realism value was resolved before this "
+            "call (edit mode should always resolve one, via the operator's run-strip "
+            "choice or blueprint.production_style.style as a fallback). REGISTER "
+            "guidance, the bottle-fixed clause, and the bottle-register clause are all "
+            "silently omitted from this prompt as a result."
+        )
         return ""
     guidance = generate_image_prompt_writer.STYLE_GUIDANCE.get(style, DEFAULT_STYLE_GUIDANCE)
     return (
