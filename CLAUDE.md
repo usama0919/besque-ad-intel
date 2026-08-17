@@ -2192,3 +2192,92 @@ transparently at the end of each task in-session, consistent with every prior
 occurrence of this same unexplained mechanism. Still no hook or setting found that
 explains it. Not investigated further this session; recorded here so the pattern
 stays visible across sessions rather than being re-discovered from scratch each time.
+
+## 2026-08-17 (continued) — 15-Aug-vs-today prompt comparison: not a clean regression either way
+
+Operator report: good drafts 14-15 Aug, worse since. Compared by building real prompts
+(never by reading diffs alone) from a temp worktree at `5bc97cd` (last commit of 15
+Aug - **branch `known-good-15aug` points at this commit for future comparisons**)
+against HEAD, using the real 14-Aug artifact closest to that date (id 1279, ad_id
+`993666990086399`, "Norse Organics", 2026-08-14 11:35 UTC - no artifacts exist from
+15 Aug itself) and the OSEA two-product fixture for HEAD, both under `edit_mode=True`
+with the real current product record. Verdict: **differently shaped, weaker in three
+specific respects, stronger in others - not a clean regression.**
+
+### WEAKER - three fixes owed, in priority order
+
+1. **`product_callout` collapses to the bare product name.** Demonstrated by feeding
+   the SAME four real 14-Aug callout descriptions through today's code: "Deeply
+   Nourishing" / "Skin-Soothing" / "Visibly Softening" / "Fast-Absorbing" all render
+   as "Besque Magic Body Oil" four times. Root cause: `objects_context` is built
+   ONCE per draft in `build_image_prompt`; `_substitute_object_line`'s
+   `product_callout` branch returns `context["product_name"]` for every object,
+   with no per-object differentiation. The SAME shared-value defect is confirmed in
+   the `certification` branch (the whole joined certifications list gets stamped
+   into every certification-purposed object, not one certification per badge),
+   and in `offer`/`price_anchor`/`cta` when a reference has more than one of them.
+   `testimonial` is NOT affected the same way - `resolve_testimonial_dispositions`
+   already restricts at most one testimonial-purposed object to ever win the
+   substitute slot, so the shared-value shape in that branch's code is never
+   actually exercised by more than one object.
+
+   Fixing `product_callout` is NOT a pure code fix - it reopens a compliance
+   decision made deliberately this session: callout content was narrowed to the
+   bare product name specifically to stop each callout inventing its own
+   unsubstantiated benefit claim. A real per-callout fix needs `approved_claims`
+   from Harry to draw from, not just a code change that lets the model write
+   whatever benefit text it likes per object again.
+
+   **Certification is the safe one to fix first** - splitting an ALREADY-
+   AUTHORISED list (`product.certifications`) one-per-badge instead of the whole
+   list into every badge raises no compliance question at all; it's a clean
+   per-object routing fix with no open question blocking it.
+
+2. **Testimonial vs. aggregate can INVERT on blueprints not yet re-deconstructed
+   with `social_proof_kind`.** Demonstrated: with `social_proof_kind` absent (the
+   real state of every blueprint predating that field), the aggregate star-rating
+   bar wins the one real-testimonial substitute slot, and the actual single-quote
+   object - the one that should have won - gets dropped instead. The safeguard
+   (`resolve_testimonial_dispositions`, restored this session) is correct once the
+   field is populated; the gap is coverage, not logic - confirmed by re-running the
+   same real data with `social_proof_kind` correctly set, which resolved it correctly.
+
+3. **Competitor-argument-prop detection narrowed from open-ended model judgement to
+   ten fixed keywords.** 15 Aug trusted the model's own semantic call
+   (`depicts_competitor_category`, no keyword list) to decide whether a prop exists
+   to make the competitor's argument. Today's mechanical backstop
+   (`deconstruct._is_competitor_argument_prop`) only matches `("diagram",
+   "illustration", "device", "applicator", "inset", "anatomical", "prop stand",
+   "wand", "roller", "dropper tool")` - ten fixed words that do NOT include
+   "chain"/"padlock", despite this exact file naming the chain-and-padlock-
+   illustrating-locked-fat case as the MOTIVATING EXAMPLE for this feature (see the
+   13 Aug section above). Confirmed live: feeding that exact object through
+   `resolve_disposition` with the model's own guess wrong (`"keep"`) returns
+   `"keep"` unchanged - the mechanical net does not catch its own canonical case.
+
+### STRONGER today, for balance
+
+Explicit fixed bottle-geometry numbers (independent of whether a reference photo is
+attached, unlike 15 Aug's photo-only source of truth); the SCENE OBJECTS closure
+sentence (15 Aug had no whole-scene completeness statement at all); Route B
+compositing (removes the bottle-drawing task from Gemini entirely for placements its
+gate accepts); the count-aware, contradiction-guarded product-count mechanism
+(15 Aug had a bare number with no same-vs-different-product distinction); typography
+filtering that actually excludes dropped objects (15 Aug's own docstring claimed this
+but the code never enforced it).
+
+### Also confirmed this session: `87000ab` did not stop the double bottle
+
+`87000ab` ("request empty product-shaped space when compositing, so Gemini does not
+also draw a bottle") was **verified live and found NOT to fix the live symptom it was
+built for** - confirmed with a restart at 18:23 against an 18:22 commit (so the
+running process was definitely on the fixed code), and the double bottle still
+appeared. Not yet root-caused further this session. Do not treat `87000ab` as closing
+the double-bottle issue until this is re-investigated.
+
+Separately, the composite gate rejected every held placement it was shown - the grip
+gate is doing its job of refusing to composite a held product, per its own design.
+Across all stored blueprints with a non-empty `objects` array, held/gripped placements
+are ~19% (5 of 26 classified; N=26, small and directional only, not a stable
+statistic) - this is the number that should decide whether held-placement compositing
+is worth building, not a guess.
