@@ -1774,3 +1774,134 @@ OperationalError` on port 5433 (connection refused), never a real regression - t
 machine's local Postgres 17 service runs on 5432 and is a dev DB, not the isolated test
 DB `tests/conftest.py` forces every test onto. Never background a test run - if a
 scoped run legitimately needs the full suite, run it in the foreground and wait.
+
+## 2026-08-17 — objects-array refactor + compliance-aware text substitution restored
+**Two commits, same branch (`feat/dynamic-edit-system`), same day: `6b82f60` (the
+refactor itself) then `a9b1e9f` (this session, restoring what the refactor dropped).
+NEITHER IS VERIFIED LIVE** - no Gemini/Claude call and no running dashboard was
+exercised for either commit. **The first live test owed on this branch is a Generate
+(never Regenerate - see the standing rule on this elsewhere in this file) on the OSEA
+reference set ad.** Do not deploy before that verification run.
+
+### The objects inventory is now the ONLY per-element blueprint field
+`6b82f60` replaced FIVE separate top-level blueprint fields - `scene_elements`,
+`structural_zones`, `typography_zones`, `testimonial_zones`, and `text_purpose` (the
+array) - with a single required `objects[]` array on the schema
+(`schema/blueprint.schema.json`). Each entry carries `object_id`/`kind`/`bbox`/
+`ownership`/`role`/`carries_brand_mark`/`persuasive_function`/`disposition`, and (this
+session, `a9b1e9f`) a `text_purpose` string required whenever `kind=="text"`.
+
+**This is a BREAKING SCHEMA CHANGE, not an additive one.** Every artifact row
+deconstructed before `6b82f60` has none of the five old fields' replacement and no
+`objects` key at all - roughly 300 existing rows at the time of the refactor, never
+backfilled or migrated (a deliberate choice, not an oversight - see `6b82f60`'s own
+commit message). These rows are NOT invalid-and-broken: `edit_capability.
+legacy_scene_summary`/`is_legacy` and `generate_image_prompt.build_image_prompt` both
+detect the missing `objects` key and degrade to a **read-only** summary of the old
+fields (dashboard/edit-modal display only) rather than raising. `validator.
+validation_error` correctly reports these rows as failing the CURRENT schema - that's
+expected, not a bug to "fix" by loosening the schema back down. A pre-refactor row can
+be viewed and its draft regenerated via Regenerate (which rebuilds the prompt from
+scratch, per the 2026-08-06 fix elsewhere in this file), but its blueprint itself will
+never gain a real `objects` array without a fresh Generate against the source ad.
+
+### `resolve_disposition` is the ONLY thing that decides an object's fate
+`src/deconstruct.py`'s `resolve_disposition(obj, context=None)` is now the single
+mechanical authority over what happens to every object in a blueprint - never the
+model's own prompted guess, never a second uncoordinated clause in
+`generate_image_prompt.py` with its own opinion. Three previously-separate concerns are
+now resolved here, in one place:
+- **Ownership**: `competitor_branded`/`carries_brand_mark` can never resolve to "keep"
+  regardless of `kind` or `text_purpose` - a product-kind object substitutes, every
+  other kind drops.
+- **`text_purpose`** (added this session, `a9b1e9f`, rules read out of git history -
+  see below): for `kind=="text"`, `award`/`disclaimer` always drop; `headline`/
+  `subtext`/`cta`/`product_callout` always substitute; `offer`/`price_anchor`/
+  `certification`/`testimonial` substitute ONLY when this run's `context` actually
+  supplies a matching value (`offer_text`/`certifications`/`testimonial`), else drop -
+  never left for Gemini to invent a number, cert, or quote it wasn't given. `other` (or
+  no `text_purpose` at all, e.g. a legacy row) passes the model's own guess through
+  unchanged UNLESS the object is branded, in which case ownership still wins.
+- **Competitor argument props**: folded in from the now-deleted
+  `generate_image_prompt._competitor_props_clause` - a prop matching
+  `_is_competitor_argument_prop`'s keyword set (diagram/applicator/device/etc.) drops
+  even when its `ownership` reads as "generic," because it exists only to make the
+  competitor's own argument.
+
+**Why one mechanism, not three**: before this session, `_competitor_props_clause`
+(image-prompt-side, keyword matching on free text) and `resolve_disposition`
+(ownership-only) could in principle disagree about the same object's fate with no
+coordination between them - exactly the two-independent-systems contradiction shape
+this file has hit repeatedly (see the 12 Aug section's "STANDING DIAGNOSIS"). Folding
+prop-keyword matching into `resolve_disposition` and repointing `text_purpose` through
+the same function closes that gap structurally, not by adding a precedence sentence.
+
+### The dual-resolution design - READ THIS BEFORE ASSUMING A STORED DISPOSITION IS STALE OR WRONG
+`resolve_disposition` is called TWICE per object, at two different times, with two
+different `context` values, and **both calls are correct - this is not a bug**:
+
+1. **At deconstruct time** (`deconstruct._resolve_object_dispositions`, inside
+   `deconstruct_from_response`), with `context=None` (nothing run-specific exists yet -
+   deconstruction happens once per ad, before any operator has chosen a per-run offer
+   or generation has picked a testimonial). This resolves the CONTEXT-FREE purposes
+   correctly and permanently (headline/subtext/cta/product_callout/award/disclaimer,
+   plus ownership/prop-keyword drops) and STORES the result on `blueprint.objects[].
+   disposition` in the artifact row. For offer/price_anchor/certification/testimonial,
+   this first call has no context to check against, so these ALWAYS resolve to `drop`
+   here - that stored value is not the final answer for these four purposes.
+2. **Again inside `generate_image_prompt._objects_clause`**, at PROMPT-BUILD time, for
+   any `kind=="text"` object that still carries a `text_purpose` - this time with the
+   REAL context for THIS run (`offer_text`, `product.certifications`,
+   `select_testimonial_review`'s pick). This second call can and correctly does
+   OVERRIDE the stored value: an object stored as `disposition="drop"` (no context
+   existed at deconstruct time) can resolve to `"substitute"` here once a real
+   offer/testimonial exists for this specific run - and the reverse never happens for
+   these purposes (they never resolve to `"keep"` at either call site).
+
+**The consequence to remember**: `artifacts.blueprint.objects[].disposition`, as
+literally stored in the database, can legitimately DISAGREE with what a given
+generation call actually rendered for an offer/certification/testimonial object - a
+row showing `disposition: "drop"` does NOT mean the object was dropped from every past
+or future draft of that ad; it means no context existed on the run that produced that
+STORED value. Reading the stored blueprint cold (a DB query, a dashboard JSON dump) and
+concluding "this object was always dropped/never substituted" is exactly the mistake
+this note exists to head off. To know what actually happened on a SPECIFIC generation,
+check that call's own `offer_text`/`testimonial`/`product.certifications` inputs, not
+the blueprint's stored disposition alone. Non-text kinds and text objects with no
+`text_purpose` at all are NOT subject to this - they resolve once, identically, at
+either call site, since they carry no context-gated purpose.
+
+### Known open, neither fixed this session
+- **Per-zone copy generation and the "communicative purpose" copy-steering clause are
+  DELETED with no replacement.** The pre-refactor system (`generate_copy.
+  text_zone_targets`/`_text_zone_copy_clause`/`_cta_zone_clause`/`_text_purpose_clause`)
+  gave each `sub_line`/`body_copy`/`product_callout` zone its OWN distinct line of
+  Besque copy (position-matched into `panel_copy`), and separately told the copywriter
+  what JOB each reference text block was doing (offer-led vs. problem-hook vs.
+  product-description) so generated copy matched that function. Both are gone -
+  `product_callout` now substitutes with only the bare Besque product name (per this
+  session's own task scope), and there is no signal left telling `generate_copy.py`
+  what register a reference's text was written in. This is a real, deliberate capability
+  loss, not an oversight - recorded here so nobody goes looking for it as a "regression"
+  without checking this note first.
+- **Scene lighting facts are always empty, and nothing downstream knows it.** The
+  objects-array refactor's `deconstruct.py` BLUEPRINT_PROMPT collapsed `visual.
+  scene_lighting`'s six sub-fields (`light_direction`/`hardness`/`colour_temperature`/
+  `shadow_behaviour`/`grain`/`depth_of_field`) plus `layout_detail.background_type`
+  into a single `background.{surface, colour, light}` object - but
+  `generate_image_prompt._scene_lighting_facts`/`_bottle_register_clause`/
+  `_register_clause` (and `build_image_prompt`'s own `scene_lighting = visual.get(
+  "scene_lighting") or {}` line) still read the OLD six-field shape from `visual.
+  scene_lighting`, which no new blueprint ever populates. Every one of these silently
+  gets `{}` and falls through to its "not extracted" fallback wording on every new
+  blueprint - `pipeline.py:1169`'s own warning log (`"blueprint.visual.scene_lighting
+  not extracted this run"`) now fires on literally every ad, not just the genuine
+  gaps it was written to catch. `edit_capability._background_control`/
+  `_lighting_control` WERE fixed this session to read the new `background` object
+  (Stage 3 of the restoration task explicitly required it for the edit controls) -
+  this is the SAME underlying collapse, just the prompt-assembly side of it, still
+  unfixed. Found, not fixed - flagged as a separate adjacent bug per this session's own
+  working convention (log a different-owner bug found mid-fix separately, don't fold
+  it in). Next step, not started: either restore the six-field detail to `background`
+  (a deconstruct.py prompt change) or rewrite `_scene_lighting_facts` et al. to work
+  from `background.light`'s single free-text phrase instead.
