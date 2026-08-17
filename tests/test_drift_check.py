@@ -30,7 +30,8 @@ HEADLINE_DESCRIPTOR = {"target": "headline", "attribute": "text", "label": "Head
 BACKGROUND_DESCRIPTOR = {"target": "background", "attribute": "type", "label": "Background"}
 
 BLUEPRINT_WITH_TOP_HEADLINE = {
-    "text_purpose": [{"text_verbatim": "x", "purpose": "problem_hook", "placement": "top-centre"}],
+    "objects": [{"object_id": "obj_01", "kind": "text", "text_purpose": "headline",
+                 "description": "headline", "bbox": [0.2, 0.0, 0.6, 0.32]}],
 }
 
 
@@ -210,6 +211,56 @@ def test_realism_edit_uses_zone_method_when_zone_positions_names_product():
     result = check_drift(v1, v2, descriptor, blueprint)
     assert result["method"] == "zone"
     assert result["drift_flag"] is False
+
+
+# ---- headline/subtext/cta ZONE derivation from a real blueprint.objects[].bbox
+# (2026-08-17 rewire): replaces the deleted top-level text_purpose/structural_zones
+# arrays - these targets no longer route through a keyword-parsed position string at
+# all, they resolve straight from the matching object's own bbox. ----
+
+def _text_object(purpose, bbox, object_id="obj_01"):
+    return {"object_id": object_id, "kind": "text", "text_purpose": purpose,
+            "description": purpose, "bbox": bbox}
+
+
+def test_subtext_zone_derived_from_object_bbox():
+    blueprint = {"objects": [_text_object("subtext", [0.1, 0.7, 0.8, 0.15])]}
+    descriptor = {"target": "subtext", "attribute": "text", "label": "Subtext"}
+    region = expected_change_region(descriptor, blueprint, W, H)
+    assert region is not None
+    x0, y0, x1, y1 = region
+    assert y0 > H * 0.5  # lower-half biased, matching the bbox's own y
+
+
+def test_cta_zone_derived_from_object_bbox():
+    blueprint = {"objects": [_text_object("cta", [0.3, 0.85, 0.4, 0.1])]}
+    descriptor = {"target": "cta", "attribute": "text", "label": "CTA"}
+    region = expected_change_region(descriptor, blueprint, W, H)
+    assert region is not None
+
+
+def test_subtext_zone_absent_when_no_matching_object():
+    blueprint = {"objects": [_text_object("headline", [0.1, 0.0, 0.8, 0.2])]}
+    descriptor = {"target": "subtext", "attribute": "text", "label": "Subtext"}
+    assert expected_change_region(descriptor, blueprint, W, H) is None
+
+
+def test_headline_zone_object_with_no_bbox_falls_through():
+    blueprint = {"objects": [{"object_id": "obj_01", "kind": "text",
+                              "text_purpose": "headline", "description": "headline"}]}
+    descriptor = {"target": "headline", "attribute": "text", "label": "Headline"}
+    assert expected_change_region(descriptor, blueprint, W, H) is None
+
+
+def test_badge_target_has_no_position_field_falls_through_to_containment():
+    """badge no longer has ANY structured position field post-refactor (the old
+    structural_zones "badge" zone_type is gone, and there is no per-object field
+    identifying which graphic-kind object is the badge) - must fall through to
+    containment, never a fabricated zone."""
+    blueprint = {"objects": [{"object_id": "obj_01", "kind": "graphic",
+                              "description": "NEW badge", "bbox": [0.7, 0.0, 0.2, 0.1]}]}
+    descriptor = {"target": "badge", "attribute": "corner_badge", "label": "Corner badge"}
+    assert expected_change_region(descriptor, blueprint, W, H) is None
 
 
 def test_realism_edit_flags_a_single_contiguous_change_in_the_wrong_place():

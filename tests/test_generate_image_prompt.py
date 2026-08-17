@@ -630,22 +630,24 @@ def test_register_lighting_only_clause_states_lighting_adapts_not_geometry():
 # demanded an exact match, while _bottle_integration_clause mandates a contact/grip
 # shadow the reference may never have shown (a floating packshot has no contact point
 # to observe a shadow from at all). Fixed by REWORDING, not stacking a new clause: the
-# reference's facts inform the scene's CHARACTER (direction/hardness/colour temp/
-# grain); the bottle's own contact/grip shadow and grounding defer explicitly to
-# BOTTLE INTEGRATION's actual composition. Also: an illustrated register must never
-# read scene_lighting at all (deconstruct.py's photographic-only fields produced a
-# live "Not applicable - no photographic lighting" value for an illustrated reference,
-# which _scene_lighting_facts read as a real fact and asserted verbatim) - the drawing
-# treatment for "illustrated" always follows _register_lighting_only_clause()'s own
-# style-driven wording instead, unconditionally. ----
+# reference's facts inform the scene's CHARACTER; the bottle's own contact/grip shadow
+# and grounding defer explicitly to BOTTLE INTEGRATION's actual composition. Also: an
+# illustrated register must never read background.light at all (deconstruct.py's
+# photographic-only field produced a live "Not applicable - no photographic lighting"
+# value for an illustrated reference, which _scene_lighting_facts read as a real fact
+# and asserted verbatim) - the drawing treatment for "illustrated" always follows
+# _register_lighting_only_clause()'s own style-driven wording instead, unconditionally.
+#
+# REWIRED 2026-08-17: _bottle_register_clause/_scene_lighting_facts now take the new
+# top-level `background` object ({"surface", "colour", "light"}), not the old six-field
+# `scene_lighting` dict (light_direction/hardness/shadow_behaviour/colour_temperature/
+# grain/depth_of_field) - those sub-fields no longer exist (schema/blueprint.schema.json,
+# the objects-array refactor). `light` is one free-text phrase now; the tests below were
+# updated to the new shape, not just renamed. ----
 
-_REAL_SCENE_LIGHTING = {
-    "light_direction": "upper-left, slightly behind camera",
-    "hardness": "soft",
-    "shadow_behaviour": "long, soft shadows falling right",
-    "colour_temperature": "warm/golden",
-    "grain": "visible phone-camera noise/grain",
-    "depth_of_field": "shallow, background softly blurred",
+_REAL_BACKGROUND = {
+    "light": "light falls from upper-left, slightly behind camera, soft with long "
+             "shadows falling right",
 }
 
 
@@ -655,48 +657,48 @@ def test_bottle_register_clause_falls_back_to_generic_when_no_facts():
 
 
 def test_bottle_register_clause_states_scene_character_not_exact_bottle_match():
-    clause = generate_image_prompt._bottle_register_clause(_REAL_SCENE_LIGHTING)
+    clause = generate_image_prompt._bottle_register_clause(_REAL_BACKGROUND)
     assert "light falls from upper-left" in clause
     assert "SCENE's overall lighting character" in clause
     assert "must match these observed facts about THIS scene EXACTLY" not in clause
 
 
 def test_bottle_register_clause_defers_contact_shadow_to_bottle_integration():
-    clause = generate_image_prompt._bottle_register_clause(_REAL_SCENE_LIGHTING)
+    clause = generate_image_prompt._bottle_register_clause(_REAL_BACKGROUND)
     assert "does NOT govern the bottle's own contact or grip shadow" in clause
     assert "BOTTLE INTEGRATION" in clause
     assert "floating product with no" in clause
 
 
 def test_bottle_register_clause_keeps_reference_photo_lighting_exclusion():
-    clause = generate_image_prompt._bottle_register_clause(_REAL_SCENE_LIGHTING)
+    clause = generate_image_prompt._bottle_register_clause(_REAL_BACKGROUND)
     assert "separate, unrelated studio lighting the product's own reference photo" in clause
 
 
 def test_bottle_register_clause_keeps_geometry_fixed_regardless():
-    clause = generate_image_prompt._bottle_register_clause(_REAL_SCENE_LIGHTING)
+    clause = generate_image_prompt._bottle_register_clause(_REAL_BACKGROUND)
     assert "Geometry, proportions, and label stay exactly as stated above regardless" in clause
 
 
 def test_bottle_register_clause_illustrated_never_reads_scene_lighting_facts():
-    """The live bug: an illustrated reference's own scene_lighting can carry a
-    "Not applicable" value (deconstruct.py trying to fill photographic-only fields for
+    """The live bug: an illustrated reference's own background.light can carry a
+    "Not applicable" value (deconstruct.py trying to fill a photographic-only field for
     a drawing) - style=="illustrated" must skip _scene_lighting_facts entirely, not
     just fall back when the dict happens to be empty."""
-    garbage_lighting = {"light_direction": "Not applicable - no photographic lighting"}
-    clause = generate_image_prompt._bottle_register_clause(garbage_lighting, style="illustrated")
+    garbage_background = {"light": "Not applicable - no photographic lighting"}
+    clause = generate_image_prompt._bottle_register_clause(garbage_background, style="illustrated")
     assert clause == generate_image_prompt._register_lighting_only_clause()
     assert "Not applicable" not in clause
 
 
 def test_bottle_register_clause_illustrated_ignores_even_real_facts():
-    clause = generate_image_prompt._bottle_register_clause(_REAL_SCENE_LIGHTING, style="illustrated")
+    clause = generate_image_prompt._bottle_register_clause(_REAL_BACKGROUND, style="illustrated")
     assert clause == generate_image_prompt._register_lighting_only_clause()
     assert "upper-left" not in clause
 
 
 def test_bottle_register_clause_photographic_style_still_uses_real_facts():
-    clause = generate_image_prompt._bottle_register_clause(_REAL_SCENE_LIGHTING, style="ugc")
+    clause = generate_image_prompt._bottle_register_clause(_REAL_BACKGROUND, style="ugc")
     assert "light falls from upper-left" in clause
 
 
@@ -704,8 +706,25 @@ def test_bottle_register_clause_no_style_given_keeps_old_behaviour():
     """Callers that predate the style param (style=None) must see the same photographic
     treatment as before this fix - only an explicit style=="illustrated" changes
     anything."""
-    clause = generate_image_prompt._bottle_register_clause(_REAL_SCENE_LIGHTING, style=None)
+    clause = generate_image_prompt._bottle_register_clause(_REAL_BACKGROUND, style=None)
     assert "light falls from upper-left" in clause
+
+
+# ---- _scene_lighting_facts (2026-08-17 rewire): the six discrete sub-fields are
+# genuinely gone, not reconstructed - this asserts the function states exactly the one
+# phrase deconstruct.py records now, nothing invented in its place. ----
+
+def test_scene_lighting_facts_empty_when_no_background():
+    assert generate_image_prompt._scene_lighting_facts(None) == ""
+    assert generate_image_prompt._scene_lighting_facts({}) == ""
+    assert generate_image_prompt._scene_lighting_facts({"surface": "marble"}) == ""
+
+
+def test_scene_lighting_facts_states_the_one_recorded_phrase():
+    facts = generate_image_prompt._scene_lighting_facts(_REAL_BACKGROUND)
+    assert facts != ""
+    assert "light falls from upper-left" in facts
+    assert "OBSERVED SCENE LIGHTING" in facts
 
 
 class _CapturingGenaiClientForEdit:

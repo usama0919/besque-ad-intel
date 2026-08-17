@@ -829,19 +829,61 @@ def test_edit_mode_instruction_add_product_placement_derived_from_composition():
     assert "never a fixed or default position" in no_facts
 
 
+def test_edit_mode_instruction_background_light_reaches_register_clause():
+    """REWIRED 2026-08-17: background replaces the deleted six-field scene_lighting
+    param on _edit_mode_instruction - this confirms a new-schema blueprint's
+    background.light actually threads through to the REGISTER clause (via
+    _register_clause/_bottle_register_clause), not just that the helper functions work
+    in isolation."""
+    instruction = generate_image_prompt._edit_mode_instruction(
+        style="ugc",
+        background={"light": "soft warm light from upper-left"},
+    )
+    assert "soft warm light from upper-left" in instruction
+    assert "OBSERVED SCENE LIGHTING" in instruction
+
+
+def test_build_image_prompt_edit_mode_surfaces_background_light_fact():
+    """End-to-end: a new-schema blueprint's top-level `background.light` must reach the
+    assembled edit-mode prompt as an observed lighting fact - closes the dead-key bug
+    where build_image_prompt read the deleted visual.scene_lighting and always got {}."""
+    bp = _blueprint()
+    bp["background"] = {"surface": "marble countertop", "colour": "warm grey",
+                         "light": "soft warm light falling from upper-left"}
+    prompt = generate_image_prompt.build_image_prompt(
+        bp, edit_mode=True, include_product=True, realism="ugc",
+        product={"name": "Besque Magic Body Oil"},
+    )
+    assert "soft warm light falling from upper-left" in prompt
+    assert "OBSERVED SCENE LIGHTING" in prompt
+
+
 def test_scene_composition_facts_empty_when_nothing_extracted():
-    assert generate_image_prompt._scene_composition_facts(None, None) == ""
-    assert generate_image_prompt._scene_composition_facts({}, {}) == ""
+    assert generate_image_prompt._scene_composition_facts(None, None, None) == ""
+    assert generate_image_prompt._scene_composition_facts({}, {}, {}) == ""
 
 
 def test_scene_composition_facts_reports_observed_fields_only():
+    # REWIRED 2026-08-17: background_type used to live on layout_detail - it no longer
+    # exists (schema/blueprint.schema.json collapsed it, with visual.scene_lighting,
+    # into the new top-level `background` object). background.colour is folded into the
+    # same fact as surface, same convention edit_capability._background_control uses.
     facts = generate_image_prompt._scene_composition_facts(
-        {"frame_division": "single uninterrupted gradient ground", "background_type": "studio backdrop"},
+        {"frame_division": "single uninterrupted gradient ground"},
         {"layout": "product hero, centered"},
+        {"surface": "studio backdrop", "colour": "pale grey"},
     )
     assert "single uninterrupted gradient ground" in facts
     assert "studio backdrop" in facts
+    assert "pale grey" in facts
     assert "product hero, centered" in facts
+
+
+def test_scene_composition_facts_background_without_colour():
+    facts = generate_image_prompt._scene_composition_facts(
+        None, None, {"surface": "sandy beach"},
+    )
+    assert "sandy beach" in facts
 
 
 # ---- reference_has_text_zone (2026-08-07, reference usability gate reversal): the

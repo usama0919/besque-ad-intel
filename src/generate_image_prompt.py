@@ -232,7 +232,13 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
     layout = visual.get("layout", "clean centered composition")
     palette = visual.get("palette_mood", "warm, natural tones")
     text_placement = visual.get("text_placement", "minimal")
-    scene_lighting = visual.get("scene_lighting") or {}
+    # REWIRED 2026-08-17: visual.scene_lighting (six sub-fields) no longer exists
+    # (schema/blueprint.schema.json - the objects-array refactor collapsed it, together
+    # with layout_detail.background_type, into one top-level `background` object:
+    # {"surface", "colour", "light"}). `background.light` is the sole surviving lighting
+    # fact - one free-text phrase, not six structured sub-fields - see
+    # _scene_lighting_facts/_bottle_register_clause for what that loses.
+    background = blueprint.get("background") or {}
     prod_style = (blueprint.get("production_style") or {}).get("style", "")
     # Computed once, reused everywhere "which register is this" is needed (the three
     # style= call sites below, and _illustrated_elements_clause) - the same operator-
@@ -415,7 +421,7 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
                                    retheme_colours=retheme_colours, palette=brand_palette,
                                    substance_colour=(product or {}).get("substance_colour"),
                                    style=resolved_style,
-                                   scene_lighting=scene_lighting,
+                                   background=background,
                                    cta_text=cta_text, product_name=(product or {}).get("name"),
                                    panel_copy=panel_copy, testimonial=testimonial,
                                    certifications=(product or {}).get("certifications"),
@@ -448,7 +454,7 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
             _semantic_split_clause(blueprint.get("semantic_split")) +
             creative_description.strip() + " "
             + product_clause
-            + _bottle_fixed_clause() + _bottle_register_clause(scene_lighting, resolved_style) +
+            + _bottle_fixed_clause() + _bottle_register_clause(background, resolved_style) +
             f"Square 1:1 aspect ratio composition. " +
             closing
         )
@@ -471,7 +477,7 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
             f"Square 1:1 aspect ratio composition. "
             + generate_image_prompt_writer.STYLE_GUIDANCE.get(
                 resolved_style, DEFAULT_STYLE_GUIDANCE)
-            + _bottle_fixed_clause() + _bottle_register_clause(scene_lighting, resolved_style) +
+            + _bottle_fixed_clause() + _bottle_register_clause(background, resolved_style) +
             closing
         )
     return prompt
@@ -1429,33 +1435,31 @@ def _register_lighting_only_clause():
     )
 
 
-def _scene_lighting_facts(scene_lighting):
-    """Turn deconstruct.py's observed visual.scene_lighting object into a facts sentence -
-    OBSERVATIONS of this specific reference's own lighting (direction, hardness, colour
-    temperature, shadow behaviour, grain, depth of field), never a style label. Returns ""
-    when nothing was extracted (a pre-migration blueprint, or the model omitted the field
-    this run) - callers fall back to the generic register-matching wording in that case;
-    this function never guesses a value to fill the gap."""
-    scene_lighting = scene_lighting or {}
-    facts = []
-    if scene_lighting.get("light_direction"):
-        facts.append(f"light falls from {scene_lighting['light_direction']}")
-    if scene_lighting.get("hardness"):
-        facts.append(f"shadows are {scene_lighting['hardness']}")
-    if scene_lighting.get("shadow_behaviour"):
-        facts.append(f"shadow behaviour: {scene_lighting['shadow_behaviour']}")
-    if scene_lighting.get("colour_temperature"):
-        facts.append(f"colour temperature: {scene_lighting['colour_temperature']}")
-    if scene_lighting.get("grain"):
-        facts.append(f"grain/texture: {scene_lighting['grain']}")
-    if scene_lighting.get("depth_of_field"):
-        facts.append(f"depth of field: {scene_lighting['depth_of_field']}")
-    if not facts:
+def _scene_lighting_facts(background):
+    """Turn deconstruct.py's observed `background.light` phrase into a facts sentence -
+    an OBSERVATION of this specific reference's own lighting, never a style label.
+
+    REWIRED 2026-08-17: visual.scene_lighting's six discrete sub-fields (light_direction/
+    hardness/shadow_behaviour/colour_temperature/grain/depth_of_field) no longer exist
+    (schema/blueprint.schema.json - the objects-array refactor collapsed them into one
+    top-level `background.light` free-text phrase, e.g. "soft warm light from
+    upper-left"). That per-attribute structure is GENUINELY LOST, not reconstructed here:
+    this function states the one phrase deconstruct.py actually records and nothing
+    more - it does not attempt to parse "hardness" or "colour temperature" back out of
+    prose that was never guaranteed to mention them.
+
+    Returns "" when nothing was extracted (a pre-migration blueprint with no `background`
+    key, or the model omitted `light` this run) - callers fall back to the generic
+    register-matching wording in that case; this function never guesses a value to fill
+    the gap."""
+    background = background or {}
+    light = background.get("light")
+    if not light:
         return ""
-    return "OBSERVED SCENE LIGHTING (facts about this reference, not a style label): " + "; ".join(facts) + ". "
+    return f"OBSERVED SCENE LIGHTING (a fact about this reference, not a style label): {light}. "
 
 
-def _scene_composition_facts(layout_detail=None, visual=None):
+def _scene_composition_facts(layout_detail=None, visual=None, background=None):
     """Turn deconstruct.py's OBSERVED layout_detail/visual fields into a facts sentence
     describing the reference's EXISTING composition - same "observe, never guess"
     contract _scene_lighting_facts already established, just for placement instead of
@@ -1467,9 +1471,17 @@ def _scene_composition_facts(layout_detail=None, visual=None):
     which reference this runs against. Returns "" when nothing was extracted (a
     pre-migration blueprint, or the model omitted these fields this run) - callers fall
     back to a generic composition-aware instruction in that case, never a guessed
-    position."""
+    position.
+
+    REWIRED 2026-08-17: layout_detail.background_type no longer exists
+    (schema/blueprint.schema.json - collapsed into the new top-level `background` object,
+    see _scene_lighting_facts). `background.surface` is this function's background fact
+    now; `background.colour`, when present, is folded into the same fact rather than a
+    second line - the same single-fact convention edit_capability._background_control
+    already uses for its current_value string."""
     layout_detail = layout_detail or {}
     visual = visual or {}
+    background = background or {}
     facts = []
     if visual.get("layout"):
         facts.append(f"overall layout: {visual['layout']}")
@@ -1477,75 +1489,85 @@ def _scene_composition_facts(layout_detail=None, visual=None):
         facts.append(f"frame divides as: {layout_detail['frame_division']}")
     if layout_detail.get("zone_positions"):
         facts.append("existing elements sit at: " + "; ".join(layout_detail["zone_positions"]))
-    if layout_detail.get("background_type"):
-        facts.append(f"background: {layout_detail['background_type']}")
+    if background.get("surface"):
+        bg_fact = f"background: {background['surface']}"
+        if background.get("colour"):
+            bg_fact += f" ({background['colour']})"
+        facts.append(bg_fact)
     if not facts:
         return ""
     return ("OBSERVED SCENE COMPOSITION (facts about THIS reference's existing layout, "
             "never a fixed position): " + "; ".join(facts) + ". ")
 
 
-def _bottle_register_clause(scene_lighting, style=None):
-    """Replaces the generic 'match the rendering register' instruction with concrete
-    observed facts about THIS reference's own lighting, whenever deconstruct.py extracted
-    them - a wording-only "match the style" instruction has already failed three times on
+def _bottle_register_clause(background, style=None):
+    """Replaces the generic 'match the rendering register' instruction with a concrete
+    observed fact about THIS reference's own lighting, whenever deconstruct.py extracted
+    one - a wording-only "match the style" instruction has already failed three times on
     this exact bottle-register bug (see CLAUDE.md's guardrails note), so this states what
     the scene's lighting actually IS rather than asking the model to infer it.
 
-    style gates whether scene_lighting is used AT ALL (item 3 fix, 2026-08-13):
-    deconstruct.py's six scene_lighting fields (light_direction/hardness/shadow_
-    behaviour/colour_temperature/grain/depth_of_field) describe PHOTOGRAPHIC lighting -
-    meaningless for a hand-drawn illustration, and live evidence shows the model doesn't
-    leave them blank for one; it writes a value like "Not applicable - no photographic
-    lighting", which _scene_lighting_facts then reads as a real OBSERVED fact (a
-    non-empty string, however it reads) and asserts verbatim, which then risks
-    rendering as literal on-image text (rule 8's own failure shape). Gating on
-    style=="illustrated" BEFORE ever calling _scene_lighting_facts fixes this
-    structurally, the same way _illustrated_elements_clause already gates on style
-    elsewhere in this file - an illustrated register's drawing treatment always follows
+    REWIRED 2026-08-17: `background` replaces the old six-field `scene_lighting` dict
+    (light_direction/hardness/shadow_behaviour/colour_temperature/grain/depth_of_field) -
+    those fields no longer exist (schema/blueprint.schema.json); `background.light` is
+    one free-text phrase now. The per-attribute breakdown this clause used to be able to
+    name explicitly (direction, hardness, colour temperature, grain, as separate facts)
+    is GENUINELY LOST - this function no longer claims those specific attributes were
+    observed, since they may not be; it only asserts the single phrase deconstruct.py
+    actually recorded.
+
+    style gates whether background.light is used AT ALL (item 3 fix, 2026-08-13,
+    unchanged by this rewire): deconstruct.py's lighting field describes PHOTOGRAPHIC
+    lighting - meaningless for a hand-drawn illustration, and live evidence (from the
+    old six-field version) showed the model doesn't leave it blank for one; it writes a
+    value like "Not applicable - no photographic lighting", which _scene_lighting_facts
+    would then read as a real OBSERVED fact and assert verbatim, risking it rendering as
+    literal on-image text (rule 8's own failure shape). Gating on style=="illustrated"
+    BEFORE ever calling _scene_lighting_facts fixes this structurally, the same way
+    _illustrated_elements_clause already gates on style elsewhere in this file - an
+    illustrated register's drawing treatment always follows
     _register_lighting_only_clause()'s own style-driven wording ("rendered in that
     illustration's own style"), never the reference's photographic facts, regardless of
-    what deconstruct.py happened to write into those fields this run.
+    what deconstruct.py happened to write into that field this run.
 
     For a photographic register (or style not given - callers that predate this param
     keep their old behaviour), falls back to _register_lighting_only_clause() only when
-    scene_lighting is entirely empty (nothing to state facts about) - never a silent
-    guess. When facts ARE present, they describe the SCENE's character (direction,
-    hardness, colour temperature, grain) that the bottle's own surface rendering should
-    read consistent with - but the bottle's own CONTACT or GRIP shadow, and how it is
-    grounded in the frame, are explicitly carved OUT of "match exactly" and deferred to
-    BOTTLE INTEGRATION's own composition instead (the contradiction this fixes): the
-    reference's facts describe a scene that may have shown a floating, ungrounded
-    product with no contact point at all, and BOTTLE INTEGRATION can require a
-    materially different composition (held, applied, resting) than the reference did -
-    a contact/grip shadow that composition requires is never something these facts
-    could have observed, so "match exactly" must not be read to forbid it. Geometry,
-    proportions, and label stay exactly as stated above regardless (bottle identity is
-    untouched by this function, unchanged) - see the material realism clause elsewhere
-    for the liquid/glass physical-realism requirement, also untouched."""
+    background.light is entirely empty (nothing to state a fact about) - never a silent
+    guess. When a fact IS present, it describes the SCENE's overall lighting character
+    that the bottle's own surface rendering should read consistent with - but the
+    bottle's own CONTACT or GRIP shadow, and how it is grounded in the frame, are
+    explicitly carved OUT of "match exactly" and deferred to BOTTLE INTEGRATION's own
+    composition instead (the contradiction this fixes): the reference's fact describes a
+    scene that may have shown a floating, ungrounded product with no contact point at
+    all, and BOTTLE INTEGRATION can require a materially different composition (held,
+    applied, resting) than the reference did - a contact/grip shadow that composition
+    requires is never something this fact could have observed, so "match exactly" must
+    not be read to forbid it. Geometry, proportions, and label stay exactly as stated
+    above regardless (bottle identity is untouched by this function, unchanged) - see the
+    material realism clause elsewhere for the liquid/glass physical-realism requirement,
+    also untouched."""
     if style == "illustrated":
         return _register_lighting_only_clause()
-    facts = _scene_lighting_facts(scene_lighting)
+    facts = _scene_lighting_facts(background)
     if not facts:
         return _register_lighting_only_clause()
     return (
         facts +
-        "These are facts about THIS SCENE's overall lighting character - direction, "
-        "hardness, colour temperature, and grain - which the bottle's own surface, "
-        "highlights, and colour cast must read consistent with, never the separate, "
-        "unrelated studio lighting the product's own reference photo(s) happen to have "
-        "been shot under. This does NOT govern the bottle's own contact or grip shadow, "
-        "or how it is grounded in the frame - those follow entirely from the composition "
-        "BOTTLE INTEGRATION above actually describes (held, applied, resting), never from "
-        "these observed facts: the reference may have shown a floating product with no "
-        "contact point to observe a shadow from at all, and integration's own "
-        "requirement for a grounded bottle wins wherever the two would otherwise "
-        "disagree. Geometry, proportions, and label stay exactly as stated above "
-        "regardless. "
+        "This is a fact about THIS SCENE's overall lighting character which the "
+        "bottle's own surface, highlights, and colour cast must read consistent with, "
+        "never the separate, unrelated studio lighting the product's own reference "
+        "photo(s) happen to have been shot under. This does NOT govern the bottle's own "
+        "contact or grip shadow, or how it is grounded in the frame - those follow "
+        "entirely from the composition BOTTLE INTEGRATION above actually describes "
+        "(held, applied, resting), never from this observed fact: the reference may "
+        "have shown a floating product with no contact point to observe a shadow from "
+        "at all, and integration's own requirement for a grounded bottle wins wherever "
+        "the two would otherwise disagree. Geometry, proportions, and label stay "
+        "exactly as stated above regardless. "
     )
 
 
-def _register_clause(style, scene_lighting=None):
+def _register_clause(style, background=None):
     """Edit-mode only - this is _edit_mode_instruction's single caller, appended straight
     onto `opening` (Chunk 13 follow-up). generate_image_prompt_writer.STYLE_GUIDANCE is
     written for two different jobs depending on mode: in generate mode (no reference) it
@@ -1571,7 +1593,7 @@ def _register_clause(style, scene_lighting=None):
         f"if this vocabulary ever conflicts with what the reference actually shows, "
         f"faithful reproduction wins. {guidance} "
         + _bottle_fixed_clause()
-        + _bottle_register_clause(scene_lighting, style)
+        + _bottle_register_clause(background, style)
     )
 
 
@@ -1628,7 +1650,7 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
                             include_product=True, reference_has_product=True,
                             reference_has_text_zone=True, layout_detail=None, visual=None,
                             retheme_colours=True, palette=None,
-                            substance_colour=None, style=None, scene_lighting=None,
+                            substance_colour=None, style=None, background=None,
                             cta_text=None, product_name=None,
                             panel_copy=None, testimonial=None, certifications=None,
                             objects=None, face_present=None,
@@ -1846,7 +1868,7 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             "rather than reproduced unchanged. "
             + exception_clause
         )
-    opening += _register_clause(style, scene_lighting)
+    opening += _register_clause(style, background)
 
     if include_product and reference_has_product and style == "illustrated":
         name = product_name or "Besque"
@@ -1878,14 +1900,14 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             "from the source image exactly as the reproduce-faithfully instruction above states (never a stricter 'exactly' reintroduced here, including its small natural variation allowance). "
         )
     elif include_product and reference_has_product:
-        lighting_facts = _scene_lighting_facts(scene_lighting)
+        lighting_facts = _scene_lighting_facts(background)
         # "with its lighting" (the old wording here) was ambiguous between "the scene's
         # lighting" and "the product reference photo's own separate studio lighting" - the
         # two contradict whenever the reference photo is a clean studio/cutout shot dropped
-        # into a UGC or non-studio scene. State the scene's own observed lighting facts
+        # into a UGC or non-studio scene. State the scene's own observed lighting fact
         # explicitly instead, so there's nothing left to infer; falls back to a
         # register-level instruction (never the reference photo's own lighting) only when
-        # no scene_lighting was extracted at all.
+        # no background.light was extracted at all.
         lighting_instruction = lighting_facts or (
             "Light the substituted product to match THIS SCENE's own lighting register - "
             "never the separate, unrelated lighting the product's reference photo(s) "
@@ -1921,7 +1943,7 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
         # just with no competitor product to remove first. Placement is DERIVED from this
         # reference's own observed composition, never a fixed position.
         name = product_name or "Besque"
-        composition_facts = _scene_composition_facts(layout_detail, visual)
+        composition_facts = _scene_composition_facts(layout_detail, visual, background)
         placement_instruction = composition_facts or (
             "Integrate it naturally into this scene's own existing composition and open "
             "space, at a scale consistent with the surrounding elements - never a fixed "
@@ -1955,13 +1977,13 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
         # reference's own observed composition (_scene_composition_facts) - never a fixed
         # or default position, and lighting still comes from the scene's own observed
         # facts exactly as the substitute branch above already does.
-        lighting_facts = _scene_lighting_facts(scene_lighting)
+        lighting_facts = _scene_lighting_facts(background)
         lighting_instruction = lighting_facts or (
             "Light it to match THIS SCENE's own lighting register - never the separate, "
             "unrelated lighting the product's reference photo(s) happen to have been "
             "shot under. "
         )
-        composition_facts = _scene_composition_facts(layout_detail, visual)
+        composition_facts = _scene_composition_facts(layout_detail, visual, background)
         placement_instruction = composition_facts or (
             "Integrate it naturally into this scene's own existing composition and open "
             "space, at a scale and depth consistent with the surrounding elements - "
@@ -2125,7 +2147,7 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             # newly into clean negative space, positioned per this reference's OWN
             # observed composition, never a fixed position and never an invented
             # container/badge shape that isn't already part of the scene.
-            composition_facts = _scene_composition_facts(layout_detail, visual)
+            composition_facts = _scene_composition_facts(layout_detail, visual, background)
             placement_instruction = composition_facts or (
                 "Place it in clean open space consistent with this scene's own "
                 "composition - never a fixed or default position invented "

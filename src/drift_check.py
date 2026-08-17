@@ -2,14 +2,17 @@
 
 Compares v1 (source) and v2 (result) pixel-for-pixel. Two methods, chosen per target:
 
-1. ZONE (headline/subtext/cta/person_face/badge, when a position is actually
-   recorded; product, when layout_detail.zone_positions names a product-shaped
-   phrase - see _product_zone_position, added 2026-08-16 for the bottle-realism edit
-   control): split into the EXPECTED-CHANGE region (from text_purpose.placement/
-   structural_zones.position/face_present.location/layout_detail.zone_positions) vs
-   everything else - % changed inside vs outside, same method as the Part A manual
-   verification (2026-08-14, artifact 1251->1252): PIL ImageChops.difference()
-   .convert("L"), thresholded.
+1. ZONE (headline/subtext/cta, from a real blueprint.objects[].bbox - see
+   _object_bbox_for_text_purpose, rewired 2026-08-17 when the objects-array refactor
+   deleted this method's original inputs, the top-level text_purpose array and
+   structural_zones; person_face, when face_present.location is recorded; product,
+   when layout_detail.zone_positions names a product-shaped phrase - see
+   _product_zone_position, added 2026-08-16 for the bottle-realism edit control): split
+   into the EXPECTED-CHANGE region vs everything else - % changed inside vs outside,
+   same method as the Part A manual verification (2026-08-14, artifact 1251->1252): PIL
+   ImageChops.difference().convert("L"), thresholded. "badge" no longer has any
+   position-bearing field to read at all post-refactor (see _position_for_target) and
+   always falls through to containment now, same as prop/person_body/offer/banner.
 
 2. CONTAINMENT (2026-08-14, closing the coverage gap): for prop/person_body/offer/
    banner, and for product/any zone-eligible target whose position wasn't recorded
@@ -96,26 +99,16 @@ _HORIZONTAL_BANDS = {
 }
 _ZONE_PAD_FRACTION = 0.12
 
-# Mirrors edit_capability._HEADLINE_SHAPED_PURPOSES - kept as a separate constant
-# rather than importing it, since this module must stay independently testable and
-# the two lists describe the same schema enum for two different reasons (control
-# derivation there, expected-region lookup here).
-_HEADLINE_SHAPED_PURPOSES = {"problem_hook", "efficacy_claim", "product_description"}
-
-
-def _text_purpose_placement(blueprint, purposes):
-    for tp in blueprint.get("text_purpose") or []:
-        if (tp or {}).get("purpose") in purposes:
-            return tp.get("placement")
-    return None
-
-
-def _structural_zone_position(blueprint, zone_type):
-    for z in blueprint.get("structural_zones") or []:
-        if (z or {}).get("zone_type") == zone_type:
-            return z.get("position")
-    return None
-
+# _text_purpose_placement/_structural_zone_position/_HEADLINE_SHAPED_PURPOSES DELETED
+# 2026-08-17: their inputs - the top-level text_purpose array and structural_zones -
+# no longer exist (schema/blueprint.schema.json, the objects-array refactor). Even the
+# VALUES in _HEADLINE_SHAPED_PURPOSES were already stale before that (problem_hook/
+# efficacy_claim/product_description were never real text_purpose enum values in the
+# per-object schema either - the real enum is headline/subtext/cta/offer/certification/
+# testimonial/price_anchor/award/disclaimer/product_callout/other). See
+# _object_bbox_for_text_purpose below for the replacement - it reads a real per-object
+# bbox instead of a keyword-matched free-text position string, which is more precise
+# than either deleted source, not just a rewire to an equivalent field.
 
 _PRODUCT_POSITION_PATTERN = re.compile(r"\b(?:product|bottle)\b", re.IGNORECASE)
 
@@ -123,10 +116,11 @@ _PRODUCT_POSITION_PATTERN = re.compile(r"\b(?:product|bottle)\b", re.IGNORECASE)
 def _product_zone_position(blueprint):
     """The 'product ...'-shaped phrase from layout_detail.zone_positions, if one
     exists - e.g. "product mid-frame" (src/deconstruct.py's own classifier prompt
-    names this exact example). This is a real, deconstruct-time recorded fact, the
-    same qualitative-position-string contract every other ZONE-eligible target here
-    already relies on (text_purpose.placement/structural_zones.position/
-    face_present.location) - never a guessed or invented box.
+    names this exact example). This is a real, deconstruct-time recorded fact - the
+    same qualitative-position-string contract face_present.location relies on for
+    person_face (headline/subtext/cta instead resolve from a real object bbox, see
+    _object_bbox_for_text_purpose - more precise, so they don't need this string
+    convention at all) - never a guessed or invented box.
 
     2026-08-16: added because the CONTAINMENT fallback this target previously always
     used answers a different question - "is the changed region spatially coherent"
@@ -141,29 +135,62 @@ def _product_zone_position(blueprint):
     return None
 
 
+def _object_bbox_for_text_purpose(blueprint, purpose, width, height):
+    """Pixel bbox (x0, y0, x1, y1) for the kind=="text" object whose text_purpose
+    exactly matches `purpose`, padded by _ZONE_PAD_FRACTION of the object's OWN
+    width/height - the same margin convention _object_bbox_pixels_with_margin already
+    uses for object-removal edits, applied here to a headline/subtext/cta text object
+    instead.
+
+    REWIRED 2026-08-17: replaces the deleted _text_purpose_placement/
+    _structural_zone_position (see the module comment above) for exactly the three
+    targets that used to be resolved from them - headline, subtext, cta. This is
+    genuinely MORE precise than either deleted source, not just a same-shape rewire: a
+    real per-object bounding box (blueprint.objects[].bbox), never a keyword-matched
+    band guessed from a qualitative free-text position phrase. Returns None when no
+    kind=="text" object with this exact text_purpose exists, or it has no valid
+    4-element bbox - callers fall through to containment, never a fabricated box."""
+    for obj in blueprint.get("objects") or []:
+        obj = obj or {}
+        if obj.get("kind") != "text" or obj.get("text_purpose") != purpose:
+            continue
+        bbox = obj.get("bbox")
+        if not bbox or len(bbox) != 4:
+            return None
+        x, y, w, h = bbox
+        pad_x = w * _ZONE_PAD_FRACTION
+        pad_y = h * _ZONE_PAD_FRACTION
+        x0 = max(0.0, x - pad_x)
+        y0 = max(0.0, y - pad_y)
+        x1 = min(1.0, x + w + pad_x)
+        y1 = min(1.0, y + h + pad_y)
+        return (int(x0 * width), int(y0 * height), int(x1 * width), int(y1 * height))
+    return None
+
+
 def _position_for_target(descriptor, blueprint):
     """The free-text position string this target's zone is recorded at, or None if
-    none is recorded. None no longer means "skip" (2026-08-14) - only SKIP_TARGETS
-    skip outright; every other target with no position here falls through to the
-    containment check in check_drift, never a fabricated zone."""
+    none is recorded. Only for targets whose position is a qualitative PHRASE recorded
+    somewhere in the blueprint - headline/subtext/cta are resolved directly from a real
+    object bbox instead (see expected_change_region/_object_bbox_for_text_purpose) and
+    never reach this function. None no longer means "skip" (2026-08-14) - only
+    SKIP_TARGETS skip outright; every other target with no position here falls through
+    to the containment check in check_drift, never a fabricated zone.
+
+    REWIRED 2026-08-17: "badge" no longer has any equivalent structured field to read a
+    position from - the old structural_zones "badge" zone_type doesn't exist any more
+    (schema/blueprint.schema.json), and there is no per-object field identifying WHICH
+    graphic-kind object (if any) is the badge - only layout_detail.has_corner_badge/
+    has_bottom_banner, a boolean with no position. Falls through to containment, same
+    as prop/person_body/offer/banner - never a guessed box."""
     target = descriptor.get("target")
-    if target == "headline":
-        return _text_purpose_placement(blueprint, _HEADLINE_SHAPED_PURPOSES)
-    if target == "subtext":
-        return (_structural_zone_position(blueprint, "sub_line")
-                or _structural_zone_position(blueprint, "body_copy")
-                or _text_purpose_placement(blueprint, _HEADLINE_SHAPED_PURPOSES))
-    if target == "cta":
-        return (_structural_zone_position(blueprint, "cta")
-                or _text_purpose_placement(blueprint, {"cta"}))
     if target == "person_face":
         return (blueprint.get("face_present") or {}).get("location")
-    if target == "badge":
-        return _structural_zone_position(blueprint, "badge")
     if target == "product":
         return _product_zone_position(blueprint)
-    # prop, person_body, offer, banner: no position field exists for these anywhere
-    # in schema/blueprint.schema.json - always falls through to containment.
+    # headline/subtext/cta: resolved via a real object bbox - see expected_change_region.
+    # badge/prop/person_body/offer/banner: no position field exists for any of these
+    # anywhere in schema/blueprint.schema.json - always falls through to containment.
     return None
 
 
@@ -232,7 +259,11 @@ def expected_change_region(descriptor, blueprint, width, height):
     """Pixel bbox (x0, y0, x1, y1) for the edited target's zone, or None if this
     target has no recorded position - callers use None to select the containment
     check instead (see check_drift), never as "skip"."""
-    position = _position_for_target(descriptor, blueprint or {})
+    blueprint = blueprint or {}
+    target = (descriptor or {}).get("target")
+    if target in ("headline", "subtext", "cta"):
+        return _object_bbox_for_text_purpose(blueprint, target, width, height)
+    position = _position_for_target(descriptor, blueprint)
     if not position:
         return None
     return _parse_position_to_bbox(position, width, height)

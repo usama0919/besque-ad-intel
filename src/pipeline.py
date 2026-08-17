@@ -1174,10 +1174,16 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
             ad_text=ad.get("text", ""),
             cta=ad.get("cta", ""),
         )
-        if not (blueprint.get("visual") or {}).get("scene_lighting"):
-            log.warning("Ad %s: blueprint.visual.scene_lighting not extracted this run - "
+        # REWIRED 2026-08-17: visual.scene_lighting no longer exists (schema/
+        # blueprint.schema.json - the objects-array refactor collapsed it into the new
+        # top-level `background.light` phrase, see generate_image_prompt._scene_lighting_
+        # facts). Reading the old key here always returned falsy after that refactor,
+        # which made this warning fire on literally every ad rather than only genuine
+        # extraction gaps - checking the new location instead.
+        if not (blueprint.get("background") or {}).get("light"):
+            log.warning("Ad %s: blueprint.background.light not extracted this run - "
                         "falling back to generic register-matching wording for the bottle's "
-                        "lighting/shadow/grain/depth-of-field instead of observed facts", ad_id)
+                        "lighting instead of an observed fact", ad_id)
 
         # Clone mode (2026-08-11): per-ad config derived from THIS ad's OWN fresh
         # blueprint, right where that blueprint first exists - config's own values (run
