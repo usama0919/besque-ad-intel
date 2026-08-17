@@ -1,4 +1,6 @@
 """Tests for the image-prompt generator (no image API call)."""
+import logging
+
 from src import generate_image_prompt, generate_image_prompt_writer
 
 
@@ -417,6 +419,46 @@ def test_rule10_no_longer_hardcodes_an_ad_id():
 # substituted competitor element too, or the substitution instruction gets
 # contradicted by the reproduce-faithfully language later in the same prompt (the same
 # failure shape already fixed for PERSON/competitor-branding/prop-scale) ----
+
+# ---- _objects_clause's empty-objects early return must LOG at ERROR (2026-08-17) -
+# this used to be silent: a legacy blueprint with no `objects` key skipped the whole
+# objects model (substitute/keep/drop lines, the closure sentence, resolve_disposition)
+# with nothing in any log naming why. ----
+
+def test_objects_clause_missing_objects_logs_error_with_ad_id(caplog):
+    with caplog.at_level(logging.ERROR, logger="generate_image_prompt"):
+        clause = generate_image_prompt._objects_clause(None, {}, ad_id="AD123")
+    assert clause == ""
+    error_records = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert error_records, "expected an ERROR log record when objects is missing"
+    assert any("AD123" in r.getMessage() for r in error_records)
+    assert any("objects" in r.getMessage() for r in error_records)
+
+
+def test_objects_clause_empty_list_also_logs_error(caplog):
+    with caplog.at_level(logging.ERROR, logger="generate_image_prompt"):
+        clause = generate_image_prompt._objects_clause([], {}, ad_id="AD456")
+    assert clause == ""
+    assert any(r.levelname == "ERROR" for r in caplog.records)
+
+
+def test_objects_clause_no_ad_id_still_logs_error():
+    """A caller that doesn't pass ad_id (e.g. an older test) must not raise - the log
+    line degrades to naming no ad, it never skips logging or errors on formatting."""
+    clause = generate_image_prompt._objects_clause([], {})
+    assert clause == ""
+
+
+def test_objects_clause_non_empty_does_not_log_error(caplog):
+    with caplog.at_level(logging.ERROR, logger="generate_image_prompt"):
+        clause = generate_image_prompt._objects_clause(
+            [{"object_id": "obj_01", "kind": "prop", "description": "a towel",
+              "role": "environment", "disposition": "keep"}],
+            {}, ad_id="AD789",
+        )
+    assert clause != ""
+    assert not any(r.levelname == "ERROR" for r in caplog.records)
+
 
 def test_non_carryover_exceptions_clause_excepts_scene_objects():
     # 2026-08-17: repointed at the SCENE OBJECTS inventory (_objects_clause), which

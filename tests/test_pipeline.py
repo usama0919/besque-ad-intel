@@ -2106,3 +2106,126 @@ def test_stable_index_is_stable_across_calls():
     import hashlib
     digest = hashlib.sha256(b"AD1").hexdigest()
     assert pipeline._stable_index("AD1", 10) == int(digest, 16) % 10
+
+
+# ---- _regenerate_existing_draft: legacy (pre-objects-model) blueprints must be
+# re-deconstructed before being handed to build_image_prompt, 2026-08-17. Calls
+# _regenerate_existing_draft directly (not through process_ad), so dedupe.get_artifact/
+# dedupe.get_product/dedupe.get_brand_settings are monkeypatched in place - no real DB
+# connection is ever opened by these tests, same isolation _mock_all_stages already
+# gives process_ad's own tests. ----
+
+def _regen_ad(ad_id="AD_REGEN_1"):
+    return {"ad_id": ad_id, "page_name": "Brand", "image_url": "http://x/img.jpg",
+            "start_date": "2026-01-01", "destination_url": "http://x",
+            "text": "", "cta": ""}
+
+
+def _regen_existing(blueprint):
+    """Shape of the dict dedupe.get_artifact returns - only the fields
+    _regenerate_existing_draft actually reads."""
+    return {
+        "blueprint": blueprint,
+        "generated_copy": {"headline": "H", "image_subtext": "S", "cta": "C"},
+        "text_in_image": False,
+        "operator_instruction": "",
+        "include_product": True,
+        "retheme_colours": False,
+        "realism": None,
+        "body_area": None,
+        "offer_text": None,
+        "product_id": 1,
+        "image_path": "ref.jpg",
+        "image_prompt": "old prompt",
+        "copy_prompt": "old copy prompt",
+        "model_info": "",
+        "metadata": {},
+        "format_flag": "",
+        "product_override_note": "",
+        "critic_findings": [],
+        "review_status": "ok",
+    }
+
+
+def _legacy_blueprint():
+    """Pre-6b82f60 shape - no 'objects' key at all, the exact condition
+    _regenerate_existing_draft must detect."""
+    return {"format": "hero", "angle": "a", "visual": {"layout": "centered"}}
+
+
+def _new_schema_blueprint():
+    return {"format": "hero", "angle": "a", "visual": {"layout": "centered"},
+            "objects": [{"object_id": "obj_01", "kind": "prop", "description": "a towel",
+                          "role": "environment", "disposition": "keep"}]}
+
+
+def _mock_regenerate_deps(monkeypatch, existing, deconstruct_return=None):
+    """Mocks every dedupe/paid-call dependency _regenerate_existing_draft reaches on
+    its way to the draft_bytes-is-None short-circuit (line ~811-813) - draft_bytes is
+    forced to None so the function returns right after build_image_prompt, before
+    version_current_draft/regenerate_from_stored_prompt/output_critic/save_artifact
+    (a real Gemini call and a real DB write) are ever reached. Returns the `captured`
+    dict build_image_prompt was called with, and a `deconstruct_calls` list of the
+    ad_ids deconstruct_image was actually invoked with."""
+    monkeypatch.setattr(pipeline.dedupe, "get_artifact", lambda ad_id, angle_id=None: existing)
+    monkeypatch.setattr(pipeline.dedupe, "get_product",
+                        lambda pid: {"id": pid, "name": "Besque Magic Body Oil",
+                                     "visual_description": "amber bottle", "certifications": []})
+    monkeypatch.setattr(pipeline.assets, "download_image_bytes", lambda url: b"fake-bytes")
+
+    deconstruct_calls = []
+
+    def fake_deconstruct_image(**kwargs):
+        deconstruct_calls.append(kwargs.get("ad_id"))
+        return deconstruct_return if deconstruct_return is not None else _new_schema_blueprint()
+    monkeypatch.setattr(pipeline.deconstruct, "deconstruct_image", fake_deconstruct_image)
+
+    captured = {}
+
+    def fake_build_image_prompt(blueprint, **kwargs):
+        captured["blueprint"] = blueprint
+        return "rebuilt prompt"
+    monkeypatch.setattr(pipeline.generate_image_prompt, "build_image_prompt", fake_build_image_prompt)
+    monkeypatch.setattr(pipeline.generate_image_prompt, "_current_draft_bytes",
+                        lambda ad_id, angle_slug: None)
+    return captured, deconstruct_calls
+
+
+def test_regenerate_existing_draft_legacy_blueprint_triggers_redeconstruct(monkeypatch):
+    """A stored blueprint with no 'objects' key (predates 6b82f60) must be
+    re-deconstructed before build_image_prompt ever sees it - otherwise
+    generate_image_prompt._objects_clause silently skips the entire objects model on
+    every regenerate of that ad, forever."""
+    ad_id = "AD_REGEN_LEGACY"
+    existing = _regen_existing(_legacy_blueprint())
+    captured, deconstruct_calls = _mock_regenerate_deps(monkeypatch, existing)
+
+    result = pipeline._regenerate_existing_draft(
+        _regen_ad(ad_id), angle_id=None, angle_slug=None, delta_instruction="",
+        should_stop=None, live_retheme_colours=False,
+    )
+
+    assert deconstruct_calls == [ad_id]
+    assert "objects" in captured["blueprint"]
+    # None is the documented "no readable draft image, fall back to a normal first
+    # generation" signal (Task F, point 2) - reached here on purpose (draft_bytes
+    # mocked to None) to stop short of the paid regenerate call and the DB write.
+    assert result is None
+
+
+def test_regenerate_existing_draft_new_schema_blueprint_does_not_redeconstruct(monkeypatch):
+    """A stored blueprint that already has 'objects' must be used AS-IS - re-running a
+    paid deconstruct call on an already-current blueprint would be pure waste."""
+    ad_id = "AD_REGEN_CURRENT"
+    new_bp = _new_schema_blueprint()
+    existing = _regen_existing(new_bp)
+    captured, deconstruct_calls = _mock_regenerate_deps(monkeypatch, existing)
+
+    result = pipeline._regenerate_existing_draft(
+        _regen_ad(ad_id), angle_id=None, angle_slug=None, delta_instruction="",
+        should_stop=None, live_retheme_colours=False,
+    )
+
+    assert deconstruct_calls == []
+    assert captured["blueprint"] is new_bp
+    assert result is None

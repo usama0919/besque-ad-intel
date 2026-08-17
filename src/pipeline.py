@@ -688,6 +688,42 @@ def _regenerate_existing_draft(ad, angle_id, angle_slug, delta_instruction, shou
         )
         return "failed"
 
+    # Legacy re-deconstruct (2026-08-17): a blueprint stored before 6b82f60 has no
+    # `objects` key at all - build_image_prompt's _objects_clause silently returns ""
+    # for that shape (empty-objects early return, generate_image_prompt.py:889-891),
+    # so every regenerate of a pre-refactor ad was reproducing the OLD, pre-objects-
+    # model prompt indefinitely, with none of the objects model's per-object
+    # substitute/keep/drop mechanics ever reaching the prompt. Fixed the same way a
+    # frozen prompt was fixed on 2026-08-06 (see this file's own history) - never
+    # replay stale stored state when current code can regenerate it fresh. Mirrors
+    # process_ad's own deconstruct_image call (line ~1168) exactly - same argument
+    # shape, same source (`ad`, the same dict this function already received) - so a
+    # legacy regenerate produces a blueprint indistinguishable from a first-time
+    # Generate on this same ad today.
+    #
+    # "Persist... and use it": the re-deconstructed blueprint is used for the rest of
+    # THIS function (testimonial selection, element_provenance, build_image_prompt,
+    # below) and reaches storage via this function's own existing, unconditional
+    # save_artifact call further down (blueprint=blueprint) - no separate, earlier
+    # save_artifact call is added here on purpose: a second regenerate=True call this
+    # early would DELETE+INSERT the row twice in one request and re-trip the documented
+    # column-reset trap (CLAUDE.md: any column absent from that INSERT's column list
+    # silently resets) for no benefit, since the one save at the end of this function
+    # already covers it.
+    if "objects" not in blueprint:
+        log.info("Ad %s: stored blueprint predates the objects model (no 'objects' key) - "
+                 "re-deconstructing before regenerating", ad_id)
+        image_bytes = assets.download_image_bytes(ad["image_url"])
+        blueprint = deconstruct.deconstruct_image(
+            image_bytes=image_bytes,
+            ad_id=ad_id,
+            source_page=ad.get("page_name", ""),
+            captured_at=ad.get("start_date", ""),
+            destination_url=ad.get("destination_url", ""),
+            ad_text=ad.get("text", ""),
+            cta=ad.get("cta", ""),
+        )
+
     generated_copy = existing.get("generated_copy") or {}
     text_in_image = bool(existing.get("text_in_image"))
     stored_operator_instruction = existing.get("operator_instruction") or ""

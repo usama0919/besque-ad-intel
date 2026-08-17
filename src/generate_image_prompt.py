@@ -405,7 +405,7 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
              if effective_include_product else "") +
             _operator_instruction_clause(operator_instruction) +
             _critic_feedback_clause(critic_feedback) +
-            _objects_clause(blueprint.get("objects"), objects_context) +
+            _objects_clause(blueprint.get("objects"), objects_context, ad_id=blueprint.get("ad_id")) +
             _semantic_split_clause(blueprint.get("semantic_split")) +
             # include_product here is the RAW operator toggle - identical to
             # effective_include_product since the 2026-08-07 reference usability gate
@@ -450,7 +450,7 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
              if effective_include_product else "") +
             _operator_instruction_clause(operator_instruction) +
             _critic_feedback_clause(critic_feedback) +
-            _objects_clause(blueprint.get("objects"), objects_context) +
+            _objects_clause(blueprint.get("objects"), objects_context, ad_id=blueprint.get("ad_id")) +
             _semantic_split_clause(blueprint.get("semantic_split")) +
             creative_description.strip() + " "
             + product_clause
@@ -466,7 +466,7 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
              if effective_include_product else "") +
             _operator_instruction_clause(operator_instruction) +
             _critic_feedback_clause(critic_feedback) +
-            _objects_clause(blueprint.get("objects"), objects_context) +
+            _objects_clause(blueprint.get("objects"), objects_context, ad_id=blueprint.get("ad_id")) +
             _semantic_split_clause(blueprint.get("semantic_split")) +
             f"A premium skincare advertisement image for Besque, a natural body-oil brand for women 40+. "
             f"Composition and setting: {layout}. (If this implies a person, render them per compliance "
@@ -844,7 +844,7 @@ def _substitute_object_line(obj, kind, text_purpose, description, context):
     )
 
 
-def _objects_clause(objects=None, context=None):
+def _objects_clause(objects=None, context=None, ad_id=None):
     """2026-08-17: REPLACES _scene_elements_clause/_illustrated_elements_clause -
     deconstruct.py no longer produces scene_elements at all (schema/blueprint.schema.json),
     every visually distinct thing in the reference is now one entry in blueprint.objects,
@@ -885,9 +885,27 @@ def _objects_clause(objects=None, context=None):
 
     Returns "" when objects is empty/absent (a legacy blueprint predating this schema,
     or a blueprint with a genuinely empty list, which schema validation should never
-    actually allow through in practice) - never a fabricated object list."""
+    actually allow through in practice) - never a fabricated object list.
+
+    2026-08-17: this early return used to be silent - a legacy blueprint's prompt
+    skipped the entire objects model (no substitute/keep/drop lines, no closure
+    sentence, resolve_disposition never called) with nothing in any log naming why.
+    Logged at ERROR, not warning/info: every other guardrail this codebase has (rules
+    1-9, compliance C1-C9) still assembles into the prompt regardless of this return,
+    so a caller reading the log has no other signal that the SCENE OBJECTS mechanism
+    specifically was skipped for this call - ad_id is passed by the caller (read from
+    blueprint.get("ad_id") at each of build_image_prompt's three call sites) since this
+    function only ever received the bare objects array before this, never the whole
+    blueprint or an id to name in a log line. None (a caller that doesn't pass it, e.g.
+    an existing test) still logs, just without naming which ad."""
     objects = objects or []
     if not objects:
+        log.error(
+            "Ad %s: SCENE OBJECTS clause skipped - blueprint has no 'objects' key "
+            "(or an empty one). The objects model (substitute/keep/drop per element, "
+            "the closure sentence, resolve_disposition) did not reach this prompt.",
+            ad_id,
+        )
         return ""
     context = context or {}
     lines = []
