@@ -254,6 +254,7 @@ _PRODUCT = {
 _GEOMETRY_MARKER = "4.33"  # from _bottle_geometry_clause's own hardcoded proportions
 _IDENTITY_MARKER = "Clear glass bottle, terracotta label, black pump."
 _INTEGRATION_MARKER = "PARTICIPATING OBJECT"
+_INTEGRATION_COMPOSITING_MARKER = "COMPOSITING MODE"  # 2026-08-19 double-bottle fix
 _GEOMETRY_SOURCE_MARKER = "BOTTLE GEOMETRY SOURCE"
 
 
@@ -283,9 +284,15 @@ def test_build_image_prompt_suppresses_geometry_and_identity_when_compositing_ed
     assert _GEOMETRY_MARKER not in prompt
     assert _IDENTITY_MARKER not in prompt
     assert _GEOMETRY_SOURCE_MARKER not in prompt
-    # integration clause is NEVER suppressed - scene composition around the product
-    # still matters whether Gemini or Pillow puts the bottle there.
-    assert _INTEGRATION_MARKER in prompt
+    # UPDATED 2026-08-19 (double-bottle fix, ad 2767866756880226 confirmed live): the
+    # integration clause is never SUPPRESSED (it still fires), but its WORDING
+    # switches to the compositing-mode branch - the old "PARTICIPATING OBJECT...
+    # held/applied/resting" wording asked Gemini to draw a bottle, which produced a
+    # real second bottle behind the correctly-pasted cutout. The old marker must now
+    # be ABSENT and the new one present - see test_bottle_integration_compositing.py
+    # for the dedicated test suite this fix landed with.
+    assert _INTEGRATION_MARKER not in prompt
+    assert _INTEGRATION_COMPOSITING_MARKER in prompt
 
 
 def test_build_image_prompt_suppresses_geometry_and_identity_when_compositing_writer_branch():
@@ -296,7 +303,9 @@ def test_build_image_prompt_suppresses_geometry_and_identity_when_compositing_wr
     )
     assert _GEOMETRY_MARKER not in prompt
     assert _IDENTITY_MARKER not in prompt
-    assert _INTEGRATION_MARKER in prompt
+    # UPDATED 2026-08-19 (double-bottle fix) - see the edit_mode test above for why.
+    assert _INTEGRATION_MARKER not in prompt
+    assert _INTEGRATION_COMPOSITING_MARKER in prompt
 
 
 def test_build_image_prompt_keeps_geometry_and_identity_writer_branch_by_default():
@@ -315,7 +324,9 @@ def test_build_image_prompt_suppresses_geometry_and_identity_when_compositing_te
     )
     assert _GEOMETRY_MARKER not in prompt
     assert _IDENTITY_MARKER not in prompt
-    assert _INTEGRATION_MARKER in prompt
+    # UPDATED 2026-08-19 (double-bottle fix) - see the edit_mode test above for why.
+    assert _INTEGRATION_MARKER not in prompt
+    assert _INTEGRATION_COMPOSITING_MARKER in prompt
 
 
 def test_build_image_prompt_keeps_geometry_and_identity_template_branch_by_default():

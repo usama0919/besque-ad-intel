@@ -532,7 +532,7 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
             # "the BOTTLE GEOMETRY clause above" that isn't in this prompt) - integration
             # stays, since scene composition around the product still applies either way.
             ((("" if suppress_bottle_identity else _bottle_identity_clause(product) + _bottle_geometry_clause())
-              + _bottle_integration_clause()
+              + _bottle_integration_clause(suppress_bottle_identity)
               + ("" if suppress_bottle_identity else _bottle_geometry_source_clause()))
              if effective_include_product else "") +
             _operator_instruction_clause(operator_instruction) +
@@ -590,7 +590,7 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
             # B compositing will paste the real cutout in after generation - integration
             # stays, scene composition around the product still applies either way.
             ((("" if suppress_bottle_identity else _bottle_identity_clause(product) + _bottle_geometry_clause())
-              + _bottle_integration_clause())
+              + _bottle_integration_clause(suppress_bottle_identity))
              if effective_include_product else "") +
             _operator_instruction_clause(operator_instruction) +
             _critic_feedback_clause(critic_feedback) +
@@ -611,7 +611,7 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
             # B compositing will paste the real cutout in after generation - integration
             # stays, scene composition around the product still applies either way.
             ((("" if suppress_bottle_identity else _bottle_identity_clause(product) + _bottle_geometry_clause())
-              + _bottle_integration_clause())
+              + _bottle_integration_clause(suppress_bottle_identity))
              if effective_include_product else "") +
             _operator_instruction_clause(operator_instruction) +
             _critic_feedback_clause(critic_feedback) +
@@ -2002,7 +2002,7 @@ def _bottle_geometry_source_clause():
     )
 
 
-def _bottle_integration_clause():
+def _bottle_integration_clause(suppress_bottle_identity=False):
     """Item 2 (2026-08-13 build): nothing in this prompt stated, before now, that the
     bottle must read as a participating object in the scene rather than a flat packshot
     pasted on top of it. Deliberately unconditional/generic - a behavioural requirement
@@ -2024,7 +2024,51 @@ def _bottle_integration_clause():
     facing that one direction regardless of the scene. Pump/collar DESIGN and geometry
     are governed by _bottle_geometry_source_clause/_bottle_identity_clause and stay
     fixed; FACING is a composition detail, addressed here alongside grip/scale/contact-
-    shadow, the same category of fact as everything else in this clause."""
+    shadow, the same category of fact as everything else in this clause.
+
+    suppress_bottle_identity (2026-08-19, Route B double-bottle fix): True when
+    generate_image's own _composite_gate has ALREADY decided this run will paste the
+    real product cutout in after Gemini returns - same flag build_image_prompt
+    already threads to _bottle_identity_clause/_bottle_geometry_clause for the same
+    reason. LIVE BUG this closes, confirmed 2026-08-17 (gate passed 16:29, draft
+    written 16:31, ad 2767866756880226): identity/geometry were already suppressed
+    in this case, but this clause was left unconditional - still asking Gemini to
+    draw "a PARTICIPATING OBJECT... held, in the process of being applied, or
+    resting." Gemini complied and drew its OWN bottle (a taller amber bottle with a
+    partial label) behind and left of the correctly-pasted real cutout, because
+    nothing here told it not to draw one at all. When True, this clause asks for the
+    SAME scene participation (scale, contact/grip shadow, grip conformation when a
+    hand is present) but as an EMPTY, product-shaped space for the compositor to
+    fill afterward, and explicitly forbids rendering the product's own form, label,
+    or pump - closing the gap that produced the second bottle. False (the default)
+    reproduces this clause's prior text byte-for-byte - no caller that doesn't know
+    about compositing sees any change."""
+    if suppress_bottle_identity:
+        return (
+            "BOTTLE INTEGRATION - COMPOSITING MODE (STRICT, EVERY GENERATION PATH, "
+            "OVERRIDES ANY COMPOSITION-MATCHING INSTRUCTION ELSEWHERE THAT WOULD "
+            "REPRODUCE A FLOATING PRODUCT SHOT OR DRAW A BOTTLE): a real product "
+            "photograph will be PASTED into this exact scene after you generate it - "
+            "you must leave the correct SPACE for it, but you must NEVER draw the "
+            "bottle itself. Do not render any bottle, container, packaging, label, "
+            "pump, cap, or liquid anywhere in this space, in any form, under any "
+            "circumstances - not the reference's product, not an invented one, not a "
+            "silhouette, outline, or placeholder shape standing in for it. Leave that "
+            "region as clean, unoccupied surface, background, or skin, exactly as if "
+            "no object were ever going to be there, EXCEPT for the surrounding "
+            "context a real object would leave behind: scale the empty space "
+            "consistently with whatever is nearest it - a hand, a shelf, a counter, a "
+            "towel - never larger or smaller than that context would allow. Render a "
+            "contact shadow (or, where held, a grip shadow) exactly where a bottle "
+            "meeting a hand or surface would cast one, even though nothing is drawn "
+            "in that space yet - its absence is what makes a later paste read as "
+            "glued on. WHEN A HAND IS PRESENT: render the hand in a natural gripping "
+            "pose around the empty space - fingers curled as if wrapped around a "
+            "bottle's body, wrist at a natural angle for that grip - never resting "
+            "open or flat as if holding nothing. Never let anything else (another "
+            "prop, a caption, the hand itself) occupy or overlap the space reserved "
+            "for the bottle. "
+        )
     return (
         "BOTTLE INTEGRATION (STRICT, EVERY GENERATION PATH, OVERRIDES ANY COMPOSITION-"
         "MATCHING INSTRUCTION ELSEWHERE THAT WOULD REPRODUCE A FLOATING PRODUCT SHOT): "
