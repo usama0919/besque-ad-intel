@@ -4,7 +4,7 @@ import logging
 import math
 import os
 import re
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageStat
 from src import assets, deconstruct, generate_image_prompt_writer
 from src.compliance_rules import COMPLIANCE_RULES
 
@@ -156,8 +156,24 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
                         realism: str = None, critic_feedback: list = None,
                         cta_text: str = None, panel_copy: list = None,
                         testimonial: dict = None, product_count: int = None,
-                        clone_mode: bool = False, object_copy: list = None) -> str:
+                        clone_mode: bool = False, object_copy: list = None,
+                        suppress_bottle_identity: bool = False) -> str:
     """Construct a Besque-adapted image generation prompt from the blueprint's visual notes.
+
+    suppress_bottle_identity (2026-08-17, Route B compositing): True when generate_image's
+    own _composite_gate has ALREADY decided this run will paste the real product cutout
+    in after Gemini returns, rather than let Gemini draw the bottle. Drops
+    _bottle_geometry_clause/_bottle_identity_clause (and, in edit mode only,
+    _bottle_geometry_source_clause, which otherwise dangles a reference to "the BOTTLE
+    GEOMETRY clause above" that would no longer exist in this same prompt) from every
+    branch below - asking Gemini to draw a detailed, identity-correct bottle in the
+    exact region a real cutout is about to be pasted over is pure waste at best, and a
+    visible double-bottle/conflicting-render risk at worst. _bottle_integration_clause
+    is NOT suppressed - it governs scene composition (grounding, scale, no text
+    overlap) around wherever the product goes, which still matters whether that space
+    ends up drawn by Gemini or pasted in afterward. False (the default) reproduces
+    today's prompt byte-for-byte - no caller that doesn't know about compositing sees
+    any change.
     include_product=True, text_in_image=False, creative_description=None, edit_mode=False,
     offer_text=None, operator_instruction=None (today's defaults) reproduce the prior
     output exactly for a given blueprint/product - none of these are a rewrite of the
@@ -414,8 +430,14 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
             # source-attribution statement between them is meaningful. _bottle_geometry_
             # clause (2026-08-16) is the single hardcoded source of truth those source-
             # attribution facts now defer to, rather than restating shape categories.
-            (_bottle_identity_clause(product) + _bottle_geometry_clause()
-             + _bottle_integration_clause() + _bottle_geometry_source_clause()
+            #
+            # suppress_bottle_identity (2026-08-17): drops identity/geometry AND the
+            # source-attribution clause (which would otherwise dangle a reference to
+            # "the BOTTLE GEOMETRY clause above" that isn't in this prompt) - integration
+            # stays, since scene composition around the product still applies either way.
+            ((("" if suppress_bottle_identity else _bottle_identity_clause(product) + _bottle_geometry_clause())
+              + _bottle_integration_clause()
+              + ("" if suppress_bottle_identity else _bottle_geometry_source_clause()))
              if effective_include_product else "") +
             _operator_instruction_clause(operator_instruction) +
             _critic_feedback_clause(critic_feedback) +
@@ -460,7 +482,11 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
         prompt = (
             brand_rules(include_product=include_product, text_in_image=text_in_image,
                         headline=headline, subtext=subtext) +
-            (_bottle_identity_clause(product) + _bottle_geometry_clause() + _bottle_integration_clause()
+            # suppress_bottle_identity (2026-08-17): drops identity/geometry when Route
+            # B compositing will paste the real cutout in after generation - integration
+            # stays, scene composition around the product still applies either way.
+            ((("" if suppress_bottle_identity else _bottle_identity_clause(product) + _bottle_geometry_clause())
+              + _bottle_integration_clause())
              if effective_include_product else "") +
             _operator_instruction_clause(operator_instruction) +
             _critic_feedback_clause(critic_feedback) +
@@ -476,7 +502,11 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
         prompt = (
             brand_rules(include_product=include_product, text_in_image=text_in_image,
                         headline=headline, subtext=subtext) +
-            (_bottle_identity_clause(product) + _bottle_geometry_clause() + _bottle_integration_clause()
+            # suppress_bottle_identity (2026-08-17): drops identity/geometry when Route
+            # B compositing will paste the real cutout in after generation - integration
+            # stays, scene composition around the product still applies either way.
+            ((("" if suppress_bottle_identity else _bottle_identity_clause(product) + _bottle_geometry_clause())
+              + _bottle_integration_clause())
              if effective_include_product else "") +
             _operator_instruction_clause(operator_instruction) +
             _critic_feedback_clause(critic_feedback) +
@@ -1308,6 +1338,213 @@ def _fetch_product_cutout_bytes():
     finally:
         _product_cutout_cache_populated = True
     return _product_cutout_bytes_cache
+
+
+# ---- Route B compositing (2026-08-17): paste the REAL product cutout into the
+# generated draft instead of asking Gemini to draw the bottle, for the narrow set of
+# placements Pillow can do convincingly. Confirmed root cause (the realism diagnostic):
+# every bottle-description clause is already textually invariant, and Gemini still
+# rendered a wrong pump colour, an invented label, and a wrong silhouette - this is not
+# a prompt-wording gap, it is the fourth confirmed case in this codebase of a prompt-
+# only instruction not binding on the image path. The fix is structural: stop asking
+# Gemini to draw the bottle at all when the placement qualifies, and place the real
+# pixels there instead. ----
+
+# Grip-shaped language in the PRODUCT object's own description - checked because
+# deconstruct.py sometimes folds "held by a hand" into the product's description
+# itself rather than (or in addition to) a separate prop object with serves_object_id.
+_GRIP_DESCRIPTION_KEYWORDS = (
+    "held", "holding", "grip", "gripped", "grasp", "grasped", "clutch", "clutched",
+    "in hand", "in-hand", "in a hand", "fingers wrapped", "palm",
+)
+
+# background.light keywords that mean "hard or strongly directional" - a flat pasted
+# cutout has no cast shadow/highlight matching a specific hard light direction, and
+# reads as pasted-on immediately under this kind of lighting. Absence of these words is
+# the gate condition, never a requirement that the phrase explicitly says "soft".
+_HARD_LIGHT_KEYWORDS = (
+    "hard", "harsh", "direct sun", "direct sunlight", "strong direct", "dramatic",
+    "spotlight", "high-contrast", "high contrast", "strongly directional",
+    "harsh shadow", "hard shadow", "intense light", "glaring",
+)
+
+
+def _composite_gate(blueprint, include_product=True):
+    """Decides whether composite_product will run for THIS generation - evaluated
+    BEFORE build_image_prompt (see generate_image's own ordering) so
+    _bottle_geometry_clause/_bottle_identity_clause can be suppressed from the SAME
+    build exactly when compositing will actually happen. Every gate below is a
+    structural, blueprint-level fact - none require the generated image itself, which
+    is what makes evaluating this before the Gemini call possible at all.
+
+    Returns (proceed: bool, reason: str, product_object: dict|None). product_object is
+    the single qualifying objects[] entry when proceed is True, else None - the caller
+    reuses it directly for the bbox rather than re-deriving it a second time. Any
+    failing gate returns proceed=False immediately; reason names exactly which one, for
+    the caller to log at INFO - never a silent skip.
+
+    Gates (every one must pass):
+    1. Exactly one objects[] entry with kind=="product" and disposition=="substitute",
+       and it has a usable (4-element) bbox - Pillow needs one unambiguous placement,
+       never a guess between several candidates or a fallback when none exists.
+    2. Not held/gripped: no kind=="prop" object whose serves_object_id names this
+       product (serves_object_id is only ever populated on text/prop objects per
+       schema/blueprint.schema.json, never "person" - a hand is always tracked as a
+       prop, so this is the complete structural check for "something is holding it"),
+       AND the product's own description carries no grip-shaped language. A held
+       bottle needs a grip shadow following finger contours and a scale relationship
+       to a hand that a flat pasted cutout cannot produce convincingly (see the Phase 1
+       diagnostic's Pillow-feasibility assessment).
+    3. background.light does not read as hard or strongly directional (see
+       _HARD_LIGHT_KEYWORDS) - a pasted cutout has no cast shadow/highlight matching a
+       specific hard light direction.
+
+    Deliberately does NOT gate on production_style/realism (e.g. "illustrated") - not
+    in the task's own three named gates, so not added here; flagged in the handover
+    notes as a known residual risk, not silently folded into this function.
+
+    include_product=False short-circuits to proceed=False before inspecting anything
+    else - there is no product to composite when the run itself doesn't want one."""
+    if not include_product:
+        return False, "include_product is False", None
+    objects = blueprint.get("objects") or []
+    candidates = [
+        obj for obj in objects
+        if isinstance(obj, dict) and obj.get("kind") == "product" and obj.get("disposition") == "substitute"
+    ]
+    if len(candidates) != 1:
+        return False, (
+            f"expected exactly one substitute-marked product object, found {len(candidates)}"
+        ), None
+    product_object = candidates[0]
+    bbox = product_object.get("bbox")
+    if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+        return False, "product object has no usable 4-element bbox", None
+    object_id = product_object.get("object_id")
+    description = (product_object.get("description") or "").lower()
+    if any(kw in description for kw in _GRIP_DESCRIPTION_KEYWORDS):
+        return False, (
+            f"product description reads as held/gripped: {product_object.get('description')!r}"
+        ), None
+    holder = next(
+        (obj for obj in objects
+         if isinstance(obj, dict) and obj.get("kind") == "prop" and obj.get("serves_object_id") == object_id),
+        None,
+    )
+    if holder is not None:
+        return False, (
+            f"object {holder.get('object_id')!r} (prop) serves this product - held or "
+            f"staged, not free-standing"
+        ), None
+    light = ((blueprint.get("background") or {}).get("light") or "").lower()
+    if any(kw in light for kw in _HARD_LIGHT_KEYWORDS):
+        return False, f"background.light reads as hard/directional: {light!r}", None
+    return True, "ok", product_object
+
+
+
+def _match_brightness_conservative(cutout, scene_img):
+    """Nudges the cutout's brightness toward the scene's own mid-tones - conservatively,
+    since a wrong nudge is worse than none. Measures the scene's mean luminance over
+    the WHOLE generated image (a single global figure, not a per-region sample - "a
+    single conservative ImageEnhance pass" per the task, not a lighting model) against
+    the cutout's own mean luminance over its OPAQUE pixels only (masked by its own
+    alpha channel, so the transparent surround never pulls the mean toward black).
+    Applies only HALF the measured correction, then clamps the resulting factor to
+    [0.85, 1.15] - a bottle that's already close to the scene's tones is left alone
+    entirely (a <2% factor is treated as a no-op) rather than nudged for no visible
+    reason. Returns a new Image; never mutates the caller's own cutout."""
+    scene_mean = ImageStat.Stat(scene_img.convert("L")).mean[0]
+    cutout_l = cutout.convert("L")
+    if cutout.mode == "RGBA":
+        cutout_mean = ImageStat.Stat(cutout_l, mask=cutout.split()[3]).mean[0]
+    else:
+        cutout_mean = ImageStat.Stat(cutout_l).mean[0]
+    if cutout_mean <= 0:
+        return cutout
+    raw_factor = scene_mean / cutout_mean
+    factor = 1.0 + (raw_factor - 1.0) * 0.5
+    factor = max(0.85, min(1.15, factor))
+    if abs(factor - 1.0) < 0.02:
+        return cutout
+    return ImageEnhance.Brightness(cutout).enhance(factor)
+
+
+def _draw_contact_shadow(base, paste_x, paste_y, cutout_w, cutout_h):
+    """Draws a soft-edged elliptical shadow onto `base` (an RGBA image, mutated in
+    place), positioned at the footprint of where the cutout is about to be pasted -
+    called strictly BEFORE that paste so the shadow sits under the bottle, never on top
+    of it. Subtle by construction: low peak opacity (70/255), a wide Gaussian blur, and
+    an ellipse sized well within the cutout's own footprint - a shadow that reads as a
+    hard grey oval is exactly the "pasted-on" look this whole gate exists to avoid."""
+    shadow_layer = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(shadow_layer)
+    ellipse_w = cutout_w * 0.7
+    ellipse_h = max(8.0, cutout_h * 0.06)
+    cx = paste_x + cutout_w / 2
+    cy = paste_y + cutout_h - ellipse_h * 0.3
+    draw.ellipse(
+        [cx - ellipse_w / 2, cy - ellipse_h / 2, cx + ellipse_w / 2, cy + ellipse_h / 2],
+        fill=(0, 0, 0, 70),
+    )
+    blur_radius = max(4.0, ellipse_h * 0.5)
+    shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+    base.paste(shadow_layer, (0, 0), shadow_layer)
+
+
+def composite_product(image_bytes, cutout_bytes, bbox):
+    """Paste the real product cutout into a generated draft, scaled to `bbox` while
+    PRESERVING the cutout's own aspect ratio - derived from cutout.size directly (the
+    authoritative asset is 503x1562, but this never hardcodes that ratio; it reads
+    whatever the actual fetched cutout's real dimensions are, so a future re-export of
+    the asset at a slightly different size still composites correctly with no constant
+    to update). Never stretched to the bbox's own raw width:height, which would
+    distort a rigid glass silhouette.
+    Fits INSIDE the bbox on whichever axis is tighter (min of the two independent
+    scale factors), then centres the result horizontally within the bbox and anchors
+    it to the bbox's BOTTOM edge, so the cutout's own base lands where the drawn
+    bottle's base was - bbox is deconstruct's estimate of where the DRAWN bottle sits,
+    not a container this function is free to centre in on both axes.
+
+    Draws a subtle contact shadow (_draw_contact_shadow) at the paste footprint before
+    pasting, and nudges the cutout's brightness toward the scene's own mid-tones
+    (_match_brightness_conservative) before that - shadow first, then the (possibly
+    brightness-adjusted) cutout on top, so ordering matches what a real photograph
+    would show.
+
+    Only ever called after _composite_gate has already confirmed this is a placement
+    Pillow can do convincingly - this function performs no gating of its own, it
+    trusts its caller. Raises on a malformed image/cutout/bbox rather than failing
+    silently - generate_image's own caller catches this and falls back to Gemini's
+    unmodified render rather than lose a draft over a compositing bug.
+
+    bbox is [x, y, w, h] as fractions of the FULL IMAGE (0.0-1.0) - the same convention
+    every other bbox reader in this codebase (drift_check.py, generate_copy.py's
+    _reading_order_key) already uses. Returns new PNG bytes."""
+    base = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
+    cutout = Image.open(io.BytesIO(cutout_bytes)).convert("RGBA")
+
+    img_w, img_h = base.size
+    x, y, w, h = bbox
+    box_x0, box_y0 = x * img_w, y * img_h
+    box_w, box_h = w * img_w, h * img_h
+
+    cutout_w, cutout_h = cutout.size
+    scale = min(box_w / cutout_w, box_h / cutout_h)
+    new_w = max(1, round(cutout_w * scale))
+    new_h = max(1, round(cutout_h * scale))
+    resized_cutout = cutout.resize((new_w, new_h), Image.LANCZOS)
+    resized_cutout = _match_brightness_conservative(resized_cutout, base)
+
+    paste_x = round(box_x0 + (box_w - new_w) / 2)
+    paste_y = round(box_y0 + box_h - new_h)
+
+    _draw_contact_shadow(base, paste_x, paste_y, new_w, new_h)
+    base.paste(resized_cutout, (paste_x, paste_y), resized_cutout)
+
+    out = io.BytesIO()
+    base.convert("RGB").save(out, format="PNG")
+    return out.getvalue()
 
 
 def _bottle_geometry_clause():
@@ -2599,6 +2836,15 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
     if edit_mode and retheme_colours:
         from src import dedupe as _dedupe
         brand_palette = _dedupe.get_brand_settings().get("palette")
+    # Route B compositing gate (2026-08-17): evaluated HERE, before build_image_prompt,
+    # not after Gemini returns - the gate outcome and the prompt text it gates must
+    # never disagree about whether Gemini is being asked to draw the bottle. Every gate
+    # is a structural blueprint fact (see _composite_gate's own docstring), so this
+    # never needs the generated image itself to decide.
+    should_composite, composite_gate_reason, composite_product_object = _composite_gate(
+        blueprint, include_product
+    )
+    log.info("Ad %s: composite gate -> %s (%s)", ad_id, should_composite, composite_gate_reason)
     prompt = build_image_prompt(blueprint, product=product, include_product=include_product,
                                  text_in_image=text_in_image, headline=headline, subtext=subtext,
                                  creative_description=creative_description, edit_mode=edit_mode,
@@ -2607,7 +2853,7 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
                                  realism=realism, critic_feedback=critic_feedback, cta_text=cta_text,
                                  panel_copy=panel_copy, testimonial=testimonial,
                                  product_count=product_count, clone_mode=clone_mode,
-                                 object_copy=object_copy)
+                                 object_copy=object_copy, suppress_bottle_identity=should_composite)
     stem = _draft_stem(ad_id, angle_slug)
     # OCCLUDE_PERSON (Item 1, 2026-08-12): applied to the IN-MEMORY bytes only, right
     # before they're attached to Gemini - never to the on-disk image_path fetch, which
@@ -2754,6 +3000,32 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
                 break
         if image_bytes is None:
             return None
+
+        # Route B compositing (2026-08-17): reassigns image_bytes ONLY - deliberately
+        # between extraction and the disk write below, so every downstream consumer
+        # (the local file, the GCS upload, pipeline.process_ad's own re-read for the
+        # output critic, dedupe.save_artifact's stored path) sees the composited result
+        # with no other change anywhere. should_composite was decided BEFORE
+        # build_image_prompt ran (see above) - never re-evaluated here against the
+        # generated image, so the prompt Gemini actually saw and what happens to its
+        # output can never disagree about whether the bottle was suppressed. A
+        # compositing failure (missing cutout, malformed bbox, a Pillow exception) logs
+        # and falls back to Gemini's own render rather than losing the draft - this
+        # mirrors _fetch_product_cutout_bytes' own fail-open contract for the same
+        # asset used as a reference photo.
+        if should_composite:
+            cutout_bytes = _fetch_product_cutout_bytes()
+            if not cutout_bytes:
+                log.warning("Ad %s: composite gate passed but the product cutout is "
+                            "unavailable - keeping Gemini's own render", ad_id)
+            else:
+                try:
+                    image_bytes = composite_product(
+                        image_bytes, cutout_bytes, composite_product_object["bbox"])
+                    log.info("Ad %s: composited the real product cutout into the draft", ad_id)
+                except Exception as e:
+                    log.warning("Ad %s: compositing failed (%s: %s) - keeping Gemini's "
+                                "own render", ad_id, type(e).__name__, e)
 
         ASSET_DIR.mkdir(exist_ok=True)
         dest = ASSET_DIR / f"{stem}_draft.png"
