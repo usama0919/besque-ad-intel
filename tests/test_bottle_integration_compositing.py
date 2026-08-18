@@ -145,3 +145,159 @@ def test_build_image_prompt_creative_description_branch_compositing_suppresses_p
     )
     assert "COMPOSITING MODE" in prompt
     assert "It must be held, in the process of being applied, or" not in prompt
+
+
+# ---- Route B double-bottle fix, part 2 (2026-08-18). CONFIRMED LIVE, artifacts 1352/
+# 1353: _bottle_integration_clause (the fix above) was already correctly suppressed, but
+# THREE other sites in the same prompt still independently instructed or assumed a
+# rendered bottle: _substitute_object_line's product branch ("place the Besque product
+# here instead, at bbox [...]"), _edit_mode_instruction's own substitute-branch placement
+# text ("place the Besque product... in its position"/"draw the Besque product
+# NATIVELY..."), and product_clause's material-realism paragraph (meniscus/refraction/
+# specular-highlight/label-wrap language). Gemini drew its own bottle per these
+# instructions while Route B separately pasted the real cutout - two bottles, different
+# sizes and colours, confirmed by direct visual inspection of the drafted image. Fixed by
+# threading suppress_bottle_identity to all three, and removing the dangling "BOTTLE
+# IDENTITY and BOTTLE GEOMETRY clauses above" references those sites made to clauses that
+# no longer exist in the prompt when suppressed. The substance-recolour clause was
+# checked and deliberately left untouched - it governs a substance that has LEFT the
+# bottle (a drip/pour/smear elsewhere in the scene), a separate element Route B's cutout
+# paste never covers, so it remains correct regardless of whether the bottle itself is
+# drawn or pasted. ----
+
+# "Draw the bottle" markers that must NEVER appear anywhere in a suppressed prompt -
+# gathered directly from the real, unsuppressed instruction text each fixed site used to
+# emit unconditionally (see the sites named above), not invented for this test.
+_DRAW_THE_BOTTLE_MARKERS = (
+    "place the Besque product here instead",       # _substitute_object_line, product branch
+    "place a Besque bottle here",                  # _substitute_object_line, multi-instance branch
+    "place the Besque product (shown in the reference photo(s) that follow",  # _edit_mode_instruction, photographic substitute
+    "draw the Besque product NATIVELY",            # _edit_mode_instruction, illustrated substitute
+    "a visible liquid volume with a distinct surface line (a meniscus)",  # _BOTTLE_MATERIAL_REALISM_CLAUSE
+    "real specular highlights and reflections",    # _BOTTLE_MATERIAL_REALISM_CLAUSE
+    "The label wraps the bottle's own curve",       # _BOTTLE_MATERIAL_REALISM_CLAUSE
+)
+
+# Dangling references: named clauses that do not exist anywhere in a suppressed prompt -
+# nothing may point at them by name once they're gone.
+_DANGLING_REFERENCE_MARKERS = (
+    "BOTTLE IDENTITY and BOTTLE GEOMETRY clauses above",
+    "BOTTLE GEOMETRY clause above",
+    "this is what the Besque bottle IS",  # _bottle_identity_clause's own opening phrase
+)
+
+
+def _blueprint_with_substitute_product():
+    """Mirrors the real double-bottle ad's shape (artifact 1352): one objects[] entry,
+    kind=="product", disposition=="substitute", a real 4-element bbox - exactly what
+    _composite_gate requires and what _substitute_object_line/_edit_mode_instruction
+    both react to independently."""
+    bp = load_blueprint_fixture("sample_hero_with_offer")
+    bp = dict(bp)
+    bp["objects"] = [
+        {
+            "object_id": "obj_02",
+            "kind": "product",
+            "description": "competitor eye serum tube, slim black squeeze tube",
+            "bbox": [0.1, 0.2, 0.45, 0.75],
+            "disposition": "substitute",
+            "ownership": "competitor_branded",
+            "carries_brand_mark": True,
+            "role": "hero",
+        },
+    ]
+    return bp
+
+
+def _product():
+    return {
+        "name": "Magic Body Oil",
+        "visual_description": "a tall cylindrical bottle with a gold collar and black pump",
+        "substance_colour": "golden-amber oil",
+    }
+
+
+def test_suppressed_prompt_contains_zero_draw_the_bottle_instructions_edit_mode_photographic():
+    bp = _blueprint_with_substitute_product()
+    prompt = gip.build_image_prompt(
+        bp, product=_product(), include_product=True, edit_mode=True, realism="ugc",
+        suppress_bottle_identity=True,
+    )
+    assert "COMPOSITING MODE" in prompt  # sanity: suppression actually engaged
+    for marker in _DRAW_THE_BOTTLE_MARKERS:
+        assert marker not in prompt, f"draw-the-bottle instruction survived: {marker!r}"
+    for marker in _DANGLING_REFERENCE_MARKERS:
+        assert marker not in prompt, f"dangling reference to a suppressed clause: {marker!r}"
+
+
+def test_suppressed_prompt_contains_zero_draw_the_bottle_instructions_edit_mode_illustrated():
+    bp = _blueprint_with_substitute_product()
+    prompt = gip.build_image_prompt(
+        bp, product=_product(), include_product=True, edit_mode=True, realism="illustrated",
+        suppress_bottle_identity=True,
+    )
+    assert "COMPOSITING MODE" in prompt
+    for marker in _DRAW_THE_BOTTLE_MARKERS:
+        assert marker not in prompt, f"draw-the-bottle instruction survived: {marker!r}"
+    for marker in _DANGLING_REFERENCE_MARKERS:
+        assert marker not in prompt, f"dangling reference to a suppressed clause: {marker!r}"
+
+
+def test_suppressed_prompt_contains_zero_draw_the_bottle_instructions_template_branch():
+    """Non-edit-mode branch - _edit_mode_instruction never runs here, but product_clause's
+    material-realism paragraph is shared code and must be suppressed here too."""
+    bp = _blueprint_with_substitute_product()
+    prompt = gip.build_image_prompt(
+        bp, product=_product(), include_product=True, edit_mode=False, realism=None,
+        suppress_bottle_identity=True,
+    )
+    assert "COMPOSITING MODE" in prompt
+    for marker in _DRAW_THE_BOTTLE_MARKERS:
+        assert marker not in prompt, f"draw-the-bottle instruction survived: {marker!r}"
+    for marker in _DANGLING_REFERENCE_MARKERS:
+        assert marker not in prompt, f"dangling reference to a suppressed clause: {marker!r}"
+
+
+def test_unsuppressed_prompt_still_contains_the_draw_instructions_control():
+    """Control for the three tests above: proves they aren't vacuously passing (e.g. from
+    a typo'd marker or an unrelated code path never reached) - the SAME setup with
+    suppress_bottle_identity=False must still show at least one real draw-the-bottle
+    instruction, exactly reproducing pre-fix behaviour."""
+    bp = _blueprint_with_substitute_product()
+    prompt = gip.build_image_prompt(
+        bp, product=_product(), include_product=True, edit_mode=True, realism="ugc",
+        suppress_bottle_identity=False,
+    )
+    assert "COMPOSITING MODE" not in prompt
+    assert "place the Besque product (shown in the reference photo(s) that follow" in prompt
+    assert "place the Besque product here instead" in prompt
+    assert "a visible liquid volume with a distinct surface line (a meniscus)" in prompt
+
+
+def test_suppressed_object_line_leaves_no_identity_dangling_reference_unit():
+    """Unit-level companion to the prompt-level tests above, isolating
+    _substitute_object_line's own product branch directly."""
+    obj = {"object_id": "obj_02", "kind": "product", "bbox": [0.1, 0.2, 0.45, 0.75],
+           "description": "competitor eye serum tube"}
+    line = gip._substitute_object_line(
+        obj, "product", None, "competitor eye serum tube", {}, suppress_bottle_identity=True,
+    )
+    assert "BOTTLE IDENTITY" not in line
+    assert "BOTTLE GEOMETRY" not in line
+    assert "place the Besque product here instead" not in line
+    assert "PASTED here after generation" in line
+
+
+def test_unsuppressed_object_line_unchanged_byte_for_byte():
+    obj = {"object_id": "obj_02", "kind": "product", "bbox": [0.1, 0.2, 0.45, 0.75],
+           "description": "competitor eye serum tube"}
+    line = gip._substitute_object_line(
+        obj, "product", None, "competitor eye serum tube", {}, suppress_bottle_identity=False,
+    )
+    assert line == (
+        "SUBSTITUTE: this position held a competitor product (\"competitor eye serum "
+        "tube\") - place the Besque product here instead, at bbox [0.1, 0.2, 0.45, 0.75] "
+        "(this object's own recorded position and scale). Its identity (shape, "
+        "proportions, colours, label) comes ONLY from the BOTTLE IDENTITY and BOTTLE "
+        "GEOMETRY clauses above, never from this object's own colours or description."
+    )

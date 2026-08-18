@@ -361,10 +361,24 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
         # own comment for why: the photoreal clause's meniscus/refraction/specular-
         # highlight language directly contradicts an illustrated register's own
         # "never photorealistic" instruction elsewhere in the same prompt.
-        product_desc += (
-            _BOTTLE_MATERIAL_REALISM_CLAUSE_ILLUSTRATED if resolved_style == "illustrated"
-            else _BOTTLE_MATERIAL_REALISM_CLAUSE
-        )
+        #
+        # suppress_bottle_identity (2026-08-18, Route B double-bottle fix part 2):
+        # dropped entirely when Route B will paste the real cutout in after
+        # generation - this paragraph is a full rendering brief (a visible liquid
+        # meniscus, glass refraction, pump specular highlights, a label wrapping a
+        # curved surface) for a bottle that BOTTLE INTEGRATION above has just said
+        # must not be drawn at all. Confirmed on artifacts 1352/1353 (2026-08-18):
+        # this paragraph was present, unconditionally, in the same prompt as the
+        # "never draw the bottle itself" instruction. product_desc's identity/
+        # ingredient-constraint text above this point is untouched - it constrains
+        # what a label may say IF one is legible, which stays relevant regardless of
+        # who renders the bottle; only the material/rendering-detail paragraph
+        # assumes something is being drawn.
+        if not suppress_bottle_identity:
+            product_desc += (
+                _BOTTLE_MATERIAL_REALISM_CLAUSE_ILLUSTRATED if resolved_style == "illustrated"
+                else _BOTTLE_MATERIAL_REALISM_CLAUSE
+            )
         # Skip only the PLACEMENT sentence below (never product_desc above - the
         # identity/ingredients/material-realism facts Gemini needs regardless of
         # add-vs-substitute) when edit mode's own substitution already placed the
@@ -537,7 +551,8 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
              if effective_include_product else "") +
             _operator_instruction_clause(operator_instruction) +
             _critic_feedback_clause(critic_feedback) +
-            _objects_clause(blueprint.get("objects"), objects_context, ad_id=blueprint.get("ad_id")) +
+            _objects_clause(blueprint.get("objects"), objects_context, ad_id=blueprint.get("ad_id"),
+                            suppress_bottle_identity=suppress_bottle_identity) +
             # Per-zone typography restoration (2026-08-17) - edit-mode only, matching
             # the deleted _typography_zones_clause's own original scope exactly (the
             # reference IS the creative brief in this branch, so typographic
@@ -566,7 +581,8 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
                                    objects=blueprint.get("objects"),
                                    face_present=blueprint.get("face_present"),
                                    clone_mode=clone_mode,
-                                   authorised_product_count=rule_authorised_product_count) +
+                                   authorised_product_count=rule_authorised_product_count,
+                                   suppress_bottle_identity=suppress_bottle_identity) +
             # product_clause already omits its own PLACEMENT sentence when
             # already_placed_by_substitution (edit_mode and reference_has_product) is
             # true - see where product_clause is built above - so it is always safe to
@@ -594,7 +610,8 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
              if effective_include_product else "") +
             _operator_instruction_clause(operator_instruction) +
             _critic_feedback_clause(critic_feedback) +
-            _objects_clause(blueprint.get("objects"), objects_context, ad_id=blueprint.get("ad_id")) +
+            _objects_clause(blueprint.get("objects"), objects_context, ad_id=blueprint.get("ad_id"),
+                            suppress_bottle_identity=suppress_bottle_identity) +
             _semantic_split_clause(blueprint.get("semantic_split")) +
             creative_description.strip() + " "
             + product_clause
@@ -615,7 +632,8 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
              if effective_include_product else "") +
             _operator_instruction_clause(operator_instruction) +
             _critic_feedback_clause(critic_feedback) +
-            _objects_clause(blueprint.get("objects"), objects_context, ad_id=blueprint.get("ad_id")) +
+            _objects_clause(blueprint.get("objects"), objects_context, ad_id=blueprint.get("ad_id"),
+                            suppress_bottle_identity=suppress_bottle_identity) +
             _semantic_split_clause(blueprint.get("semantic_split")) +
             f"A premium skincare advertisement image for Besque, a natural body-oil brand for women 40+. "
             f"Composition and setting: {layout}. (If this implies a person, render them per compliance "
@@ -1054,7 +1072,8 @@ def _object_typography_clause(objects, context=None):
     )
 
 
-def _substitute_object_line(obj, kind, text_purpose, description, context, product_instance_count=1):
+def _substitute_object_line(obj, kind, text_purpose, description, context, product_instance_count=1,
+                             suppress_bottle_identity=False):
     """The SUBSTITUTE line for one object whose (re-)resolved disposition is
     "substitute" - dispatches on text_purpose (2026-08-17 restoration of the deleted
     _structural_zones_clause's per-zone-type rules) for a kind=="text" object with a
@@ -1087,7 +1106,27 @@ def _substitute_object_line(obj, kind, text_purpose, description, context, produ
     no bbox, no description, and no awareness of each other (the OSEA "standard vs
     jumbo" reference) - the model had no way to tell these apart and substituted
     neither. Every product line now names ITS OWN bbox/description, so two different
-    positions in the objects inventory are never worded identically again."""
+    positions in the objects inventory are never worded identically again.
+
+    suppress_bottle_identity (2026-08-18, Route B double-bottle fix part 2): True when
+    generate_image's own _composite_gate has ALREADY decided this run will paste the
+    real product cutout in after Gemini returns - the SAME flag build_image_prompt
+    already threads to _bottle_identity_clause/_bottle_geometry_clause/
+    _bottle_integration_clause. LIVE BUG this closes, confirmed on artifacts 1352/1353
+    (2026-08-18): _bottle_integration_clause (the 87000ab fix) was already asking for
+    an empty product-shaped space, but THIS function - the SCENE OBJECTS line for the
+    exact same product object _composite_gate approved - still unconditionally said
+    "place the Besque product here instead, at bbox [...]", a direct, per-object draw
+    instruction with no awareness suppression exists. Gemini drew its own bottle
+    (matching this instruction, positioned per the reference's original composition,
+    e.g. held near a face) while Route B separately pasted the real cutout at the
+    recorded bbox - two independent bottles, different sizes and colours, from a
+    reference with exactly one product. When True, this returns compositing-aware
+    text instead: leave the space empty, remove the competitor's product, do not draw
+    any replacement - and does NOT reference "the BOTTLE IDENTITY and BOTTLE GEOMETRY
+    clauses above", since those clauses are themselves suppressed in this same prompt
+    and referencing them by name would dangle. False (the default) reproduces this
+    function's prior text byte-for-byte."""
     if kind == "product":
         bbox = obj.get("bbox")
         position_fact = (
@@ -1095,6 +1134,18 @@ def _substitute_object_line(obj, kind, text_purpose, description, context, produ
             if isinstance(bbox, (list, tuple)) and len(bbox) == 4
             else "at this object's own recorded position and scale"
         )
+        if suppress_bottle_identity:
+            return (
+                f"COMPOSITING: this position held a competitor product (\"{description}\") - "
+                f"a real Besque product photograph will be PASTED here after generation, "
+                f"{position_fact}. Remove the competitor's product entirely and do NOT draw, "
+                f"paint, or render any bottle, container, packaging, label, pump, cap, or "
+                f"liquid in this space, in any form - not the competitor's, not an invented "
+                f"one, not a placeholder shape or silhouette standing in for it. Leave this "
+                f"exact region as clean, unoccupied surface, background, or skin (see BOTTLE "
+                f"INTEGRATION above for exactly how the surrounding space and any contact/grip "
+                f"shadow should read)."
+            )
         if product_instance_count and product_instance_count > 1:
             return (
                 f"SUBSTITUTE: this position held one instance of a competitor product "
@@ -1187,7 +1238,7 @@ def _substitute_object_line(obj, kind, text_purpose, description, context, produ
     )
 
 
-def _objects_clause(objects=None, context=None, ad_id=None):
+def _objects_clause(objects=None, context=None, ad_id=None, suppress_bottle_identity=False):
     """2026-08-17: REPLACES _scene_elements_clause/_illustrated_elements_clause -
     deconstruct.py no longer produces scene_elements at all (schema/blueprint.schema.json),
     every visually distinct thing in the reference is now one entry in blueprint.objects,
@@ -1240,6 +1291,11 @@ def _objects_clause(objects=None, context=None, ad_id=None):
     value for whatever they serve into deconstruct.resolve_disposition's own
     served_object_disposition parameter. Single-hop only, same documented scoping limit
     as deconstruct._resolve_object_dispositions.
+
+    suppress_bottle_identity (2026-08-18, Route B double-bottle fix part 2): forwarded
+    to _substitute_object_line ONLY for the kind=="product" object(s) - see that
+    function's own docstring. False (the default) reproduces this function's prior
+    output byte-for-byte.
 
     Returns "" when objects is empty/absent (a legacy blueprint predating this schema,
     or a blueprint with a genuinely empty list, which schema validation should never
@@ -1321,6 +1377,7 @@ def _objects_clause(objects=None, context=None, ad_id=None):
             lines.append(_substitute_object_line(
                 obj, kind, text_purpose, description, context,
                 product_instance_count=product_instance_count if kind == "product" else 1,
+                suppress_bottle_identity=suppress_bottle_identity if kind == "product" else False,
             ))
         elif disposition == "drop":
             lines.append(
@@ -2350,7 +2407,8 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
                             cta_text=None, product_name=None,
                             panel_copy=None, testimonial=None, certifications=None,
                             objects=None, face_present=None,
-                            clone_mode=False, authorised_product_count=1):
+                            clone_mode=False, authorised_product_count=1,
+                            suppress_bottle_identity=False):
     """EDIT MODE (2026-08-01): Gemini receives the competitor's own ad as an input image
     Part, not just a text description of it - the reference image IS the creative brief,
     so no template scene/layout/palette description is assembled here (see
@@ -2478,7 +2536,28 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
     position, and wardrobe moved to SUBSTITUTE. The retheme_colours opening (both
     branches) also used to imply the person's own pose/wardrobe carried over as part of
     "geometry preserved"/"overall layout reproduced" - both now say explicitly that this
-    does not extend to the person, deferring entirely to PERSON below."""
+    does not extend to the person, deferring entirely to PERSON below.
+
+    suppress_bottle_identity (2026-08-18, Route B double-bottle fix part 2): True when
+    generate_image's own _composite_gate has ALREADY decided this run will paste the
+    real product cutout in after Gemini returns - same flag build_image_prompt already
+    threads to _bottle_identity_clause/_bottle_geometry_clause/_bottle_integration_
+    clause/_substitute_object_line. LIVE BUG this closes, confirmed on artifacts
+    1352/1353 (2026-08-18): this function's own PRODUCT branches (both the
+    style=="illustrated" and the photographic substitute branch below) unconditionally
+    said "draw the Besque product NATIVELY..."/"place the Besque product... in its
+    position", completely unaware suppression exists anywhere else in the same prompt -
+    a second, independent site issuing the exact instruction _bottle_integration_clause
+    (the 87000ab fix) was already refusing. Gemini drew its own bottle per THIS
+    function's instruction while Route B separately pasted the real cutout - two
+    bottles. Both PRODUCT branches now check this flag: when True, they state the
+    competitor's product is removed and the freed space is left empty for compositing
+    (deferring to BOTTLE INTEGRATION above for exactly how), and drop every reference to
+    "the BOTTLE GEOMETRY clause above" (which does not exist in this prompt when
+    suppressed) rather than dangling one. The count sentence, the SCENE OBJECTS
+    deferral, and the "everything else carries over" closing are unaffected either way -
+    none of them are draw instructions. False (the default) reproduces this function's
+    prior text byte-for-byte."""
     suppressing_text = not (text_in_image and headline)
     # Clone mode (2026-08-11): the OFFER clause below used to trust offer_text's own
     # truthiness alone and ask Gemini to judge VISUALLY whether the reference shows an
@@ -2568,31 +2647,57 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
 
     if include_product and reference_has_product and style == "illustrated":
         name = product_name or "Besque"
+        if suppress_bottle_identity:
+            # Route B compositing (2026-08-18): a real product photograph is pasted in
+            # after generation, regardless of this scene's own illustrated register - so
+            # nothing here may ask Gemini to DRAW one, native style or otherwise, and
+            # nothing here may point at "the BOTTLE GEOMETRY clause above", which does
+            # not exist in this prompt while suppressed. See this function's own
+            # docstring for the live bug this closes.
+            product_instruction = (
+                "Changing ONLY the product. Remove the competitor's product entirely and "
+                "leave its space clean and empty - a real Besque product photograph will "
+                "be PASTED into this exact scene after generation, so do NOT draw the "
+                "Besque product here, in this scene's illustrated style or any other - "
+                "not natively, not photorealistically, not as a placeholder shape (see "
+                "BOTTLE INTEGRATION above for exactly how the freed space and any "
+                "contact/grip shadow should read). "
+                f"Exactly {authorised_product_count} Besque item(s) belong in this scene - "
+                f"computed from the reference's own product objects, never left for you "
+                f"to judge from the pixels. WHICH reference position each one occupies "
+                f"(and which competitor product, if any, is removed instead) is governed "
+                f"entirely by the SCENE OBJECTS inventory above; follow it exactly, never "
+                f"inventing a different count or a different assignment. "
+            )
+        else:
+            product_instruction = (
+                "Changing ONLY the product. Remove the competitor's product entirely and draw "
+                f"the Besque product NATIVELY in this scene's own illustrated visual language - "
+                f"flat, matching the surrounding artwork's own line weight and shading, never a "
+                f"photograph or photorealistic render composited into the drawing, REGARDLESS "
+                f"of how photographic the attached product reference photo(s) (if any) look - a "
+                f"photographic reference photo does not make the DRAWN bottle photographic. "
+                f"Use those photos ONLY to confirm this product's exact identity - label design, "
+                f"colours, and hardware finish - never as a rendering-style reference and never "
+                f"for shape or proportions, which are fixed exactly as stated in the BOTTLE "
+                f"GEOMETRY clause above, with or without a photo; "
+                f"the leak this instruction replaced (2026-08-06, then reversed 2026-08-14) was "
+                f"the photo's photographic REGISTER bleeding into the drawing, not its identity "
+                f"facts, so withholding the photo is no longer how this is prevented. Where no "
+                f"reference photo is attached for this run, work from colour and "
+                f"the label name alone - \"{name}\". Secondary label content "
+                f"(sub-lines, certification icons, fine print) does not need to be legible at "
+                f"this scale in this style; name and colour accuracy matter, secondary-text "
+                f"legibility does not. Exactly {authorised_product_count} Besque item(s) "
+                f"belong in this scene - computed from the reference's own product "
+                f"objects, never left for you to judge from the pixels. WHICH reference "
+                f"position each one occupies (and which competitor product, if any, is "
+                f"removed instead) is governed entirely by the SCENE OBJECTS inventory "
+                f"above; follow it exactly, never inventing a different count or a "
+                f"different assignment. "
+            )
         base = opening + (
-            "Changing ONLY the product. Remove the competitor's product entirely and draw "
-            f"the Besque product NATIVELY in this scene's own illustrated visual language - "
-            f"flat, matching the surrounding artwork's own line weight and shading, never a "
-            f"photograph or photorealistic render composited into the drawing, REGARDLESS "
-            f"of how photographic the attached product reference photo(s) (if any) look - a "
-            f"photographic reference photo does not make the DRAWN bottle photographic. "
-            f"Use those photos ONLY to confirm this product's exact identity - label design, "
-            f"colours, and hardware finish - never as a rendering-style reference and never "
-            f"for shape or proportions, which are fixed exactly as stated in the BOTTLE "
-            f"GEOMETRY clause above, with or without a photo; "
-            f"the leak this instruction replaced (2026-08-06, then reversed 2026-08-14) was "
-            f"the photo's photographic REGISTER bleeding into the drawing, not its identity "
-            f"facts, so withholding the photo is no longer how this is prevented. Where no "
-            f"reference photo is attached for this run, work from colour and "
-            f"the label name alone - \"{name}\". Secondary label content "
-            f"(sub-lines, certification icons, fine print) does not need to be legible at "
-            f"this scale in this style; name and colour accuracy matter, secondary-text "
-            f"legibility does not. Exactly {authorised_product_count} Besque item(s) "
-            f"belong in this scene - computed from the reference's own product "
-            f"objects, never left for you to judge from the pixels. WHICH reference "
-            f"position each one occupies (and which competitor product, if any, is "
-            f"removed instead) is governed entirely by the SCENE OBJECTS inventory "
-            f"above; follow it exactly, never inventing a different count or a "
-            f"different assignment. "
+            product_instruction
             + _substance_recolour_clause(substance_colour) +
             f"Everything else in the scene - {_non_carryover_exceptions_clause()} - carries over "
             "from the source image exactly as the reproduce-faithfully instruction above states (never a stricter 'exactly' reintroduced here, including its small natural variation allowance). "
@@ -2611,23 +2716,53 @@ def _edit_mode_instruction(text_in_image=False, headline=None, subtext=None, off
             "never the separate, unrelated lighting the product's reference photo(s) "
             "happen to have been shot under. "
         )
+        if suppress_bottle_identity:
+            # Route B compositing (2026-08-18): same reasoning as the illustrated branch
+            # above - a real product photograph is pasted in after generation, so this
+            # must not ask Gemini to draw/place one, and must not point at "the BOTTLE
+            # GEOMETRY clause above" (suppressed, does not exist in this prompt). The
+            # prop/holder-resize guidance is dropped too: it exists to fit a DRAWN
+            # bottle's real proportions, which are themselves stated only in the
+            # suppressed geometry clause - BOTTLE INTEGRATION above already covers
+            # scaling the freed space to whatever context (hand/shelf/holder) surrounds
+            # it, generically, with no geometry facts required. lighting_instruction is
+            # dropped too - it exists to light a drawn bottle's surface, which nothing
+            # here draws.
+            product_instruction = (
+                "Changing ONLY the product. Remove the competitor's product entirely and "
+                "leave its space clean and empty - a real Besque product photograph will "
+                "be PASTED into this exact position after generation, so do NOT draw or "
+                "place any bottle, container, or packaging there yourself (see BOTTLE "
+                "INTEGRATION above for exactly how the freed space, any prop/holder it "
+                "sits in or against, and any contact/grip shadow should read). Exactly "
+                f"{authorised_product_count} Besque bottle(s) belong in this scene - "
+                "computed from the reference's own product objects, never left for you "
+                "to judge from the pixels. WHICH reference position each one occupies "
+                "(and which competitor product, if any, is removed instead) is governed "
+                "entirely by the SCENE OBJECTS inventory above; follow it exactly, never "
+                "inventing a different count or a different assignment. "
+            )
+        else:
+            product_instruction = (
+                "Changing ONLY the product. Remove the competitor's product entirely and "
+                "place the Besque product (shown in the reference photo(s) that follow, if "
+                "any) in its position, matching the original shot's composition as "
+                "faithfully as possible. The bottle's own geometry and proportions are "
+                "FIXED exactly as stated in the BOTTLE GEOMETRY clause above - if the reference's own "
+                "product sits inside, on, or against a prop, holder, float, or opening "
+                "sized for ITS shape, that PROP is what adapts: resize or reshape it to "
+                "properly fit the Besque bottle's real proportions, never the reverse "
+                "(never stretch, squeeze, or shrink the bottle to fit a prop sized for a "
+                "differently-shaped product). Exactly "
+                f"{authorised_product_count} Besque bottle(s) belong in this scene - "
+                "computed from the reference's own product objects, never left for you "
+                "to judge from the pixels. WHICH reference position each one occupies "
+                "(and which competitor product, if any, is removed instead) is governed "
+                "entirely by the SCENE OBJECTS inventory above; follow it exactly, never "
+                "inventing a different count or a different assignment. " + lighting_instruction
+            )
         base = opening + (
-            "Changing ONLY the product. Remove the competitor's product entirely and "
-            "place the Besque product (shown in the reference photo(s) that follow, if "
-            "any) in its position, matching the original shot's composition as "
-            "faithfully as possible. The bottle's own geometry and proportions are "
-            "FIXED exactly as stated in the BOTTLE GEOMETRY clause above - if the reference's own "
-            "product sits inside, on, or against a prop, holder, float, or opening "
-            "sized for ITS shape, that PROP is what adapts: resize or reshape it to "
-            "properly fit the Besque bottle's real proportions, never the reverse "
-            "(never stretch, squeeze, or shrink the bottle to fit a prop sized for a "
-            "differently-shaped product). Exactly "
-            f"{authorised_product_count} Besque bottle(s) belong in this scene - "
-            "computed from the reference's own product objects, never left for you "
-            "to judge from the pixels. WHICH reference position each one occupies "
-            "(and which competitor product, if any, is removed instead) is governed "
-            "entirely by the SCENE OBJECTS inventory above; follow it exactly, never "
-            "inventing a different count or a different assignment. " + lighting_instruction
+            product_instruction
             + _substance_recolour_clause(substance_colour) +
             f"Everything else in the scene - {_non_carryover_exceptions_clause()} - carries over "
             "from the source image exactly as the reproduce-faithfully instruction above states (never a stricter 'exactly' reintroduced here, including its small natural variation allowance). "
