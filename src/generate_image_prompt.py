@@ -1745,6 +1745,20 @@ _HARD_LIGHT_KEYWORDS = (
 )
 
 
+def _bboxes_overlap(bbox_a, bbox_b):
+    """True when two [x, y, w, h] fractional bboxes (the same convention every bbox in
+    this codebase uses - drift_check.py, generate_copy.py's _reading_order_key,
+    composite_product's own bbox param) intersect with a strictly positive area.
+    Bboxes that merely touch at an edge (zero-width or zero-height intersection) do
+    NOT count as overlapping - deliberately requires overlap_w > 0 AND overlap_h > 0,
+    not >= 0, so two regions that are simply adjacent are never flagged."""
+    ax0, ay0, aw, ah = bbox_a
+    bx0, by0, bw, bh = bbox_b
+    overlap_w = min(ax0 + aw, bx0 + bw) - max(ax0, bx0)
+    overlap_h = min(ay0 + ah, by0 + bh) - max(ay0, by0)
+    return overlap_w > 0 and overlap_h > 0
+
+
 def _composite_gate(blueprint, include_product=True):
     """Decides whether composite_product will run for THIS generation - evaluated
     BEFORE build_image_prompt (see generate_image's own ordering) so
@@ -1773,7 +1787,13 @@ def _composite_gate(blueprint, include_product=True):
        bottle needs a grip shadow following finger contours and a scale relationship
        to a hand that a flat pasted cutout cannot produce convincingly (see the Phase 1
        diagnostic's Pillow-feasibility assessment).
-    3. background.light does not read as hard or strongly directional (see
+    3. No occlusion: no OTHER object's bbox overlaps the product object's bbox at all,
+       whatever that object's kind or disposition (2026-08-19, occlusion gate fix - see
+       below). composite_product pastes a flat, static PNG on top of every pixel
+       Gemini already drew - it cannot render behind a hand, a text card, a badge, or
+       anything else that belongs in front of the bottle, and nothing downstream ever
+       inspects what the paste is covering before it happens.
+    4. background.light does not read as hard or strongly directional (see
        _HARD_LIGHT_KEYWORDS) - a pasted cutout has no cast shadow/highlight matching a
        specific hard light direction.
 
@@ -1799,7 +1819,36 @@ def _composite_gate(blueprint, include_product=True):
     no reliable way to disambiguate "holding it" from "holding something else" short
     of a keyword match, and erring toward skipping Route B is the safe direction:
     Gemini draws the bottle natively (with the geometry/identity clauses, unsuppressed)
-    when this gate fails, which is the correct path for a genuinely held placement."""
+    when this gate fails, which is the correct path for a genuinely held placement.
+
+    VERIFIED, 2026-08-19: the held-by-another-object check above was reported as not
+    firing on ad 1252553972969618 "at 19:30". Checked directly against the database:
+    the only matching artifact row for this ad from that session (id 1355) has
+    created_at 09:15:21 UTC - 26 MINUTES BEFORE commit a887ea2 (09:41:18 UTC), which is
+    the commit that added this exact check. That generation ran on code that did not
+    contain the check yet; it is not a defect in the check itself. Re-running THIS
+    function, current code, against that artifact's own stored blueprint returns
+    proceed=False with reason naming obj_01 ('person') and its "holding product beside
+    her face" description - the check works correctly against the exact data that
+    exhibited the bug. The standing lesson this reconfirms (see CLAUDE.md: "verify via
+    Generate on a never-drafted ad, never Regenerate", and the 12/17 Aug "confirm a
+    restart happened" notes): a draft generated before a fix's commit timestamp proves
+    nothing about whether that fix works, in either direction.
+
+    Occlusion (2026-08-19, occlusion gate fix): gate 3 above closes a SEPARATE, real
+    problem from the same live artifact - obj_03 (a testimonial card, disposition
+    "drop", bbox [0.02, 0.72, 0.68, 0.18]) overlaps the product's own bbox ([0.05, 0.1,
+    0.5, 0.85]) in that exact reference. composite_product has no way to paste a flat
+    PNG behind a card, and nothing about an object's disposition changes that a paste
+    happening at generation-decision time (before Gemini even runs) has no way to know
+    whether the space actually ends up empty - "drop" is an instruction to Gemini, not
+    a guarantee about the rendered pixels. Any other object's bbox overlapping the
+    product's, regardless of kind or disposition, means something belongs in front of
+    or behind the bottle in the final composition - Route B is only valid for
+    free-standing product-on-surface and flat-lay placements, never a placement where
+    another element shares the same region. Failing this gate sends the ad down the
+    native path, where Gemini renders the whole scene (including the bottle) in one
+    pass and can correctly place fingers or a card in front of it."""
     if not include_product:
         return False, "include_product is False", None
     objects = blueprint.get("objects") or []
@@ -1850,6 +1899,30 @@ def _composite_gate(blueprint, include_product=True):
         return False, (
             f"object {other_holder.get('object_id')!r} ({other_holder.get('kind')!r}) "
             f"description reads as held/gripped: {other_holder.get('description')!r}"
+        ), None
+    # Occlusion (2026-08-19, occlusion gate fix): composite_product pastes a flat,
+    # static PNG on top of every pixel Gemini already drew - it cannot render behind a
+    # hand, a text card, a badge, or anything else, and nothing downstream inspects
+    # what the paste is covering before it happens. ANY other object whose bbox
+    # overlaps the product's own bbox at all means something belongs in front of (or
+    # behind) the bottle in the final composition - checked regardless of that other
+    # object's kind or disposition, including "drop": a dropped object is an
+    # instruction to Gemini to remove it, never a guarantee the rendered pixels end up
+    # empty there. Confirmed live, ad 1252553972969618: obj_03 (a testimonial card,
+    # disposition "drop") overlapped the product's own bbox, and the pasted bottle
+    # covered it in the generated draft. See this function's own docstring.
+    occluder = next(
+        (obj for obj in objects
+         if isinstance(obj, dict) and obj.get("object_id") != object_id
+         and isinstance(obj.get("bbox"), (list, tuple)) and len(obj.get("bbox")) == 4
+         and _bboxes_overlap(bbox, obj.get("bbox"))),
+        None,
+    )
+    if occluder is not None:
+        return False, (
+            f"object {occluder.get('object_id')!r} ({occluder.get('kind')!r}) bbox "
+            f"overlaps the product's own bbox - something belongs in front of or "
+            f"behind the bottle here, which a flat paste can never reproduce"
         ), None
     light = ((blueprint.get("background") or {}).get("light") or "").lower()
     if any(kw in light for kw in _HARD_LIGHT_KEYWORDS):

@@ -254,6 +254,120 @@ def test_composite_gate_does_not_reject_when_person_description_has_no_grip_lang
     assert proceed is True
 
 
+def test_composite_gate_rejects_the_real_ad_1252553972969618_blueprint_for_holding():
+    """Regression lock, exact real data (artifact 1355, generated 09:15:21 UTC
+    2026-08-18 - BEFORE commit a887ea2 at 09:41:18 UTC, which is why this ad's own
+    generation didn't catch it live). obj_01's real description reproduced verbatim."""
+    bp = {
+        "objects": [
+            {"object_id": "obj_01", "kind": "person", "disposition": "substitute",
+             "bbox": [0.3, 0.0, 0.7, 0.85],
+             "description": "Young woman with blonde highlighted wavy hair, green eyes, "
+                             "wearing a pink top, holding product beside her face in a "
+                             "close-up selfie-style shot"},
+            {"object_id": "obj_02", "kind": "product", "disposition": "substitute",
+             "bbox": [0.05, 0.1, 0.5, 0.85],
+             "description": "JSHealth Illuminating Peptide Eye Serum tube in matte "
+                             "black with gold label detailing"},
+            {"object_id": "obj_03", "kind": "text", "disposition": "drop",
+             "bbox": [0.02, 0.72, 0.68, 0.18],
+             "description": "Testimonial caption block"},
+            {"object_id": "obj_04", "kind": "text", "disposition": "drop",
+             "bbox": [0.0, 0.9, 0.55, 0.1],
+             "description": "Promo code banner"},
+        ],
+        "background": {"light": "soft available indoor light, slightly warm, no visible directional rig"},
+    }
+    proceed, reason, obj = generate_image_prompt._composite_gate(bp)
+    assert proceed is False
+    assert "obj_01" in reason
+    assert "held/gripped" in reason
+
+
+# ---- Occlusion gate (2026-08-19): any other object's bbox overlapping the product's
+# own bbox means something belongs in front of (or behind) the bottle - composite_
+# product pastes a flat, static PNG on top of every pixel already drawn and cannot
+# render behind anything. Checked regardless of the other object's kind or
+# disposition. ----
+
+def test_composite_gate_rejects_when_a_text_object_overlaps_the_product_bbox():
+    bp = _clean_blueprint()  # product bbox: [0.3, 0.4, 0.2, 0.35] -> x[0.3,0.5] y[0.4,0.75]
+    bp["objects"].append({
+        "object_id": "obj_card", "kind": "text", "disposition": "drop",
+        "bbox": [0.25, 0.6, 0.3, 0.2],  # x[0.25,0.55] y[0.6,0.8] - overlaps
+        "description": "testimonial card",
+    })
+    proceed, reason, obj = generate_image_prompt._composite_gate(bp)
+    assert proceed is False
+    assert "obj_card" in reason
+    assert "overlaps the product's own bbox" in reason
+
+
+def test_composite_gate_rejects_the_real_ad_1252553972969618_blueprint_for_occlusion():
+    """Same real blueprint as the holding regression lock above, isolating occlusion
+    alone: drop obj_01 (the holding person) entirely and confirm obj_03's overlapping
+    testimonial card bbox is caught independently."""
+    bp = {
+        "objects": [
+            {"object_id": "obj_02", "kind": "product", "disposition": "substitute",
+             "bbox": [0.05, 0.1, 0.5, 0.85],
+             "description": "JSHealth Illuminating Peptide Eye Serum tube"},
+            {"object_id": "obj_03", "kind": "text", "disposition": "drop",
+             "bbox": [0.02, 0.72, 0.68, 0.18],
+             "description": "Testimonial caption block"},
+        ],
+        "background": {"light": "soft available indoor light, slightly warm"},
+    }
+    proceed, reason, obj = generate_image_prompt._composite_gate(bp)
+    assert proceed is False
+    assert "obj_03" in reason
+    assert "overlaps the product's own bbox" in reason
+
+
+def test_composite_gate_rejects_occlusion_regardless_of_disposition():
+    """The overlap check applies even to an object marked "keep" or "substitute" - not
+    just "drop" - since disposition says nothing about final rendered geometry."""
+    bp = _clean_blueprint()
+    bp["objects"].append({
+        "object_id": "obj_hand_overlap", "kind": "prop", "disposition": "keep",
+        "bbox": [0.35, 0.5, 0.1, 0.1],  # fully inside the product bbox
+        "description": "a small dish",
+    })
+    proceed, reason, obj = generate_image_prompt._composite_gate(bp)
+    assert proceed is False
+    assert "obj_hand_overlap" in reason
+
+
+def test_composite_gate_does_not_reject_when_no_object_overlaps():
+    bp = _clean_blueprint()  # product bbox: x[0.3,0.5] y[0.4,0.75]
+    bp["objects"].append({
+        "object_id": "obj_far", "kind": "text", "disposition": "drop",
+        "bbox": [0.6, 0.0, 0.3, 0.2],  # x[0.6,0.9] y[0.0,0.2] - nowhere near
+        "description": "unrelated headline",
+    })
+    proceed, reason, obj = generate_image_prompt._composite_gate(bp)
+    assert proceed is True
+
+
+def test_composite_gate_does_not_reject_when_bboxes_merely_touch_at_an_edge():
+    """Adjacent, non-overlapping regions (sharing an edge with zero actual overlap
+    area) must not be flagged - only a strictly positive intersection counts."""
+    bp = _clean_blueprint()  # product bbox: x[0.3,0.5] y[0.4,0.75]
+    bp["objects"].append({
+        "object_id": "obj_adjacent", "kind": "text", "disposition": "drop",
+        "bbox": [0.5, 0.4, 0.2, 0.35],  # x[0.5,0.7] y[0.4,0.75] - shares the x=0.5 edge only
+        "description": "adjacent headline",
+    })
+    proceed, reason, obj = generate_image_prompt._composite_gate(bp)
+    assert proceed is True
+
+
+def test_bboxes_overlap_unit():
+    assert generate_image_prompt._bboxes_overlap([0.0, 0.0, 0.5, 0.5], [0.25, 0.25, 0.5, 0.5]) is True
+    assert generate_image_prompt._bboxes_overlap([0.0, 0.0, 0.5, 0.5], [0.5, 0.5, 0.5, 0.5]) is False
+    assert generate_image_prompt._bboxes_overlap([0.0, 0.0, 0.5, 0.5], [0.6, 0.6, 0.2, 0.2]) is False
+
+
 def test_composite_gate_rejects_when_lighting_is_hard():
     bp = _clean_blueprint(background={"surface": "sand", "colour": "beige",
                                        "light": "harsh direct sunlight casting hard shadows"})
