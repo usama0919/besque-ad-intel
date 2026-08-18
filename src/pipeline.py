@@ -1807,6 +1807,15 @@ def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product
     per-run free-text value, deliberately never read from the resolved angle's own
     body_area column (see process_ad's docstring).
 
+    BatchAdConfig (2026-08-18): a fresh instance is built inside the per-ad loop below and
+    passed as process_ad's config= argument, mirroring generate_from_selection's own
+    per-ad construction - run_once has no per-ad-override input, so every field still
+    holds the same run-strip value for every ad in the sweep (that hasn't changed), but
+    process_ad no longer receives this run's settings only via its own enclosing-scope
+    locals with config=None. realism="(auto)" (None here) still resolves PER AD from
+    that ad's own detected production_style inside build_image_prompt, unaffected by
+    this - see BatchAdConfig's own docstring.
+
     used_headlines (2026-08-11, same-run copy convergence fix): one plain list, created
     HERE, scoped to this WHOLE run_once call - shared across every competitor and every
     ad in the sweep, not reset per competitor. Same mechanism as generate_from_selection's
@@ -1954,12 +1963,34 @@ def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product
             already_seen = bool(ad_id) and not FORCE_REPROCESS and not dedupe.is_new(ad_id, angle_id)
             if not already_seen:
                 attempts_this_comp += 1
+            # Per-ad BatchAdConfig (2026-08-18): run_once has no per-ad-override input
+            # (unlike generate_from_selection's per_ad_overrides), so every field here
+            # still holds the same run-strip value for every ad in the sweep - that part
+            # is unchanged and correct, a scheduled sweep genuinely has one operator-set
+            # config today. What changes is HOW process_ad receives it: a fresh
+            # BatchAdConfig instance built here, at the top of this ad's own iteration,
+            # rather than process_ad reading run_once's enclosing-scope locals directly
+            # (config=None previously, so process_ad's config-override block never ran
+            # for this call path at all). realism="(auto)" (None here) still resolves
+            # PER AD from that ad's own detected production_style inside
+            # build_image_prompt, unaffected by this - this only changes the plumbing
+            # process_ad/generate_image receive it through, not the resolution logic.
+            cfg = BatchAdConfig(
+                angle_id=angle_id,
+                realism=realism,
+                body_area=body_area,
+                text_in_image=text_in_image,
+                include_product=include_product,
+                edit_mode=edit_mode,
+                offer_text=offer_text,
+                operator_instruction=operator_instruction,
+            )
             result = process_ad(ad, product=product, reference_images=reference_images, messaging_angle=messaging_angle,
                                 realism=realism, text_in_image=text_in_image, include_product=include_product,
                                 body_area=body_area, offer_text=offer_text, edit_mode=edit_mode,
                                 operator_instruction=operator_instruction, check_output=check_output,
                                 retheme_colours=retheme_colours, ad_index=ad_index, total_ads=len(ads),
-                                should_stop=should_stop, used_headlines=used_headlines)
+                                should_stop=should_stop, used_headlines=used_headlines, config=cfg)
             summary[result] += 1
             comp_summary[result] += 1
         summary["by_competitor"][name] = comp_summary

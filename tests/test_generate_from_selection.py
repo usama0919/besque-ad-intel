@@ -135,6 +135,168 @@ def test_generate_from_selection_realism_omitted_forwards_none(monkeypatch):
         _cleanup(cid, [ad_id])
 
 
+# ---- BatchAdConfig (2026-08-18) ----
+#
+# Two DISTINCT things are tested below, deliberately not conflated into one test, after
+# a mutation check (build cfg ONCE outside generate_from_selection's per-ad loop instead
+# of fresh per ad, then re-run both tests) showed they exercise different mechanisms:
+#
+# 1. test_..._resolves_realism_per_ad_from_production_style: realism="(auto)" (None) for
+#    BOTH ads - resolution to a concrete register happens entirely inside
+#    build_image_prompt/generate_image from that call's OWN blueprint.production_style,
+#    a mechanism that has never depended on BatchAdConfig at all (confirmed: cfg.realism
+#    stays None for every ad in this scenario whether cfg is built once or fresh per ad,
+#    since no per_ad_overrides ever sets it). This test still fails on a genuine
+#    per-ad-blueprint-threading bug (e.g. every ad accidentally reusing ad 1's blueprint)
+#    - it's real coverage, just not of the freeze mechanism specifically.
+# 2. test_..._resolves_realism_per_ad_from_per_ad_override: the freeze itself. Two ads,
+#    per_ad_overrides sets a DIFFERENT explicit realism per ad_id. Verified by the same
+#    mutation (cfg built once, using whichever ad's override happened to be in scope) -
+#    this one DOES fail: ad 2 silently receives ad 1's override instead of its own. This
+#    is the test that actually proves "resolved once per ad, never re-read from shared
+#    state" - test 1 alone would not have caught that regression.
+#
+# Both are fully DB-independent (dedupe.get_scraped_ads_by_ad_ids/init_*/get_product/
+# get_angle stubbed, same pattern as _mock_dedupe_for_scope_guard above) so they can run
+# with no Postgres reachable, unlike this file's real-DB tests elsewhere.
+
+class _FakeGenaiClient:
+    def __init__(self, *a, **k):
+        self.models = self
+
+    def generate_content(self, model, contents, config=None):
+        part = type("Part", (), {"inline_data": type("Data", (), {"data": b"fake-png-bytes"})()})()
+        candidate = type("Candidate", (), {"content": type("Content", (), {"parts": [part]})()})()
+        return type("Response", (), {"candidates": [candidate]})()
+
+
+def _mock_dedupe_fully_db_independent(monkeypatch, rows):
+    """rows: {ad_id: raw_ad_dict} - raw_ad_dict is handed straight through as the mapped
+    ad (scrape._map_ad stubbed to identity), so it must already look like scrape._map_ad's
+    own output ({"ad_id", "page_name", "image_url", ...})."""
+    for fn in ("init_db", "init_artifacts", "init_scraped_ads", "init_angles",
+               "init_angle_language", "init_products", "init_pipeline_warnings"):
+        monkeypatch.setattr(pipeline.dedupe, fn, lambda: None)
+    from src import config_check
+    monkeypatch.setattr(config_check, "validate_config", lambda: None)
+    monkeypatch.setattr(pipeline.dedupe, "get_product", lambda pid: None)
+    monkeypatch.setattr(pipeline.dedupe, "get_angle", lambda aid: None)
+    monkeypatch.setattr(pipeline.dedupe, "get_artifact", lambda *a, **k: None)
+    # mark_seen runs unconditionally near the end of process_ad's success path - missed
+    # on the first pass of writing this helper, which let it fall through to the REAL
+    # dedupe.mark_seen and hit whatever DATABASE_URL is actually configured. Under
+    # pytest that's conftest.py's forced port-5433 (refused, safe) - but a plain script
+    # bypassing conftest has no such guard, which is exactly what happened during this
+    # task's own verification and wrote two rows into the real seen_ads table (cleaned
+    # up by hand afterward). Mocked here so this mistake can't recur via this helper.
+    monkeypatch.setattr(pipeline.dedupe, "mark_seen", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline.dedupe, "get_scraped_ads_by_ad_ids",
+                        lambda ad_ids: {aid: {"raw_meta": rows[aid], "competitor_id": 1}
+                                        for aid in ad_ids if aid in rows})
+    monkeypatch.setattr(pipeline.dedupe, "update_scraped_ad_status", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline.dedupe, "record_warning", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline.dedupe, "save_artifact", lambda **k: None)
+    monkeypatch.setattr(pipeline.scrape, "_map_ad", lambda raw_meta: raw_meta)
+    monkeypatch.setattr(pipeline.assets, "download_image", lambda url, aid: "fake.jpg")
+    monkeypatch.setattr(pipeline.assets, "download_image_bytes", lambda url: b"fake-bytes")
+    monkeypatch.setattr(pipeline.generate_copy, "generate_copy_live",
+                        lambda bp, product=None, **k: {"headline": "H", "primary_text": "P",
+                                                         "image_subtext": "S", "cta": "C"})
+    monkeypatch.setattr(pipeline.compliance, "check_compliance", lambda copy, name, text, **k: (True, []))
+    monkeypatch.setattr(pipeline.slack_review, "post_review", lambda *a, **k: {"ts": "123"})
+
+
+def _mock_genai(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline.generate_image_prompt, "genai",
+                        type("obj", (), {"Client": _FakeGenaiClient}))
+    monkeypatch.setattr(pipeline.generate_image_prompt, "ASSET_DIR", tmp_path)
+
+
+def test_generate_from_selection_resolves_realism_per_ad_from_production_style(monkeypatch, tmp_path):
+    """Two ads, one selection, realism left at "(auto)" (None) for both - one reference
+    was detected illustrated, the other ugc. Each ad's resolved register must match ITS
+    OWN reference, never the other ad's, and never collapse to one shared value for the
+    whole batch. Style names are validator.production_styles()'s real three values
+    (high_spec/illustrated/ugc) - confirmed by direct inspection, not guessed.
+
+    NOTE: verified by mutation (see this section's header comment) that this test does
+    NOT depend on BatchAdConfig's per-ad freeze - realism stays None either way here, so
+    the differentiation comes purely from build_image_prompt reading each call's own
+    blueprint. Kept as real, separate coverage of per-ad blueprint threading; see
+    test_generate_from_selection_resolves_realism_per_ad_from_per_ad_override below for
+    the freeze itself."""
+    ad_id_1, ad_id_2 = "AD1", "AD2"
+    blueprints = {
+        ad_id_1: {"format": "hero", "angle": "a", "production_style": {"style": "illustrated"}},
+        ad_id_2: {"format": "hero", "angle": "a", "production_style": {"style": "ugc"}},
+    }
+    rows = {
+        ad_id_1: {"ad_id": ad_id_1, "page_name": "Brand", "image_url": "http://x/img.jpg"},
+        ad_id_2: {"ad_id": ad_id_2, "page_name": "Brand", "image_url": "http://x/img.jpg"},
+    }
+    _mock_dedupe_fully_db_independent(monkeypatch, rows)
+    monkeypatch.setattr(pipeline.deconstruct, "deconstruct_image",
+                        lambda ad_id=None, **k: blueprints[ad_id])
+    _mock_genai(monkeypatch, tmp_path)
+
+    resolved_prompts = {}
+
+    def on_ad_done(ad_id, result):
+        # Sequential processing only (see generate_image.last_prompt's own documented
+        # single-shared-attribute caveat) - captured immediately after THIS ad's
+        # process_ad call returns, before the next ad's call can overwrite it.
+        resolved_prompts[ad_id] = pipeline.generate_image_prompt.generate_image.last_prompt
+
+    result = pipeline.generate_from_selection([ad_id_1, ad_id_2], on_ad_done=on_ad_done)
+    assert result["processed"] == 2
+
+    style_guidance = pipeline.generate_image_prompt_writer.STYLE_GUIDANCE
+    assert style_guidance["illustrated"] in resolved_prompts[ad_id_1]
+    assert style_guidance["ugc"] in resolved_prompts[ad_id_2]
+    assert style_guidance["ugc"] not in resolved_prompts[ad_id_1]
+    assert style_guidance["illustrated"] not in resolved_prompts[ad_id_2]
+
+
+def test_generate_from_selection_resolves_realism_per_ad_from_per_ad_override(monkeypatch, tmp_path):
+    """The per-ad freeze itself: per_ad_overrides sets a DIFFERENT explicit realism per
+    ad_id, on blueprints that don't declare a production_style at all (so there's no
+    blueprint-driven fallback that could accidentally make this pass for the wrong
+    reason - only the override can be the source of a resolved style here). If
+    BatchAdConfig were built once for the whole selection (using whichever ad's override
+    happened to be in scope at that point) instead of fresh per ad inside the loop, ad 2
+    would silently receive ad 1's override - confirmed live during this task by
+    temporarily moving the cfg construction outside generate_from_selection's loop and
+    re-running: this test fails under that mutation, where the blueprint-only test above
+    does not."""
+    ad_id_1, ad_id_2 = "AD1", "AD2"
+    blueprint = {"format": "hero", "angle": "a"}  # no production_style on either ad
+    rows = {
+        ad_id_1: {"ad_id": ad_id_1, "page_name": "Brand", "image_url": "http://x/img.jpg"},
+        ad_id_2: {"ad_id": ad_id_2, "page_name": "Brand", "image_url": "http://x/img.jpg"},
+    }
+    _mock_dedupe_fully_db_independent(monkeypatch, rows)
+    monkeypatch.setattr(pipeline.deconstruct, "deconstruct_image", lambda **k: dict(blueprint))
+    _mock_genai(monkeypatch, tmp_path)
+
+    resolved_prompts = {}
+
+    def on_ad_done(ad_id, result):
+        resolved_prompts[ad_id] = pipeline.generate_image_prompt.generate_image.last_prompt
+
+    result = pipeline.generate_from_selection(
+        [ad_id_1, ad_id_2],
+        per_ad_overrides={ad_id_1: {"realism": "illustrated"}, ad_id_2: {"realism": "ugc"}},
+        on_ad_done=on_ad_done,
+    )
+    assert result["processed"] == 2
+
+    style_guidance = pipeline.generate_image_prompt_writer.STYLE_GUIDANCE
+    assert style_guidance["illustrated"] in resolved_prompts[ad_id_1]
+    assert style_guidance["ugc"] in resolved_prompts[ad_id_2]
+    assert style_guidance["ugc"] not in resolved_prompts[ad_id_1]
+    assert style_guidance["illustrated"] not in resolved_prompts[ad_id_2]
+
+
 # ---- item 4 (2026-08-06): product scope guard - refused BEFORE any paid call, for the
 # WHOLE selection, with a clear reason - never a silent per-ad skip. Fully DB-independent
 # (every dedupe touchpoint stubbed) so this gives real signal with no Postgres reachable. ----

@@ -2281,3 +2281,96 @@ Across all stored blueprints with a non-empty `objects` array, held/gripped plac
 are ~19% (5 of 26 classified; N=26, small and directional only, not a stable
 statistic) - this is the number that should decide whether held-placement compositing
 is worth building, not a guess.
+
+## 2026-08-18 — BatchAdConfig: found already built (11 Aug), `run_once` was the actual gap
+
+Asked to "build BatchAdConfig as specced on 10 Aug." It already existed -
+`@dataclass(frozen=True) class BatchAdConfig` (`pipeline.py:276`), built 2026-08-11
+(commit `1c3ca6c`), holding `angle_id`/`realism`/`body_area`/`text_in_image`/
+`include_product`/`edit_mode`/`offer_text`/`operator_instruction`. `generate_from_selection`
+already builds a fresh instance per ad inside its loop (merging `per_ad_overrides`) and
+passes `config=cfg` into `process_ad`, which overwrites its own locals from `config` when
+given (`process_ad`, line ~1131) before anything downstream reads them - `realism="(auto)"`
+(reaches here as `None`) already resolves PER AD inside `build_image_prompt`/`generate_image`
+from that ad's own `blueprint.production_style.style`, since each ad gets its own freshly-
+deconstructed blueprint regardless of this plumbing.
+
+**The actual gap: `run_once` never built a `BatchAdConfig` at all** - it passed its own
+enclosing-scope locals (`realism`, `body_area`, etc., identical for every ad across the
+whole scheduled sweep) straight into `process_ad` with `config=None`, so `process_ad`'s
+config-override block never ran for this call path. Fixed: a fresh `BatchAdConfig` is now
+built inside `run_once`'s per-ad loop (mirroring `generate_from_selection`'s own
+construction) and passed as `config=cfg`. `run_once` has no per-ad-override input, so
+every field still holds the same run-strip value for every ad in the sweep - that's
+unchanged and correct, a scheduled sweep genuinely has one operator-set config today. What
+changed is that `process_ad` now receives it structurally rather than via closure locals.
+Purely additive - the existing raw kwargs into `process_ad` were left in place (user
+explicitly chose "leave it alone" over removing the redundant dual path in
+`generate_from_selection`'s equivalent call, so the same call shape was kept here too).
+
+**First version of the test was wrong - it didn't actually test the freeze.** Asked
+directly "does it fail if the per-ad freeze is removed", checked by mutation (temporarily
+moved `cfg = BatchAdConfig(...)` outside `generate_from_selection`'s per-ad loop, re-ran,
+reverted): a test asserting only "ad1=illustrated, ad2=ugc, both auto-detected from each
+ad's own `blueprint.production_style`" **still passed** under that mutation, because
+`realism` stays `None` for every ad in that scenario regardless of whether `cfg` is built
+once or per-ad - the differentiation there comes entirely from `build_image_prompt`
+reading each call's own blueprint, a mechanism that has never depended on `BatchAdConfig`
+at all. Real coverage (catches a genuine per-ad-blueprint-threading bug), but not coverage
+of the freeze specifically - kept as
+`test_generate_from_selection_resolves_realism_per_ad_from_production_style`, with its
+own docstring saying so.
+
+Added a second test that actually exercises the freeze -
+`test_generate_from_selection_resolves_realism_per_ad_from_per_ad_override`: two ads, no
+`production_style` on either blueprint, `per_ad_overrides` sets a DIFFERENT explicit
+`realism` per ad_id. Confirmed by the SAME mutation that this one DOES fail (ad 2 silently
+inherits ad 1's override) where the first test does not - this is the one that actually
+proves "resolved once per ad, never re-read from shared state." Both are fully
+DB-independent (`_mock_dedupe_fully_db_independent`, same pattern as this file's own
+`_mock_dedupe_for_scope_guard`), unlike the rest of this test file, so they can run and be
+mutation-verified with no Postgres reachable.
+
+**Caught while writing the test**: `validator.production_styles()`/
+`generate_image_prompt_writer.STYLE_GUIDANCE` only have three real keys today -
+`high_spec`/`illustrated`/`ugc` - confirmed by direct inspection, not assumed. An existing,
+already-passing test (`test_run_once_threads_realism_and_toggles_to_process_ad`) uses
+`realism="ugc_native"` as an example value, which is NOT one of the three - harmless there
+only because that test mocks `process_ad` entirely and never reaches `STYLE_GUIDANCE`, but
+worth knowing before copying that string as if it were a valid style anywhere it actually
+matters (`build_image_prompt`/the writer would silently fall through to
+`DEFAULT_STYLE_GUIDANCE` for it, same as any other unrecognized value).
+
+**SAFETY INCIDENT, same session, while doing the DB-free verification above.** A
+standalone script (not the test suite - a throwaway script run directly with
+`python script.py` to get a full traceback pytest's own log line was hiding) has no
+`conftest.py` in its import path, so nothing forced `DATABASE_URL` to the test port -
+it read `.env`'s real value and connected straight to `34.105.137.192:5432/besque`, the
+exact address `conftest.py` has a hardcoded `_FORBIDDEN_MARKERS` guard to refuse test
+COLLECTION against (a guard that only ever runs inside pytest, so it can't protect a
+script that bypasses pytest entirely). `dedupe.mark_seen()` - called unconditionally near
+the end of `process_ad`'s success path - wasn't mocked in that script, and wrote two real
+rows into the real `seen_ads` table: `ad_id IN ('AD1','AD2')`, `page_name='Brand'`,
+`angle_id=NULL`. Caught immediately by re-reading the log line the exception handler had
+been swallowing (`dedupe: creating connection pool` - a pool doesn't get created against
+a REFUSED connection, which is what should have happened), confirmed via a read-only
+`SELECT` (exactly those 2 rows, nothing in `artifacts`/`scraped_ads` - both mocked
+no-ops in that script), then deleted with the operator's explicit go-ahead
+(`DELETE FROM seen_ads WHERE ad_id IN ('AD1','AD2')`, confirmed 0 rows remaining
+afterward). `"AD1"`/`"AD2"` can never be real Facebook `ad_archive_id`s (those are
+purely numeric, per this file's own standing note on identifying test-shaped
+`seen_ads` rows), so this was unambiguous test pollution, not a risk of deleting real
+data - but the near-miss is the lesson: **`dedupe.mark_seen` is now the ninth function
+this codebase has found calling `get_conn()` from a path that looked already-covered.**
+Fixed by adding it to `_mock_dedupe_fully_db_independent` (now the committed test helper
+mocks it too, so this exact mistake can't recur via this helper) - but the standing
+lesson is broader: **any ad-hoc verification script that imports `src.dedupe` needs the
+SAME production-IP guard `conftest.py` gives real tests, and does not get it for free.**
+Next person writing a throwaway DB-adjacent script: either run it through pytest (even a
+single inline `def test_x(): ...` in a scratch file, so `conftest.py` actually loads), or
+manually check `DATABASE_URL` against the forbidden markers before importing `dedupe` at
+all - do not assume "I mocked the functions I could think of" is equivalent to
+`conftest.py`'s guard.
+
+Both new tests pass on the real (unmutated) code, confirmed via pytest (not a standalone
+script) - safe, since `conftest.py`'s port-5433 override was active for that run.
