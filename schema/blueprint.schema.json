@@ -58,6 +58,10 @@
             "enum": ["product", "person", "text", "logo", "prop", "surface", "graphic"]
           },
           "description": { "type": "string" },
+          "appearance": {
+            "type": ["string", "null"],
+            "description": "2026-08-19 (identity vs appearance split): generic, non-identifying physical characteristics ONLY - shape, material, generic colour language, texture (e.g. 'a cylindrical glass bottle, matte label, warm amber liquid') - MUST NEVER contain a brand name, product name, or any other identity-revealing text. `description` (above) still carries full identifying detail as before, unchanged - this is a SEPARATE, additive field, not a replacement. Meaningful mainly for kind 'product' or 'logo'/'prop' objects that carry a brand mark: identity (name, specific label wording) must never transfer into a Besque draft, but generic appearance facts (silhouette, material, colour) may safely inform composition. null/omitted (a pre-existing blueprint predating this field, or an object the model didn't classify) falls back to `description` wherever appearance would otherwise be quoted - additive and optional, never required, so a pre-existing blueprint remains valid unchanged."
+          },
           "bbox": {
             "type": "array",
             "minItems": 4,
@@ -78,6 +82,10 @@
           "disposition": {
             "type": "string",
             "enum": ["substitute", "keep", "drop"]
+          },
+          "required_in_output": {
+            "type": ["boolean", "null"],
+            "description": "2026-08-19: presence in the reference is evidence this object exists in the SOURCE photo, not an instruction to reproduce it in the output - this field states which one applies. false = this was observed in the reference but is NOT structurally required to survive into the Besque draft (e.g. a stray hand mid-gesture, a loose hair strand, incidental background clutter that isn't load-bearing to the ad's own composition or argument) - only ever meaningful for disposition=='keep' objects, and NEVER overrides disposition=='substitute'/'drop', which already have their own explicit handling. true (or null/omitted) = required, the ordinary case - reproduce/substitute as disposition already says. This field is NEVER honoured for kind=='product' objects regardless of its stored value - the Besque product is always required in the output; see generate_image_prompt._objects_clause's own explicit guard for why this is enforced structurally, not left to this field alone. null/omitted (a pre-existing blueprint predating this field) is treated as true - every existing KEEP instruction renders byte-identical to before this field existed. Additive and optional, never required."
           },
           "text_purpose": {
             "type": "string",

@@ -40,6 +40,7 @@ def _init_tables():
     dedupe.init_scraped_ads()
     dedupe.init_fetch_jobs()
     dedupe.init_generate_jobs()
+    dedupe.init_object_feedback()
 
 
 # Serve the saved ad images
@@ -163,10 +164,28 @@ def api_decisions():
 
 
 @app.post("/api/decision/{ad_id}/{decision}")
-def api_decision(ad_id: str, decision: str, reason: str = "", angle_id: int = None):
+def api_decision(ad_id: str, decision: str, reason: str = "", angle_id: int = None, object_id: str = None):
     if decision not in ("approve", "reject"):
         return JSONResponse({"ok": False, "error": "bad decision"}, status_code=400)
     dedupe.record_decision(ad_id, decision, reason, angle_id=angle_id)
+    # object_feedback (2026-08-19, structured object-level feedback - persist only):
+    # OPTIONAL - a whole-artifact reject may additionally name a specific object_id
+    # that was the actual problem, instead of only a free-text whole-image reason. No
+    # existing caller (today's reject button never supplies this) sees any change;
+    # kind is resolved from THIS artifact's own stored blueprint at write time, same
+    # reasoning as api_apply_edit's own lookup.
+    if decision == "reject" and object_id:
+        art = dedupe.get_artifact(ad_id, angle_id=angle_id)
+        blueprint = (art or {}).get("blueprint") or {}
+        kind = next(
+            (o.get("kind") for o in (blueprint.get("objects") or [])
+             if isinstance(o, dict) and o.get("object_id") == object_id),
+            None,
+        )
+        dedupe.record_object_feedback(
+            artifact_id=(art or {}).get("id"), ad_id=ad_id, object_id=object_id,
+            kind=kind, reason=reason, source="operator_reject",
+        )
     # Outcome backfill (Dynamic Edit System, 2026-08-14): outcome attaches to the image
     # VERSION being judged, not "the edit" abstractly - resolve the LATEST artifact row
     # for this (ad_id, angle_id), the same "current version" convention already used
@@ -507,6 +526,11 @@ async def api_apply_edit(artifact_id: int, request: Request):
     attribute = (body.get("attribute") or "").strip()
     operation = (body.get("operation") or "change").strip()
     new_value = body.get("new_value")
+    # object_feedback (2026-08-19, structured object-level feedback - persist only,
+    # no learning layer): an OPTIONAL operator-supplied reason, distinct from any
+    # mechanical rejection reason below. Read once, used only when target=="object" -
+    # see the two write sites this feeds.
+    operator_reason = (body.get("reason") or "").strip()
 
     source = dedupe.get_artifact_by_id(artifact_id)
     if source is None:
@@ -518,6 +542,15 @@ async def api_apply_edit(artifact_id: int, request: Request):
     competitor_ad_id = source.get("ad_id")
     fmt = blueprint.get("format")
     angle_id = source.get("angle_id")
+    # object_feedback (2026-08-19): kind resolved HERE, once, from this artifact's own
+    # stored blueprint - never looked up again later by object_feedback's own reader,
+    # since a future re-deconstruct could change or drop this object_id entirely (see
+    # dedupe.init_object_feedback's own docstring on why kind is captured at write
+    # time, not derived on read).
+    _object_kind_by_id = {
+        o.get("object_id"): o.get("kind")
+        for o in (blueprint.get("objects") or []) if isinstance(o, dict)
+    }
 
     def _log_rejected(reason, original_value=None):
         dedupe.insert_edit_event(
@@ -525,6 +558,48 @@ async def api_apply_edit(artifact_id: int, request: Request):
             angle_id=angle_id, target=target, attribute=attribute, operation=operation,
             original_value=original_value, new_value=new_value, outcome="rejected",
             reject_reason=reason,
+        )
+        # object_feedback, mechanical-rejection path: captures ALREADY-FLOWING data
+        # (attribute IS the object_id when target=="object" - edit_capability's own
+        # object-remove controls set it that way) with zero new operator input
+        # required. source="edit_reject" distinguishes this from an operator's own
+        # qualitative reason (source="edit", written separately below) - both may
+        # exist for the same request when the operator supplied a reason for an edit
+        # that then also failed mechanical validation.
+        if target == "object" and attribute:
+            dedupe.record_object_feedback(
+                artifact_id=artifact_id, ad_id=competitor_ad_id, object_id=attribute,
+                kind=_object_kind_by_id.get(attribute), reason=reason, source="edit_reject",
+            )
+
+    def _log_rejected_after_pending(reason):
+        # Same object_feedback recording as _log_rejected, for a rejection that
+        # happens AFTER insert_edit_event already created the pending row (so this
+        # only updates that row's outcome via update_edit_event_result - calling
+        # _log_rejected here would insert a SECOND edit_event row for one request).
+        # Covers the 4 later rejection sites below (no draft image, object not
+        # found, image edit call failed, artifact insert failed) - previously each
+        # called dedupe.update_edit_event_result directly and none of them recorded
+        # object_feedback, silently missing the "object not found in blueprint"
+        # rejection in particular, which is arguably the most on-point case for a
+        # target=="object" request. target=="object" and attribute guard makes this
+        # a no-op for every other target (e.g. the realism-value rejection below),
+        # same as _log_rejected's own guard.
+        dedupe.update_edit_event_result(edit_event_id, None, outcome="rejected", reject_reason=reason)
+        if target == "object" and attribute:
+            dedupe.record_object_feedback(
+                artifact_id=artifact_id, ad_id=competitor_ad_id, object_id=attribute,
+                kind=_object_kind_by_id.get(attribute), reason=reason, source="edit_reject",
+            )
+
+    # object_feedback, operator-supplied reason (2026-08-19): recorded immediately,
+    # regardless of whether this edit ultimately succeeds or is rejected below - an
+    # operator explaining WHY they're editing/removing a specific object is evidence
+    # in itself, independent of the edit's own mechanical outcome.
+    if target == "object" and attribute and operator_reason:
+        dedupe.record_object_feedback(
+            artifact_id=artifact_id, ad_id=competitor_ad_id, object_id=attribute,
+            kind=_object_kind_by_id.get(attribute), reason=operator_reason, source="edit",
         )
 
     # Product identity is never editable through this endpoint (2026-08-16) - target=
@@ -623,7 +698,7 @@ async def api_apply_edit(artifact_id: int, request: Request):
     source_bytes, _ = _read_artifact_image_bytes(source, source["ad_id"])
     if source_bytes is None:
         reason = "no existing draft image to edit"
-        dedupe.update_edit_event_result(edit_event_id, None, outcome="rejected", reject_reason=reason)
+        _log_rejected_after_pending(reason)
         return JSONResponse({"ok": False, "error": reason}, status_code=404)
 
     # Product-realism edit (2026-08-16): a PRE-AUTHORED delta sentence from
@@ -641,7 +716,7 @@ async def api_apply_edit(artifact_id: int, request: Request):
         if instruction is None:
             reason = (f"unknown realism value {resolved_value!r} - must be one of "
                        f"{realism_deltas.REALISM_VALUES}")
-            dedupe.update_edit_event_result(edit_event_id, None, outcome="rejected", reject_reason=reason)
+            _log_rejected_after_pending(reason)
             return JSONResponse({"ok": False, "error": reason}, status_code=400)
     elif target == "object":
         # 2026-08-17 (Problem 2 restoration): a remove control must close the scene
@@ -658,7 +733,7 @@ async def api_apply_edit(artifact_id: int, request: Request):
             blueprint, attribute)
         if target_object is None:
             reason = f"object {attribute!r} not found in this artifact's blueprint"
-            dedupe.update_edit_event_result(edit_event_id, None, outcome="rejected", reject_reason=reason)
+            _log_rejected_after_pending(reason)
             return JSONResponse({"ok": False, "error": reason}, status_code=400)
         instruction = generate_image_prompt.build_object_removal_instruction(
             descriptor.get("current_value"))
@@ -699,7 +774,7 @@ async def api_apply_edit(artifact_id: int, request: Request):
         new_image_bytes = generate_image_prompt.apply_targeted_edit(source_bytes, instruction)
     if new_image_bytes is None:
         reason = "image edit call failed"
-        dedupe.update_edit_event_result(edit_event_id, None, outcome="rejected", reject_reason=reason)
+        _log_rejected_after_pending(reason)
         return JSONResponse({"ok": False, "error": reason})
 
     # Step 4 (drift check): compare v1 vs this result inside vs outside the target's
@@ -751,7 +826,7 @@ async def api_apply_edit(artifact_id: int, request: Request):
         # hit once (save_artifact's old dedupe-skip gate) - never report ok:true with a
         # null artifact_id again, whatever the cause.
         reason = "artifact row insert returned no id"
-        dedupe.update_edit_event_result(edit_event_id, None, outcome="rejected", reject_reason=reason)
+        _log_rejected_after_pending(reason)
         return JSONResponse({"ok": False, "error": reason}, status_code=500)
     dedupe.update_edit_event_result(edit_event_id, new_artifact_id, outcome="pending",
                                      drift_flag=drift_result["drift_flag"], drift_method=drift_result["method"])

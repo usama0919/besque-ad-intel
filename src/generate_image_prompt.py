@@ -973,7 +973,9 @@ def _critic_feedback_clause(critic_feedback=None):
 
 _OBJECT_CLOSURE_SENTENCE = (
     "The scene contains these objects and no others. Do not add any object, "
-    "body part, hair, hand, garment or prop that is not listed above."
+    "body part, hair, hand, garment or prop that is not listed above. Where an object "
+    "above is marked OBSERVED, NOT REQUIRED, its omission is never licence to add a "
+    "different object, or more than one instance, in its place."
 )
 
 
@@ -1142,7 +1144,13 @@ def _substitute_object_line(obj, kind, text_purpose, description, context, produ
     any replacement - and does NOT reference "the BOTTLE IDENTITY and BOTTLE GEOMETRY
     clauses above", since those clauses are themselves suppressed in this same prompt
     and referencing them by name would dangle. False (the default) reproduces this
-    function's prior text byte-for-byte."""
+    function's prior text byte-for-byte.
+
+    Identity vs appearance split (2026-08-19): all three product branches below quote
+    obj.get("appearance") in place of `description` whenever present - see the schema
+    field's own docstring for why. Falls back to `description` when appearance is
+    absent (a legacy blueprint), reproducing this function's exact prior text for any
+    blueprint predating this field."""
     if kind == "product":
         bbox = obj.get("bbox")
         position_fact = (
@@ -1150,9 +1158,21 @@ def _substitute_object_line(obj, kind, text_purpose, description, context, produ
             if isinstance(bbox, (list, tuple)) and len(bbox) == 4
             else "at this object's own recorded position and scale"
         )
+        # Identity vs appearance split (2026-08-19): `description` (the caller-computed
+        # fallback-defaulted string, may include the competitor's own brand/product
+        # name) is quoted verbatim into every branch below, immediately followed by an
+        # explicit "never derive identity from this" disclaimer - but quoting a brand
+        # name into the prompt text at all is exactly the leak vector this codebase has
+        # repeatedly proven a following disclaimer does not reliably neutralise (see
+        # CLAUDE.md's guardrails note). appearance_text prefers the object's own
+        # `appearance` field (generic, non-identifying by construction - see the schema
+        # field's own docstring) when present, so the ONLY thing ever quoted here is
+        # already brand-safe; falls back to `description` for a legacy blueprint with
+        # no appearance field, unchanged behaviour.
+        appearance_text = (obj.get("appearance") or "").strip() or description
         if suppress_bottle_identity:
             return (
-                f"COMPOSITING: this position held a competitor product (\"{description}\") - "
+                f"COMPOSITING: this position held a competitor product (\"{appearance_text}\") - "
                 f"a real Besque product photograph will be PASTED here after generation, "
                 f"{position_fact}. Remove the competitor's product entirely and do NOT draw, "
                 f"paint, or render any bottle, container, packaging, label, pump, cap, or "
@@ -1166,7 +1186,7 @@ def _substitute_object_line(obj, kind, text_purpose, description, context, produ
             return (
                 f"SUBSTITUTE: this position held one instance of a competitor product "
                 f"the reference shows {product_instance_count} times, differing only in "
-                f"size or format (\"{description}\") - place a Besque bottle here "
+                f"size or format (\"{appearance_text}\") - place a Besque bottle here "
                 f"instead, {position_fact}. Every other instance of this same product "
                 f"in this SCENE OBJECTS list substitutes too, each at its own recorded "
                 f"position - together they reproduce the reference's own "
@@ -1177,7 +1197,7 @@ def _substitute_object_line(obj, kind, text_purpose, description, context, produ
                 f"object's own colours or description."
             )
         return (
-            f"SUBSTITUTE: this position held a competitor product (\"{description}\") - "
+            f"SUBSTITUTE: this position held a competitor product (\"{appearance_text}\") - "
             f"place the Besque product here instead, {position_fact}. Its "
             "identity (shape, proportions, colours, label) comes ONLY from the "
             "BOTTLE IDENTITY and BOTTLE GEOMETRY clauses above, never from this "
@@ -1388,7 +1408,28 @@ def _objects_clause(objects=None, context=None, ad_id=None, suppress_bottle_iden
         description = (obj.get("description") or obj.get("object_id") or "object").strip()
         role = obj.get("role") or ""
         if disposition == "keep":
-            lines.append(f"KEEP: {description} ({role}) - reproduce exactly as shown, unchanged.")
+            # required_in_output (2026-08-19): presence in the reference is evidence
+            # this object exists in the SOURCE, never by itself an instruction to
+            # reproduce it - see the schema field's own docstring. Only ever consulted
+            # for disposition=="keep" (substitute/drop already have their own explicit
+            # handling, untouched). kind == "product" is an EXPLICIT, unconditional
+            # guard, checked FIRST - the Besque product is always required, regardless
+            # of what required_in_output says on a stored object. This is deliberately
+            # NOT "trust the field, which should always be true for products" - it is
+            # "ignore the field entirely for this kind," so a malformed or
+            # erroneous stored value can never downgrade a product to optional. See
+            # tests/test_no_product_placement.py-adjacent coverage proving this by
+            # construction: a product object with required_in_output=False explicitly
+            # forced still renders as KEEP, never as the not-required line below.
+            if kind != "product" and obj.get("required_in_output") is False:
+                lines.append(
+                    f"OBSERVED, NOT REQUIRED: {description} ({role}) - present in the "
+                    f"source photo, but NOT required to appear in the output. Omit it "
+                    f"if it is not essential to the composition; never invent extra "
+                    f"instances of it either way."
+                )
+            else:
+                lines.append(f"KEEP: {description} ({role}) - reproduce exactly as shown, unchanged.")
         elif disposition == "substitute":
             lines.append(_substitute_object_line(
                 obj, kind, text_purpose, description, context,

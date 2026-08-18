@@ -1301,4 +1301,123 @@ def test_bottle_register_and_material_realism_clauses_unchanged_by_item_2():
     clause as they are - lighting/finish should still adapt, untouched by identity."""
     prompt = generate_image_prompt.build_image_prompt(_blueprint(), product=_REAL_SHAPED_PRODUCT)
     assert generate_image_prompt._BOTTLE_MATERIAL_REALISM_CLAUSE in prompt
+
+
+# ---- required_in_output (2026-08-19, objects model Part 1) - separates "observed in
+# the reference" from "required to survive into the output," targeting phantom hands/
+# hair a KEEP instruction previously reproduced unconditionally. ----
+
+def _kept_object(object_id="obj_hand", kind="prop", required_in_output=None, description="a stray hand"):
+    obj = {"object_id": object_id, "kind": kind, "description": description,
+           "role": "environment", "disposition": "keep"}
+    if required_in_output is not None:
+        obj["required_in_output"] = required_in_output
+    return obj
+
+
+def test_required_in_output_false_renders_observed_not_required_line():
+    clause = generate_image_prompt._objects_clause(
+        [_kept_object(required_in_output=False)], {}, ad_id="AD1")
+    assert "OBSERVED, NOT REQUIRED: a stray hand" in clause
+    assert "KEEP: a stray hand" not in clause
+
+
+def test_required_in_output_true_renders_ordinary_keep_line():
+    clause = generate_image_prompt._objects_clause(
+        [_kept_object(required_in_output=True)], {}, ad_id="AD2")
+    assert "KEEP: a stray hand" in clause
+    assert "OBSERVED, NOT REQUIRED: a stray hand" not in clause
+
+
+def test_required_in_output_absent_is_legacy_default_true():
+    """A blueprint predating this field has no required_in_output key at all - must
+    render byte-identical ordinary KEEP text, never the new OBSERVED/NOT REQUIRED line.
+    (The closure sentence itself always mentions the phrase "OBSERVED, NOT REQUIRED" as
+    unconditional boilerplate - the assertion below is scoped to the PER-OBJECT line,
+    not the bare phrase, which is present in every clause regardless.)"""
+    clause = generate_image_prompt._objects_clause(
+        [_kept_object(required_in_output=None)], {}, ad_id="AD3")
+    assert "KEEP: a stray hand" in clause
+    assert "OBSERVED, NOT REQUIRED: a stray hand" not in clause
+
+
+def test_required_in_output_false_on_product_is_impossible_by_construction():
+    """The binding guard from this session's task: required_in_output must NEVER apply
+    to a kind=="product" object, even when a stored/malformed value explicitly sets it
+    False on a kept product - the Besque product is always required. This is not "the
+    field happens to always be true for products" - _objects_clause checks kind=="product"
+    FIRST, unconditionally, before ever reading required_in_output at all."""
+    clause = generate_image_prompt._objects_clause(
+        [_kept_object(object_id="obj_bottle", kind="product",
+                      required_in_output=False, description="Besque Magic Body Oil")],
+        {}, ad_id="AD4")
+    assert "KEEP: Besque Magic Body Oil" in clause
+    assert "OBSERVED, NOT REQUIRED: Besque Magic Body Oil" not in clause
+
+
+def test_object_closure_sentence_covers_observed_not_required_omission():
+    clause = generate_image_prompt._objects_clause(
+        [_kept_object(required_in_output=False)], {}, ad_id="AD5")
+    assert "its omission is never licence to add a" in clause
+    assert "different object, or more than one instance, in its place" in clause
+
+
+# ---- Identity vs appearance split (2026-08-19, objects model Part 2) - a competitor
+# product's generic appearance may inform composition; its brand identity never
+# transfers. Targets _substitute_object_line's three product branches. ----
+
+def _product_object(bbox=(0.1, 0.2, 0.3, 0.4), appearance=None, description="GlowCo Radiance Serum"):
+    obj = {"object_id": "obj_bottle", "kind": "product", "bbox": list(bbox),
+           "description": description, "disposition": "substitute"}
+    if appearance is not None:
+        obj["appearance"] = appearance
+    return obj
+
+
+def test_substitute_product_line_quotes_appearance_not_brand_description():
+    obj = _product_object(appearance="a squat frosted glass jar, matte white cap")
+    line = generate_image_prompt._substitute_object_line(
+        obj, "product", None, obj["description"], {})
+    assert "a squat frosted glass jar, matte white cap" in line
+    assert "GlowCo Radiance Serum" not in line
+
+
+def test_substitute_product_line_falls_back_to_description_when_appearance_absent():
+    """Legacy blueprint with no appearance field - falls back to description, exactly
+    this function's behaviour before the split existed."""
+    obj = _product_object(appearance=None)
+    line = generate_image_prompt._substitute_object_line(
+        obj, "product", None, obj["description"], {})
+    assert "GlowCo Radiance Serum" in line
+
+
+def test_substitute_product_line_multi_instance_branch_uses_appearance():
+    obj = _product_object(appearance="a tall amber glass bottle, cork stopper")
+    line = generate_image_prompt._substitute_object_line(
+        obj, "product", None, obj["description"], {}, product_instance_count=2)
+    assert "a tall amber glass bottle, cork stopper" in line
+    assert "GlowCo Radiance Serum" not in line
+
+
+def test_substitute_product_line_compositing_branch_uses_appearance():
+    obj = _product_object(appearance="a squat pump bottle, brushed metal collar")
+    line = generate_image_prompt._substitute_object_line(
+        obj, "product", None, obj["description"], {}, suppress_bottle_identity=True)
+    assert "a squat pump bottle, brushed metal collar" in line
+    assert "GlowCo Radiance Serum" not in line
+
+
+def test_objects_clause_end_to_end_product_appearance_never_leaks_brand_name():
+    """Full build_image_prompt path, not just the helper directly - a brand name
+    present only in description (never in appearance) must never reach the
+    assembled prompt text for a substituted competitor product object."""
+    bp = {
+        "visual": {"layout": "flat lay", "subject": "", "palette_mood": "warm",
+                   "text_placement": "lower"},
+        "objects": [_product_object(appearance="a cylindrical glass bottle, warm amber liquid",
+                                     description="GlowCo Radiance Serum")],
+    }
+    prompt = generate_image_prompt.build_image_prompt(bp)
+    assert "a cylindrical glass bottle, warm amber liquid" in prompt
+    assert "GlowCo Radiance Serum" not in prompt
     assert "Only the bottle's lighting, grading, and finish adapt to match the rendering register" in prompt

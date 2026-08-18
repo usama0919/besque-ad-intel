@@ -1567,6 +1567,91 @@ def get_artifact_lineage(root_artifact_id):
         ]
 
 
+# ---- Structured object-level feedback (2026-08-19) - PERSIST ONLY, no learning
+# layer in this task. Today, a whole-artifact reject (review_decisions) or an edit
+# rejection (edit_events.reject_reason) records that something was wrong with a
+# draft, but never WHICH object in the blueprint's own objects[] array was the
+# problem - a human (or a future automated critic) has to re-read the whole
+# free-text reason and guess. This table lets either attribute a specific
+# object_id + kind + reason, without inventing any aggregation/learning on top of
+# it - purely additive, no existing table touched. ----
+
+def init_object_feedback():
+    """One row per (artifact, object) judgment - 'this specific object was wrong,
+    here's why', from either a whole-artifact reject or a targeted edit. Deliberately
+    a SEPARATE table from review_decisions/edit_events, not new columns on either:
+    both existing tables are keyed one-row-per-decision/one-row-per-edit-attempt,
+    while a single reject or edit could plausibly name more than one problem object in
+    future (never built here - each call today writes exactly one row per object
+    named). artifact_id references artifacts(id) ON DELETE SET NULL, same
+    soft-reference convention as edit_events.source_artifact_id above - a later
+    re-deconstruct or artifact deletion must never fail because an old feedback row
+    points at it; the row survives as a historical record with artifact_id NULL rather
+    than being deleted or blocking the artifact's own deletion. kind is captured
+    at write time (resolved from the artifact's own stored blueprint by the caller,
+    OUTSIDE the table's own responsibility) rather than looked up later, since the
+    blueprint an object_id belonged to may itself change on a future re-deconstruct."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS object_feedback (
+                id            SERIAL PRIMARY KEY,
+                artifact_id   INTEGER REFERENCES artifacts(id) ON DELETE SET NULL,
+                ad_id         TEXT,
+                object_id     TEXT,
+                kind          TEXT,
+                reason        TEXT NOT NULL,
+                source        TEXT NOT NULL,
+                created_at    TIMESTAMPTZ DEFAULT now()
+            )
+        """)
+        conn.commit()
+
+
+def record_object_feedback(artifact_id, ad_id, object_id, kind, reason, source):
+    """Persist one structured "this object was wrong" judgment. Pure INSERT, no
+    aggregation, no learning - reading this data back for anything beyond a plain
+    per-artifact/per-ad list is explicitly out of scope for this task. source is a
+    short free label naming where the judgment came from ('operator_reject' - a
+    whole-artifact reject that also named a specific object; 'edit_reject' - a
+    targeted edit's own mechanical validation failure, target=='object'; 'edit' - an
+    operator-supplied reason alongside a target=='object' edit, whether it was
+    accepted or rejected) - never validated against a fixed enum here, since this is
+    a plain historical log, not a state machine other code branches on."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO object_feedback (artifact_id, ad_id, object_id, kind, reason, source) "
+            "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
+            (artifact_id, ad_id, object_id, kind, reason, source),
+        )
+        new_id = cur.fetchone()[0]
+        conn.commit()
+        return new_id
+
+
+def get_object_feedback(ad_id=None, artifact_id=None):
+    """Plain read - optionally filtered by ad_id and/or artifact_id, newest first. No
+    aggregation/grouping - that's explicitly the (not-built) learning layer's job."""
+    with get_conn() as conn, conn.cursor() as cur:
+        query = "SELECT id, artifact_id, ad_id, object_id, kind, reason, source, created_at FROM object_feedback"
+        clauses, params = [], []
+        if ad_id is not None:
+            clauses.append("ad_id = %s")
+            params.append(ad_id)
+        if artifact_id is not None:
+            clauses.append("artifact_id = %s")
+            params.append(artifact_id)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY created_at DESC"
+        cur.execute(query, params)
+        return [
+            {"id": r[0], "artifact_id": r[1], "ad_id": r[2], "object_id": r[3],
+             "kind": r[4], "reason": r[5], "source": r[6],
+             "created_at": r[7].isoformat() if r[7] else None}
+            for r in cur.fetchall()
+        ]
+
+
 def set_suggested_name(competitor_id, suggested):
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("UPDATE competitors SET suggested_name = %s WHERE id = %s", (suggested or "", competitor_id))
