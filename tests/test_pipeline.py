@@ -400,6 +400,97 @@ def test_process_ad_does_not_hard_block_ordinary_skincare_reference(monkeypatch)
     assert pipeline.process_ad(ad) == "processed"
 
 
+# ---- No-product-object placement (2026-08-19): include_product=True but the
+# reference has zero kind=="product" objects - confirmed live, ad 1567146038752995,
+# an invented side table and a cropped subject; a separate pool ad the same day, two
+# bottles on an invented tray. Skip (never mark_seen - a future placement-logic
+# improvement should be able to retry this ad) when no region rests on a real, kept
+# support surface; proceed with the computed bbox threaded through to generate_image
+# when one exists. ----
+
+def test_process_ad_skips_when_no_product_object_and_no_supported_placement(monkeypatch):
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    dedupe.init_pipeline_warnings()
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+          "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    monkeypatch.setattr(pipeline.assets, "download_image", lambda url, aid: "fake.jpg")
+    monkeypatch.setattr(pipeline.assets, "download_image_bytes", lambda url: b"fake-bytes")
+    monkeypatch.setattr(pipeline.deconstruct, "deconstruct_image", lambda **k: {
+        "objects": [
+            {"object_id": "obj_01", "kind": "person", "disposition": "substitute",
+             "bbox": [0.0, 0.0, 1.0, 1.0], "description": "a woman filling the frame"},
+        ],
+        "background": {"light": "soft window light"},
+    })
+    copy_calls = []
+    image_calls = []
+    monkeypatch.setattr(pipeline.generate_copy, "generate_copy_live", lambda *a, **k: copy_calls.append(1))
+    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image", lambda *a, **k: image_calls.append(1))
+    warnings = []
+    monkeypatch.setattr(pipeline.dedupe, "record_warning", lambda kind, detail: warnings.append((kind, detail)))
+
+    assert pipeline.process_ad(ad) == "skipped"
+    assert copy_calls == []  # never reaches copy generation
+    assert image_calls == []  # never reaches image generation
+    assert any(kind == "no_product_placement_failed" for kind, detail in warnings)
+    # Unlike the hard-block skip above: NOT marked seen - a future placement-logic
+    # improvement, or a re-deconstruct, should still be able to retry this ad.
+    assert dedupe.is_new(ad_id) is True
+
+
+def test_process_ad_proceeds_with_computed_bbox_when_supported_placement_exists(monkeypatch):
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+          "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    _mock_all_stages(monkeypatch)
+    monkeypatch.setattr(pipeline.deconstruct, "deconstruct_image", lambda **k: {
+        "objects": [
+            {"object_id": "obj_01", "kind": "person", "disposition": "substitute",
+             "bbox": [0.15, 0.05, 0.72, 0.95], "description": "a woman"},
+            {"object_id": "obj_02", "kind": "prop", "disposition": "keep",
+             "bbox": [0.0, 0.35, 1.0, 0.65], "description": "a sofa"},
+        ],
+        "background": {"light": "soft window light"},
+    })
+    captured = {}
+    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image",
+                        lambda bp, aid, product=None, reference_images=None, **k:
+                            captured.update(k) or "draft.png")
+
+    assert pipeline.process_ad(ad) == "processed"
+    assert captured["no_product_placement_bbox"] is not None
+    assert len(captured["no_product_placement_bbox"]) == 4
+
+
+def test_process_ad_no_product_placement_bbox_none_when_a_product_object_exists(monkeypatch):
+    """Control: the ordinary case (a product object exists) must be completely
+    unaffected - no_product_placement_bbox stays None, same as before this feature."""
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+          "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    _mock_all_stages(monkeypatch)
+    monkeypatch.setattr(pipeline.deconstruct, "deconstruct_image", lambda **k: {
+        "objects": [
+            {"object_id": "obj_01", "kind": "product", "disposition": "substitute",
+             "bbox": [0.3, 0.4, 0.2, 0.35], "description": "a competitor bottle"},
+        ],
+        "background": {"light": "soft window light"},
+    })
+    captured = {}
+    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image",
+                        lambda bp, aid, product=None, reference_images=None, **k:
+                            captured.update(k) or "draft.png")
+
+    assert pipeline.process_ad(ad) == "processed"
+    assert captured["no_product_placement_bbox"] is None
+
+
 # ---- Task H, Part 1 (2026-08-07); REVERSED same day (reference usability gate
 # reversal, see CLAUDE.md): a reference with nothing to clone (no product, no headline,
 # no text zone, no offer) is STILL a usable scene - the ad proceeds to generation, with

@@ -1265,6 +1265,40 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
             dedupe.mark_seen(ad_id, ad.get("page_name", ""), angle_id)
             return "skipped"
 
+        # No-product-object placement (2026-08-19): include_product is True but the
+        # reference has NO kind=="product" object at all - previously nothing told
+        # Gemini WHERE the bottle goes, and it improvised. Confirmed live, ad
+        # 1567146038752995 (one person, substitute; one sofa, keep; zero product
+        # objects): the draft invented a wooden side table and cropped the woman down
+        # to legs. Same on a separate pool ad, 2026-08-19 22:24: two bottles appeared
+        # on an invented tray. See generate_image_prompt.resolve_no_product_placement/
+        # find_supported_placement_bbox for the full reasoning (a region must rest on
+        # a real, kept support surface - never the largest empty gap for its own sake,
+        # and never a floating placement).
+        #
+        # Deliberately does NOT call dedupe.mark_seen, unlike the hard-block skip
+        # immediately above - a hard-blocked medical reference can never become
+        # generateable, but this case is only "unplaceable with TODAY's placement
+        # logic": a future improvement to find_supported_placement_bbox, or a
+        # re-deconstruct that reasons about the scene differently, could make the same
+        # ad placeable later. Marking it seen would lock it out of ever being retried.
+        needs_placement, product_placement_bbox, placement_reason = (
+            generate_image_prompt.resolve_no_product_placement(blueprint, include_product)
+        )
+        if needs_placement and product_placement_bbox is None:
+            log.warning("Ad %s: no-product-object placement failed: %s", ad_id, placement_reason)
+            dedupe.init_pipeline_warnings()
+            dedupe.record_warning(
+                "no_product_placement_failed",
+                f"Ad {ad_id} ({ad.get('page_name', '?')}): {placement_reason}",
+            )
+            return "skipped"
+        if needs_placement:
+            log.info(
+                "Ad %s: no product object in reference - computed placement bbox %s "
+                "(resting on a real kept support surface)", ad_id, product_placement_bbox,
+            )
+
         # Reference usability (Task H, 2026-08-07; gate REVERSED same day, see CLAUDE.md):
         # a reference with nothing to clone is NOT skipped - it's logged, purely
         # informational, so the pool badge/logs can tell an operator what to expect
@@ -1560,6 +1594,7 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
                     testimonial=testimonial,
                     product_count=product_count,
                     clone_mode=clone_mode,
+                    no_product_placement_bbox=product_placement_bbox,
                     **gen_kwargs,
                 )
             except Exception as e:

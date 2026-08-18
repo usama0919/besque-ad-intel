@@ -183,7 +183,8 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
                         cta_text: str = None, panel_copy: list = None,
                         testimonial: dict = None, product_count: int = None,
                         clone_mode: bool = False, object_copy: list = None,
-                        suppress_bottle_identity: bool = False) -> str:
+                        suppress_bottle_identity: bool = False,
+                        no_product_placement_bbox: list = None) -> str:
     """Construct a Besque-adapted image generation prompt from the blueprint's visual notes.
 
     suppress_bottle_identity (2026-08-17, Route B compositing): True when generate_image's
@@ -263,7 +264,19 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
     bottle whenever count was above 1 (reasoning that a genuinely distinct second SKU
     can't be sourced from a single visual_description) - that reasoning conflated "a
     different SKU" with "more than one of the same SKU," and directly caused two real
-    two-product references to both render with only one bottle."""
+    two-product references to both render with only one bottle.
+
+    no_product_placement_bbox (2026-08-19): the caller's own pre-computed answer to
+    "where does the product go" for the no-product-object case (resolve_no_product_
+    placement/find_supported_placement_bbox) - a [x,y,w,h] bbox resting on a real kept
+    support surface, or None when the case doesn't apply (the ordinary path, unchanged).
+    This function never computes it itself and never decides whether to fail an ad -
+    that decision already happened before build_image_prompt was ever called (the
+    caller must have already skipped rather than generate when no supported placement
+    existed). When given, composed as an additional STRICT clause alongside
+    _bottle_identity_clause/_bottle_geometry_clause in every branch - see
+    _no_product_placement_clause's own docstring for the live evidence (an invented
+    side table, an invented tray) this replaces "ADD it somewhere" guesswork with."""
     visual = blueprint.get("visual", {})
     # visual.subject is deliberately NOT read here. In practice it's where the vision
     # deconstruct step puts rich, identity-carrying descriptions of the competitor ad's
@@ -549,6 +562,7 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
               + _bottle_integration_clause(suppress_bottle_identity)
               + ("" if suppress_bottle_identity else _bottle_geometry_source_clause()))
              if effective_include_product else "") +
+            (_no_product_placement_clause(no_product_placement_bbox) if no_product_placement_bbox else "") +
             _operator_instruction_clause(operator_instruction) +
             _critic_feedback_clause(critic_feedback) +
             _objects_clause(blueprint.get("objects"), objects_context, ad_id=blueprint.get("ad_id"),
@@ -608,6 +622,7 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
             ((("" if suppress_bottle_identity else _bottle_identity_clause(product) + _bottle_geometry_clause())
               + _bottle_integration_clause(suppress_bottle_identity))
              if effective_include_product else "") +
+            (_no_product_placement_clause(no_product_placement_bbox) if no_product_placement_bbox else "") +
             _operator_instruction_clause(operator_instruction) +
             _critic_feedback_clause(critic_feedback) +
             _objects_clause(blueprint.get("objects"), objects_context, ad_id=blueprint.get("ad_id"),
@@ -630,6 +645,7 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
             ((("" if suppress_bottle_identity else _bottle_identity_clause(product) + _bottle_geometry_clause())
               + _bottle_integration_clause(suppress_bottle_identity))
              if effective_include_product else "") +
+            (_no_product_placement_clause(no_product_placement_bbox) if no_product_placement_bbox else "") +
             _operator_instruction_clause(operator_instruction) +
             _critic_feedback_clause(critic_feedback) +
             _objects_clause(blueprint.get("objects"), objects_context, ad_id=blueprint.get("ad_id"),
@@ -1680,15 +1696,31 @@ def _bottle_fixed_clause():
 
 PRODUCT_CUTOUT_GCS_KEY = "product_assets/besque_magic_body_oil_cutout.png"
 
-# Fetched at most ONCE per process (the file is a static asset, never changes at
-# runtime) - cached even on failure, never retried within the same process. Without
-# this, a stretch of expired ADC/network trouble costs a real multi-second GCS round
-# trip (or auth failure) on EVERY single generate_image call, not just the first -
-# measured live at ~4-5s per attempt. This mirrors the existing operational practice
-# for ADC issues in this codebase (CLAUDE.md: "Re-auth *and* restart") - a stale
-# None cached here clears on the next process restart, same as any other ADC problem.
+# SUCCESS is cached process-wide, permanently (the file is a static asset, never
+# changes at runtime) - once fetched, never re-fetched again in this process. Without
+# this, a stretch of expired ADC/network trouble would have cost a real multi-second
+# GCS round trip (or auth failure) on EVERY single generate_image call, not just the
+# first - measured live at ~4-5s per attempt.
+#
+# FAILURE is deliberately NOT cached (2026-08-19, retry-on-failure fix - revises the
+# original "cached even on failure" design directly above this comment, which is now
+# WRONG and left corrected here rather than silently, since the prior design is exactly
+# what this fix replaces). The original reasoning - avoid paying the GCS round-trip
+# repeatedly - still holds for a REAL outage, but caching a failure forever meant one
+# transient blip (the documented expired-ADC class of issue, CLAUDE.md's own
+# operational notes) silently starved every generation for the rest of that process's
+# life of the one real photo the native bottle path relies on for identity, with no
+# recovery short of a manual restart. Retrying every call means a transient failure
+# self-heals on its own the moment the underlying issue clears - the ~4-5s cost is
+# paid again on each failing attempt, which is strictly better than paying it never
+# again while quietly never sending Gemini the cutout either.
 _product_cutout_cache_populated = False
 _product_cutout_bytes_cache = None
+# Separate from the cache flags above on purpose: this must stay True once set even
+# though a FAILED fetch no longer sets _product_cutout_cache_populated - otherwise
+# every single retrying call during a real, sustained outage would record its own
+# pipeline_warning and fill the log/warnings banner with duplicates of the same fact.
+_product_cutout_fetch_failure_warned = False
 
 
 def _fetch_product_cutout_bytes():
@@ -1699,21 +1731,48 @@ def _fetch_product_cutout_bytes():
     optional extra reference image is never worth failing an otherwise-working
     generation over. Attached only on the generate path (generate_image), never the
     realism-only targeted edit path, and only for non-illustrated runs - see
-    generate_image's own gating. Result cached process-wide - see the cache
-    variables' own comment above for why."""
-    global _product_cutout_cache_populated, _product_cutout_bytes_cache
+    generate_image's own gating.
+
+    Caching (2026-08-19, retry-on-failure fix): a SUCCESS is cached process-wide
+    forever - see the cache variables' own comment above. A FAILURE is NOT cached -
+    every call while the fetch is failing retries it from scratch, so a transient
+    issue (an expired-ADC blip, a momentary GCS hiccup) recovers on its own the next
+    time it's called, with no restart required. Only the WARNING is still limited to
+    once per process (via its own separate _product_cutout_fetch_failure_warned flag,
+    never reset even after a later success) - so a sustained real outage still logs
+    exactly once, not once per ad, while every ad during that outage still gets a
+    fresh retry attempt rather than a cached, permanent None."""
+    global _product_cutout_cache_populated, _product_cutout_bytes_cache, _product_cutout_fetch_failure_warned
     if _product_cutout_cache_populated:
         return _product_cutout_bytes_cache
     try:
         from google.cloud import storage as _storage
         blob = _storage.Client().bucket(assets.asset_bucket_name()).blob(PRODUCT_CUTOUT_GCS_KEY)
-        _product_cutout_bytes_cache = blob.download_as_bytes() if blob.exists() else None
+        fetched_bytes = blob.download_as_bytes() if blob.exists() else None
     except Exception as e:
         log.warning("could not fetch product cutout %s: %s", PRODUCT_CUTOUT_GCS_KEY, e)
-        _product_cutout_bytes_cache = None
-    finally:
+        fetched_bytes = None
+    if fetched_bytes is not None:
+        _product_cutout_bytes_cache = fetched_bytes
         _product_cutout_cache_populated = True
-    return _product_cutout_bytes_cache
+        return _product_cutout_bytes_cache
+    # Failure: _product_cutout_cache_populated is deliberately left False here, so the
+    # NEXT call retries the fetch instead of returning this same None forever.
+    if not _product_cutout_fetch_failure_warned:
+        _product_cutout_fetch_failure_warned = True
+        from src import dedupe as _dedupe
+        _dedupe.init_pipeline_warnings()
+        _dedupe.record_warning(
+            "product_cutout_fetch_failed",
+            f"Could not fetch the product cutout ({PRODUCT_CUTOUT_GCS_KEY}) from the "
+            f"asset bucket - this generation proceeds with no real-photo identity "
+            f"reference for the bottle. The fetch is retried on every call (not "
+            f"cached), so this self-heals on its own once the underlying issue clears "
+            f"- no restart needed. This warning itself is logged only once per "
+            f"process, not once per failed attempt. Likely an ADC/credentials issue, "
+            f"not a missing file - re-auth if this persists.",
+        )
+    return None
 
 
 # ---- Route B compositing (2026-08-17): paste the REAL product cutout into the
@@ -1757,6 +1816,212 @@ def _bboxes_overlap(bbox_a, bbox_b):
     overlap_w = min(ax0 + aw, bx0 + bw) - max(ax0, bx0)
     overlap_h = min(ay0 + ah, by0 + bh) - max(ay0, by0)
     return overlap_w > 0 and overlap_h > 0
+
+
+# ---- No-product-object placement (2026-08-19): when include_product is True but the
+# reference has NO kind=="product" object at all, nothing previously told Gemini WHERE
+# the Besque bottle goes - it improvised. Confirmed live, ad 1567146038752995
+# (blueprint: one person object, substitute; one sofa prop, keep; zero product
+# objects): the draft invented a wooden side table with a bottle on it and cropped the
+# woman down to legs. Same on a separate pool ad, 2026-08-19 22:24: two bottles
+# appeared on an invented tray. This is the nothing-to-clone case added and reversed
+# 2026-08-07 (see CLAUDE.md) - reversed correctly (a productless reference is still a
+# usable scene, the product should be ADDED, never skipped outright) - but "ADD it
+# somewhere" was left entirely to the model with no computed placement, which is what
+# actually produced the invented furniture.
+#
+# First version of this fix maximised raw unoccupied AREA (the largest empty
+# rectangle among the existing bboxes) - re-run against ad 1567146038752995's own real
+# blueprint, that approach picked [0, 0, 0.15, 0.35]: an upper-left sliver running
+# from the very top of the frame down to the sofa's own top edge. Numerically
+# unoccupied, but visually a bottle floating against a wall - adjacency to a real
+# object never factored into the choice at all, only size. REVISED (this version) to
+# require the region rest directly on top of a "keep"-disposition object plausibly
+# capable of supporting a product (matched by keyword against kind=="prop" objects
+# only, disposition=="keep" specifically - only a kept object is guaranteed to survive
+# into the final image unchanged, so it's the only thing safe to trust as a real
+# surface) - never the largest available gap for its own sake. A floating region is
+# never chosen even when it is the only unoccupied space available; skip instead (see
+# find_supported_placement_bbox's own docstring for what re-running THIS version
+# against the same real ad now finds).
+
+# Keyword vocabulary for "this kept prop is plausibly a surface a product could rest
+# on" - deliberately kind=="prop" only, never person/text/product/logo/graphic; a
+# sofa's own "arm" is covered by matching the parent furniture description (e.g.
+# "sofa"), not a separate "arm" keyword, since an arm is a region of one object's own
+# bbox, never a distinct object in this schema.
+_SUPPORT_SURFACE_KEYWORDS = (
+    "sofa", "couch", "armchair", "chair", "table", "counter", "countertop", "desk",
+    "shelf", "shelving", "bench", "stool", "stand", "nightstand", "dresser",
+    "ottoman", "windowsill", "sill", "ledge", "cabinet", "vanity", "tray",
+    "floor", "rug", "mat",
+)
+
+# Reasoned ESTIMATES, not measured against real data (CLAUDE.md's own standing note:
+# never present a guessed constant as final). Anchored to the smallest real
+# product-zone bbox observed this session (artifact 1361: width 0.22, height 0.30),
+# rounded down slightly to be a bit more permissive than over-reject. Re-run against
+# ad 1567146038752995's own real blueprint at these exact values: the only valid
+# candidate is [0, 0.15, 0.15, 0.20], width sitting exactly at the floor - a genuine
+# boundary case, not a comfortable margin, and worth recalibrating against a larger
+# sample before trusting either number as final.
+MIN_PLACEMENT_WIDTH = 0.15
+MIN_PLACEMENT_HEIGHT = 0.20
+# The candidate's height is fixed at exactly this value when resting on a support,
+# never however much empty space happens to be available above it - that "take all
+# the available room" behaviour is what produced the top-of-frame-to-sofa sliver the
+# first version of this fix picked. Reusing MIN_PLACEMENT_HEIGHT itself rather than
+# introducing a second, separately-unverified number.
+PLACEMENT_HEIGHT = MIN_PLACEMENT_HEIGHT
+
+
+def _is_support_surface(obj):
+    """True when obj is a kept prop plausibly capable of supporting a resting
+    product - see the module-level note above for why this is kind=="prop" and
+    disposition=="keep" only, never any other kind or disposition."""
+    if not isinstance(obj, dict):
+        return False
+    if obj.get("kind") != "prop" or obj.get("disposition") != "keep":
+        return False
+    description = (obj.get("description") or "").lower()
+    return any(kw in description for kw in _SUPPORT_SURFACE_KEYWORDS)
+
+
+def find_supported_placement_bbox(objects, min_width=MIN_PLACEMENT_WIDTH,
+                                   min_height=MIN_PLACEMENT_HEIGHT,
+                                   placement_height=PLACEMENT_HEIGHT):
+    """Finds a placement region that rests directly on top of a real, kept support
+    surface - never the largest unoccupied gap for its own sake (see the module-level
+    note above for why that first approach was wrong). Returns the best candidate
+    [x, y, w, h] or None when no such region exists (whether because there is no
+    support-shaped kept prop at all, or every candidate near one is too small/occupied).
+
+    For each support-classified object (_is_support_surface), the candidate band sits
+    immediately above its own top edge, spanning exactly `placement_height` (clipped
+    to the support's own top edge distance from the frame's top, y=0, if that's
+    smaller) - never taller, even when more empty space is available above: a fixed,
+    product-plausible height, not "however much room happens to be free." Within the
+    support's OWN horizontal footprint only (never spilling past its edges - resting
+    ON a table means staying within the table, not floating beside it), every other
+    object whose bbox intersects this band contributes its own x-edges as additional
+    cut points, so the search for a free sub-interval never guesses at a boundary
+    already implied by real geometry. A sub-interval qualifies only when it is both
+    at least `min_width` wide and, combined with `placement_height`, does not overlap
+    ANY existing object's bbox (checked via _bboxes_overlap - the support object
+    itself is never flagged this way, since the candidate's bottom edge exactly
+    touches, never crosses, the support's own top edge).
+
+    Among all qualifying candidates (across every support object), the largest by
+    area wins; ties break by greater height, then by smaller x0, for a fully
+    deterministic result independent of dict/list ordering quirks.
+
+    Re-run against the real ad 1567146038752995 blueprint that motivated this fix (one
+    person, substitute, bbox [0.15,0.05,0.72,0.95]; one sofa, keep, bbox
+    [0.0,0.35,1.0,0.65]) at the default thresholds: finds exactly one candidate,
+    [0, 0.15, 0.15, 0.20] - resting on the sofa's own top edge, confined to the
+    sofa's left arm, clear of the person entirely. A materially different, better-
+    grounded answer than the area-maximising first version's [0, 0, 0.15, 0.35]."""
+    objects = objects or []
+    all_bboxes = [
+        obj.get("bbox") for obj in objects
+        if isinstance(obj, dict) and isinstance(obj.get("bbox"), (list, tuple))
+        and len(obj.get("bbox")) == 4
+    ]
+    candidates = []
+    for support in objects:
+        if not _is_support_surface(support):
+            continue
+        bbox = support.get("bbox")
+        if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+            continue
+        sx, sy, sw, sh = bbox
+        height = min(placement_height, sy)
+        if height < min_height:
+            continue
+        y0 = sy - height
+        xs = {sx, sx + sw}
+        for obj in objects:
+            other_bbox = obj.get("bbox") if isinstance(obj, dict) else None
+            if not isinstance(other_bbox, (list, tuple)) or len(other_bbox) != 4:
+                continue
+            ox, oy, ow, oh = other_bbox
+            if oy < sy and oy + oh > y0:  # intersects this candidate's y-band at all
+                if sx < ox < sx + sw:
+                    xs.add(ox)
+                if sx < ox + ow < sx + sw:
+                    xs.add(ox + ow)
+        xs = sorted(xs)
+        for i in range(len(xs) - 1):
+            x0, x1 = xs[i], xs[i + 1]
+            width = x1 - x0
+            if width < min_width:
+                continue
+            candidate = [x0, y0, width, height]
+            if any(_bboxes_overlap(candidate, b) for b in all_bboxes):
+                continue
+            candidates.append(candidate)
+    if not candidates:
+        return None
+    candidates.sort(key=lambda c: (-(c[2] * c[3]), -c[3], c[0]))
+    return candidates[0]
+
+
+def resolve_no_product_placement(blueprint, include_product):
+    """Decides whether the no-product-object case applies to this blueprint/run at
+    all, and if so, whether a supported placement exists. Returns (applies, bbox,
+    reason):
+    - applies=False, bbox=None, reason="not applicable": include_product is False, or
+      blueprint.objects is empty/absent (a legacy blueprint predating the objects
+      model - its own separate, already-existing ADD-branch fallback still applies,
+      untouched), or at least one kind=="product" object already exists (the ordinary
+      substitute/ADD-from-observed-composition paths already cover this).
+    - applies=True, bbox=[x,y,w,h], reason="ok": no product object exists, but
+      find_supported_placement_bbox found a real, support-anchored region - the
+      caller should thread this bbox into build_image_prompt's own placement clause.
+    - applies=True, bbox=None, reason=<why>: no product object exists AND no
+      supported placement could be found - the caller must skip this ad rather than
+      generate an invented scene (see this module's own top-level note for the live
+      evidence this is based on)."""
+    objects = blueprint.get("objects") if blueprint else None
+    if not include_product or not objects:
+        return False, None, "not applicable"
+    if any(isinstance(obj, dict) and obj.get("kind") == "product" for obj in objects):
+        return False, None, "not applicable"
+    bbox = find_supported_placement_bbox(objects)
+    if bbox is None:
+        return True, None, (
+            "include_product is True and the reference has no product object, but no "
+            "region large enough to hold one rests on a real, kept support surface - "
+            "skipping rather than inventing furniture or floating the bottle in "
+            "empty space."
+        )
+    return True, bbox, "ok"
+
+
+def _no_product_placement_clause(bbox):
+    """The explicit placement instruction for the no-product-object case - only ever
+    composed when resolve_no_product_placement found a real, support-anchored bbox.
+    States the computed position as a fact, never left for the model to invent, and
+    is equally explicit about what must NOT change or appear: every existing object
+    stays exactly as positioned/framed, and no new furniture, surface, or prop may be
+    introduced to hold the product - the exact two failures confirmed live (a woman
+    cropped down to legs to make room; an invented side table and an invented tray)."""
+    x, y, w, h = bbox
+    return (
+        "PRODUCT PLACEMENT (STRICT, NO PRODUCT OBJECT IN THIS REFERENCE): this "
+        "reference has no product in frame, but a Besque product still belongs in "
+        f"the output - place it at bbox {[x, y, w, h]} (this exact position and "
+        "scale, computed from the reference's own existing object positions, never "
+        "left for you to judge from the pixels). This region was chosen because it "
+        "rests directly on a real surface already present in the scene - place the "
+        "product resting there naturally, not floating. Every object in the SCENE "
+        "OBJECTS inventory above keeps its own position and framing EXACTLY as "
+        "listed - do not crop, resize, reposition, or recompose anything to make "
+        "room for the product; the space at this bbox is already clear. Do NOT "
+        "introduce any new furniture, surface, tray, table, or prop to hold the "
+        "product - it rests on what is already in the scene, nothing added to carry "
+        "it. "
+    )
 
 
 def _composite_gate(blueprint, include_product=True):
@@ -3173,6 +3438,37 @@ DEFAULT_STYLE_GUIDANCE = "Style: clean, editorial, aspirational, natural light. 
 # ignoring the reference's text styling entirely.
 
 
+def _cutout_authority_framing():
+    """Native path only (2026-08-19, native-identity fix): the product cutout (a real,
+    background-removed photograph of the actual Besque bottle) was already being
+    attached as an image Part alongside any other configured product reference photos
+    (2026-08-16), but with no framing distinguishing it from them - it fell into the
+    same generic "reference product photo" bucket _reference_framing() already gives
+    the whole reference_images list. Confirmed live, four ads on 2026-08-19 (21:37
+    among them): Gemini invented a wholly wrong bottle - wrong typeface, no gold
+    border bands, no MAGIC wordmark, wrong cert icons - with _bottle_identity_clause/
+    _bottle_geometry_clause BOTH present in the prompt. Text-only identity facts do
+    not reliably bind on the image path - the same class of failure CLAUDE.md
+    documents repeatedly (testimonials, disclaimers, the illustrated-bottle leak). The
+    structural fix, same shape as every prior instance of this pattern: give Gemini
+    the real pixels, not just words, and say explicitly which is authoritative for
+    what. Only meaningful on the NATIVE path (suppress_bottle_identity/should_
+    composite False) - when Route B is compositing, the real cutout gets pasted in
+    directly after generation and Gemini is told not to draw a bottle there at all, so
+    there is nothing for an identity-authority framing to usefully bind to."""
+    return (
+        "ONE OF THE REFERENCE PRODUCT PHOTOS ABOVE IS A CLEAN, BACKGROUND-REMOVED "
+        "CUTOUT OF THE REAL BESQUE BOTTLE (STRICT, AUTHORITATIVE): treat it as ground "
+        "truth for everything a photograph shows better than words can - the exact "
+        "label artwork and wordmark, typeface, border/rule detail, certification "
+        "icons, and the collar/pump/cap's real colour and material finish. Match what "
+        "this image actually shows, never a generic or approximate version of it. The "
+        "BOTTLE GEOMETRY clause elsewhere in this prompt supplies proportions (numbers, "
+        "not pixels) - the two are complementary, never conflicting: geometry for "
+        "shape, this image for identity. "
+    )
+
+
 def _reference_framing(count):
     """Framing text placed after the reference image block(s). Explicit about multiple
     photos being the SAME bottle from different angles, not a product range - BRAND_RULES
@@ -3373,12 +3669,21 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
                     messaging_angle=None, realism=None, body_area=None, offer_text=None,
                     edit_mode=False, competitor_image_bytes=None, operator_instruction=None,
                     retheme_colours=True, critic_feedback=None, cta_text=None, panel_copy=None,
-                    testimonial=None, product_count=None, clone_mode=False, object_copy=None):
+                    testimonial=None, product_count=None, clone_mode=False, object_copy=None,
+                    no_product_placement_bbox=None):
     """Single-pass image generation from the blueprint. One image, no iteration.
     Saves to assets/<stem>_draft.png (stem = ad_id, or ad_id+angle if angle_slug is given)
     and returns the path. Returns None on failure. include_product/text_in_image/headline/
     subtext are forwarded to build_image_prompt/brand_rules - defaults reproduce today's
     behaviour exactly.
+
+    no_product_placement_bbox (2026-08-19): the caller's own pre-computed
+    resolve_no_product_placement/find_supported_placement_bbox result - forwarded
+    straight through to build_image_prompt, which composes it into an explicit
+    placement clause when given. This function never computes it and never decides
+    whether to fail an ad over it; by the time generate_image is called, the caller
+    (pipeline.process_ad) must already have skipped rather than generate when the
+    no-product-object case applied and no supported placement existed.
 
     critic_feedback (2026-08-05, the corrective-retry loop): a list of short strings from
     a PRIOR call's output_critic.check_draft findings, forwarded straight to
@@ -3487,7 +3792,8 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
                                  realism=realism, critic_feedback=critic_feedback, cta_text=cta_text,
                                  panel_copy=panel_copy, testimonial=testimonial,
                                  product_count=product_count, clone_mode=clone_mode,
-                                 object_copy=object_copy, suppress_bottle_identity=should_composite)
+                                 object_copy=object_copy, suppress_bottle_identity=should_composite,
+                                 no_product_placement_bbox=no_product_placement_bbox)
     stem = _draft_stem(ad_id, angle_slug)
     # OCCLUDE_PERSON (Item 1, 2026-08-12): applied to the IN-MEMORY bytes only, right
     # before they're attached to Gemini - never to the on-disk image_path fetch, which
@@ -3510,6 +3816,12 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
         # Defense in depth for rule 7's productless mode: the prompt already says no
         # product may appear, but don't also hand the model reference photos of one.
         reference_images = (reference_images or []) if include_product else []
+        # cutout_bytes initialised here (2026-08-19), not just inside the conditional
+        # below, so the cutout-authority-framing check further down (which reads it
+        # regardless of whether that conditional ever ran) always sees a real value -
+        # None when the cutout was never fetched (illustrated style, or
+        # include_product=False), never a NameError.
+        cutout_bytes = None
         # Product cutout (2026-08-16): an EXTRA reference Part, alongside the product's
         # own configured reference photos - every non-illustrated generate run, gated
         # the same way (include_product) plus a style check. Illustrated is excluded
@@ -3559,6 +3871,13 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
                 image_parts += [genai_types.Part.from_bytes(data=img, mime_type="image/png")
                                 for img in reference_images]
                 framing += _reference_framing(len(reference_images))
+            # Cutout authority framing (2026-08-19): only on the native path - see
+            # _cutout_authority_framing's own docstring for why compositing doesn't
+            # need it. cutout_bytes is truthy only when the fetch above actually
+            # succeeded, so a fetch failure (see _fetch_product_cutout_bytes' own
+            # silent-failure fix) never claims a photo is attached that isn't.
+            if cutout_bytes and not should_composite:
+                framing += _cutout_authority_framing()
             contents = image_parts + [framing + prompt]
         else:
             contents = prompt
