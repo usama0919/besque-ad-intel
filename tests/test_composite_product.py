@@ -220,6 +220,40 @@ def test_composite_gate_does_not_reject_when_a_text_object_serves_the_product():
     assert proceed is True
 
 
+def test_composite_gate_rejects_when_only_the_person_object_mentions_holding():
+    """Held-product gate fix (2026-08-19), confirmed live on ad 1252553972969618: the
+    product's own description and every prop were clean, but the PERSON object's
+    description read "...holding the product beside her face" - the gate previously
+    only inspected the product's own description and kind=="prop" objects naming it
+    via serves_object_id, so this passed through and Route B pasted a free-standing
+    bottle that ended up floating over the hand in the generated draft."""
+    bp = _clean_blueprint()
+    bp["objects"].append({
+        "object_id": "obj_person", "kind": "person",
+        "description": "Young woman with blonde wavy hair, holding the product beside her face",
+        "ownership": "person", "carries_brand_mark": False, "role": "hero",
+        "persuasive_function": "demonstrates the product", "disposition": "substitute",
+    })
+    proceed, reason, obj = generate_image_prompt._composite_gate(bp)
+    assert proceed is False
+    assert "obj_person" in reason
+    assert "held/gripped" in reason
+
+
+def test_composite_gate_does_not_reject_when_person_description_has_no_grip_language():
+    """Control for the test above - an ordinary person description with no grip-shaped
+    language must not trip the new broadened check."""
+    bp = _clean_blueprint()
+    bp["objects"].append({
+        "object_id": "obj_person", "kind": "person",
+        "description": "Young woman with blonde wavy hair, smiling at the camera",
+        "ownership": "person", "carries_brand_mark": False, "role": "hero",
+        "persuasive_function": "demonstrates the product", "disposition": "substitute",
+    })
+    proceed, reason, obj = generate_image_prompt._composite_gate(bp)
+    assert proceed is True
+
+
 def test_composite_gate_rejects_when_lighting_is_hard():
     bp = _clean_blueprint(background={"surface": "sand", "colour": "beige",
                                        "light": "harsh direct sunlight casting hard shadows"})

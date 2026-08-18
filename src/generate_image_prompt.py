@@ -1767,7 +1767,9 @@ def _composite_gate(blueprint, include_product=True):
        product (serves_object_id is only ever populated on text/prop objects per
        schema/blueprint.schema.json, never "person" - a hand is always tracked as a
        prop, so this is the complete structural check for "something is holding it"),
-       AND the product's own description carries no grip-shaped language. A held
+       AND the product's own description carries no grip-shaped language, AND no
+       OTHER object's description carries grip-shaped language either, whatever that
+       object's kind (2026-08-19, held-product gate fix - see below). A held
        bottle needs a grip shadow following finger contours and a scale relationship
        to a hand that a flat pasted cutout cannot produce convincingly (see the Phase 1
        diagnostic's Pillow-feasibility assessment).
@@ -1780,7 +1782,24 @@ def _composite_gate(blueprint, include_product=True):
     notes as a known residual risk, not silently folded into this function.
 
     include_product=False short-circuits to proceed=False before inspecting anything
-    else - there is no product to composite when the run itself doesn't want one."""
+    else - there is no product to composite when the run itself doesn't want one.
+
+    Held-by-another-object language (2026-08-19, held-product gate fix): the original
+    gate 2 only ever inspected the PRODUCT object's own description and kind=="prop"
+    objects naming it via serves_object_id - it never looked at any OTHER object's
+    description, including the PERSON's. Confirmed live, ad 1252553972969618: obj_01
+    (kind=="person") read "...holding the product beside her face", the product's own
+    description and every prop were clean, and this gate returned True - Route B
+    pasted a free-standing bottle that ended up floating over the hand shown in the
+    generated draft, because nothing told Route B the reference actually showed the
+    product held. Fixed by scanning EVERY other object's description (whatever its
+    kind - person, prop, text, anything) for the SAME _GRIP_DESCRIPTION_KEYWORDS
+    already used for the product's own description - deliberately broad rather than
+    trying to confirm the description names THIS specific product, since free text has
+    no reliable way to disambiguate "holding it" from "holding something else" short
+    of a keyword match, and erring toward skipping Route B is the safe direction:
+    Gemini draws the bottle natively (with the geometry/identity clauses, unsuppressed)
+    when this gate fails, which is the correct path for a genuinely held placement."""
     if not include_product:
         return False, "include_product is False", None
     objects = blueprint.get("objects") or []
@@ -1811,6 +1830,26 @@ def _composite_gate(blueprint, include_product=True):
         return False, (
             f"object {holder.get('object_id')!r} (prop) serves this product - held or "
             f"staged, not free-standing"
+        ), None
+    # Held-by-another-object language (2026-08-19, held-product gate fix): the two
+    # checks above only ever look at the PRODUCT object's own description and
+    # kind=="prop" objects naming it via serves_object_id - neither catches a
+    # reference where the holding is described on a DIFFERENT object instead (a
+    # person's description reading "...holding the product beside her face" is the
+    # confirmed live shape, ad 1252553972969618). Scans every OTHER object's
+    # description, whatever its kind, for the same grip-shaped keywords - see this
+    # function's own docstring for why this is deliberately broad rather than trying
+    # to confirm the description names THIS specific product.
+    other_holder = next(
+        (obj for obj in objects
+         if isinstance(obj, dict) and obj.get("object_id") != object_id
+         and any(kw in (obj.get("description") or "").lower() for kw in _GRIP_DESCRIPTION_KEYWORDS)),
+        None,
+    )
+    if other_holder is not None:
+        return False, (
+            f"object {other_holder.get('object_id')!r} ({other_holder.get('kind')!r}) "
+            f"description reads as held/gripped: {other_holder.get('description')!r}"
         ), None
     light = ((blueprint.get("background") or {}).get("light") or "").lower()
     if any(kw in light for kw in _HARD_LIGHT_KEYWORDS):
