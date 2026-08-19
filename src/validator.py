@@ -70,9 +70,22 @@ def validation_error(blueprint: dict) -> str | None:
     first (schema shape, required fields, bbox type/bounds) - only reaches the
     duplicate-object_id check (see _duplicate_object_ids_error) once the blueprint is
     already schema-valid, so that check never has to guard against `objects` being
-    absent or malformed itself."""
+    absent or malformed itself.
+
+    2026-08-19 (B2): the message now names the failing field. `e.message` alone
+    (e.g. "None is not of type 'string'") never includes the path to the field that
+    failed - jsonschema keeps that on a SEPARATE attribute (`e.absolute_path`, or its
+    ready-made string rendering `e.json_path`, e.g. "$.social_proof.owner" or
+    "$.objects[3].typography.colour") that this function previously discarded. Every
+    caller of this function (deconstruct.py's log line, and the retry system prompt
+    built from `BlueprintValidationError.validation_error`) only ever had the bare
+    message to work with, so a genuinely different failing field on attempt 2 could
+    - and did, live - produce the exact same generic string as attempt 1, giving the
+    model nothing to act on. `e.json_path` is jsonschema's own formatting, not
+    hand-rolled here, so this can't drift from what the pinned jsonschema version
+    (see requirements.txt) actually produces."""
     try:
         validate(instance=blueprint, schema=_SCHEMA)
     except ValidationError as e:
-        return e.message
+        return f"{e.message} (at {e.json_path})"
     return _duplicate_object_ids_error(blueprint)

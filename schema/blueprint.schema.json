@@ -147,7 +147,10 @@
       "type": ["object", "null"],
       "properties": {
         "type": { "type": "string" },
-        "owner": { "type": "string" }
+        "owner": {
+          "type": ["string", "null"],
+          "description": "2026-08-19 (B1, schema/prompt contradiction fix): deconstruct.py's BLUEPRINT_PROMPT ('owner is the brand/body the proof belongs to, or null') has always told the model null is a legitimate value here - the plain 'string' type below never allowed it, causing a live, non-deterministic schema-validation failure ('None is not of type string') with no other change to the input. offer.type/value/mechanic were audited for the same contradiction and are NOT changed - the prompt documents only the whole `offer` object as nullable ('or null if no offer'), never these three sub-fields individually, so loosening them would not be matching a documented contract, just guessing."
+        }
       }
     },
     "layout_detail": {
