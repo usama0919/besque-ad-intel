@@ -93,15 +93,20 @@ of the three applies to every new failure branch — "it's logged" is not one of
    finding is never lost to a failure (an errored/no-image/skipped retry, or a critic that
    never ran), but IS correctly cleared when a later attempt actually completes and comes
    back with a genuinely clean verdict of its own.
-5. **Open, not fixed: Route B compositing failure** (`generate_image_prompt.py:4020`) — a
-   Pillow/compositing exception during the real-cutout paste falls back to Gemini's own
-   uncomposited render with only a `log.warning`; none of the three. An operator sees a
-   bottle that may be structurally wrong with no signal anywhere that compositing was
-   supposed to happen but silently didn't.
-6. **Open, not fixed: GCS draft-upload failure** (`generate_image_prompt.py:4033`) — a
-   failed bucket upload after the local file already exists is caught by a bare `print()`,
-   not even `log.warning`; none of the three. On Cloud Run, where local disk may be
-   ephemeral, this can mean the draft becomes unreachable after the container recycles,
+5. **Open, not fixed: Route B compositing failure** (`generate_image_prompt.py:4197-4200`,
+   line numbers corrected 2026-08-19 after D2 shifted this whole file — was cited as
+   `:4020` before that) — a Pillow/compositing exception during the real-cutout paste
+   falls back to Gemini's own uncomposited render with only a `log.warning`; none of the
+   three. An operator sees a bottle that may be structurally wrong with no signal
+   anywhere that compositing was supposed to happen but silently didn't. D2 (2026-08-19,
+   `46005f5`) turned this into a per-instance loop (one try/except per admitted product
+   object, so one instance's failure doesn't undo an already-successful sibling's paste)
+   but did NOT fix the underlying defect — still a bare `log.warning`, still open.
+6. **Open, not fixed: GCS draft-upload failure** (`generate_image_prompt.py:4206-4212`,
+   same line-number correction as item 5 above — was cited as `:4033`) — a failed bucket
+   upload after the local file already exists is caught by a bare `print()`, not even
+   `log.warning`; none of the three. On Cloud Run, where local disk may be ephemeral,
+   this can mean the draft becomes unreachable after the container recycles,
    indistinguishable from a successful save until someone goes looking.
 7. **Fixed 2026-08-19: hallucinated text objects reaching build_image_prompt undetected**
    — `deconstruct.py` sends the ad's scraped Facebook caption to Claude alongside the
@@ -2586,3 +2591,229 @@ all - do not assume "I mocked the functions I could think of" is equivalent to
 
 Both new tests pass on the real (unmutated) code, confirmed via pytest (not a standalone
 script) - safe, since `conftest.py`'s port-5433 override was active for that run.
+
+## 2026-08-19 — SESSION 3 (late): bottle geometry attempts A/B/C exhausted; the
+## cutout's real defect found (a baked-in shadow, not contamination) and fixed;
+## Route B gate widened (D2)
+
+**Commits, in order, all on `feat/dynamic-edit-system`, none merged/deployed**:
+`96612d8` (B1/B2), `c08dd80` (typography trim), `fd312b2` (bottle geometry attempt
+A), `d394e9c` (cutout edge decontamination), `a9eb728` (cutout shadow strip),
+`46005f5` (D2, gate 1 widening).
+
+### B1/B2 (`96612d8`) and the typography trim (`c08dd80`) — brief, not detailed
+elsewhere in this file
+- `schema/blueprint.schema.json`: `social_proof.owner` is now `["string","null"]` -
+  `deconstruct.py`'s own `BLUEPRINT_PROMPT` had always told the model this field may
+  be null; the schema never allowed it, producing a live, non-deterministic "None is
+  not of type 'string'" failure with no other change to the input. `offer.type`/
+  `value`/`mechanic` were audited for the same contradiction and deliberately NOT
+  loosened - the prompt only documents the containing `offer` object as nullable,
+  never those three sub-fields.
+- `src/validator.py:74-77`: `validation_error()` now appends `e.json_path`
+  (jsonschema's own path rendering, e.g. `$.social_proof.owner`) to the returned
+  message - previously bare `e.message`, which never named the failing field, so a
+  retry hitting a DIFFERENT field than attempt 1 could produce the identical
+  generic string. Confirmed working live this session on a real, different failure
+  (`$.claims[2]` - see the deconstruct section below).
+- `deconstruct.py:55`'s typography instruction now omits the `typography`
+  sub-object for on-pack competitor-branding text and for `award`/`disclaimer`
+  purpose text - these always resolve to `"drop"` and `_object_typography_clause`
+  (the only consumer of `objects[].typography`) never reads typography for a
+  dropped object, so generating it there was pure output-budget waste. States the
+  OUTCOME (on-pack branding/award/disclaimer) rather than the full three-field
+  predicate, on the reasoning that a shorter, concrete instruction binds more
+  reliably than asking the model to evaluate a boolean expression - accepted
+  trade-off: a branded/"other" object that isn't literally on-pack still gets
+  wasted typography, but nothing needed ever goes missing. **Live-verified this
+  session and confirmed NOT to fix ad `1034475782796626`**: re-sent through current
+  code, same `output_tokens=4096`, `raw_text len=13199` (within the original
+  13109-13361 truncation range) - see "the shared retry budget" below for why this
+  run's own attempt 1 failure matters beyond this one ad.
+
+### The bottle — three attempts, two now dead, written up so nobody retries them
+
+**Attempt A** (`fd312b2`, `_cutout_authority_framing`, `generate_image_prompt.py:3622`):
+rewrote the framing so the attached product-cutout photo is authoritative for
+proportions/silhouette/hardware form, not just identity (label/wordmark/colour) -
+removed the sentence that had explicitly EXCLUDED shape from the photo's authority
+("geometry for shape, this image for identity"). `_bottle_geometry_clause` itself
+untouched, restated as a cross-check rather than sole authority.
+
+**Verified insufficient, live, same session**: 3 native-path samples (out of 9 raw
+candidates across 3 batches - see the yield note below for where the other 6 went).
+Measured via a structured vision call against the 4.33 target: **4.1, 3.85, 3.1** -
+all three biased LOW, one (3.1) a visibly squat, clearly-wrong bottle. A
+prompt-only reweighting that reduces error but doesn't bind reliably is not a fix,
+by the operator's own explicit standard. **`fd312b2` stays in the tree** - it's a
+real improvement over the wording it replaced (which actively told the model to
+ignore the photo for shape) and does no harm; it's just not sufficient alone.
+
+**Attempt B** (`src/bottle_geometry_check.py` - written, NOT wired anywhere, NOT
+committed as anything beyond stage 1 per explicit instruction not to build stage
+2): a schema-constrained vision call asking for four fractional coordinates
+(`top_y`/`base_y`/`body_left_x`/`body_right_x`) plus a pump-vs-cap boolean,
+calibrated in the prescribed order:
+1. Ground truth (the raw cutout PNG) - **never actually measured**. Blocked by
+   expired ADC (`RefreshError`) on every attempt this session.
+2. The three attempt-A samples vs. the by-eye estimates (4.1/3.85/3.1): the tool
+   returned **3.44, 3.08, 4.79** - not the same numbers, and on the one sample
+   everyone agrees was visibly wrong (3.1 by eye), the tool's own measurement came
+   back 4.79, ABOVE the 4.33 target - the opposite verdict from a human looking at
+   the same image.
+3. Noise floor: the SAME clean, unoccluded image, asked 3 times with nothing
+   changed, returned **3.54, 3.21, 3.21** - roughly a 10% spread on the easiest
+   possible input (no occlusion, no ambiguity).
+
+**Attempt B is dead.** A measurement tool that inverts the verdict on the one case
+with an unambiguous by-eye answer, with a ~10% self-noise floor on its best-case
+input, cannot be trusted to threshold anything - the instrument failed calibration
+before ever reaching the ground-truth test that would have been the deciding one.
+Do not extend this design (more samples, a looser threshold) without first fixing
+why its own coordinate identification disagrees with itself by ~10% on an
+unoccluded image and inverts on a distorted one - a different, harder problem than
+picking a number.
+
+**Attempt C** (a corrective retry feeding attempt B's own measured deviation back
+as an instruction, e.g. "previous render measured 3.1 against 4.33, regenerate
+taller and narrower" - proposed, never built) **is dead by dependency, not by its
+own evidence** - it needs attempt B's measurement as input, and attempt B doesn't
+produce a trustworthy number. Nothing about attempt C's own idea was disproven;
+there was never a chance to test it. A geometry-aware retry, if revisited, needs a
+genuinely different, reliable measurement underneath it first.
+
+**Sample-yield note** (for costing any future live verification): across 3 raw
+batches (9 candidates) aimed at 4 native-path samples, only 3 landed - the rest
+went to 2 deconstruct `max_tokens` truncations, 2 transient Anthropic network
+failures (4 retries each, gave up), 1 no-product-placement skip, and (batch 3) an
+expired-ADC refusal before any paid call. Native-path incidence itself was high
+(3/3 in batch 1, matching 4/5 of the artifacts audited earlier the same session) -
+the bottleneck was deconstruct/network/ADC reliability, not the composite gate.
+
+### The cutout — the "white matte" was never contamination
+
+Direct pixel inspection this session found the visible defect at the base is a
+**baked-in drop-shadow/reflection graphic**, not alpha-blend background
+contamination - confirmed by rendering the same region against both a white and a
+black backdrop and seeing the identical grey smudge against both (proof of real
+semi-transparent content, not background bleeding through). `composite_product`
+(`generate_image_prompt.py:2429`) already draws its OWN scene-matched contact
+shadow (`_draw_contact_shadow`, called at `:2476`, immediately before the paste at
+`:2477`) - this baked-in one has been layering underneath every composite
+regardless, a shadow photographed under the original studio's fixed lighting that
+can never match an arbitrary generated scene's own light direction.
+
+Genuine, separate, narrower edge-blend contamination WAS also real (confirmed at a
+lateral crossing on the bottle's straight body) - fixed first, its own commit
+(`d394e9c`), via `src/asset_prep.decontaminate_cutout_edge` (standard
+alpha-decontamination + 1px erosion of the residual ring). This was NOT the main
+visible defect, just a real, smaller one found on the way to the actual one.
+
+The shadow strip (`a9eb728`, `src/asset_prep.find_widest_row`/`strip_below_row`)
+locates the bottle's TRUE base geometrically - the row of maximum opaque footprint,
+since a surface-resting object's own silhouette can only get narrower below its
+point of contact, never wider, so the widest row is the last row that can still be
+the object - and zeroes alpha below it without cropping the canvas. **Caught a real
+bug in the first version of this same mechanism, same session**: an UNSCOPED search
+over the whole image found row 39, near the very TOP, not the base - because the
+bottle's own pump lever spout is wider than the base
+(`_bottle_geometry_clause`'s own "overhanging... by 0.38 body-widths"). Fixed by
+requiring the caller to scope the search (`y_start`) to the region where the
+base/shadow transition is actually expected, locked by a dedicated regression test
+reproducing this exact failure rather than silently patched.
+
+Confirmed explicitly, not assumed, that this does not shift the geometry
+`_bottle_geometry_clause`'s 4.33 constant depends on: every pixel at or above the
+cutoff is byte-identical before/after (checked directly against the real asset, 0
+mismatches), the topmost row (pump tip) is unchanged, and a mid-body width sample
+is unchanged.
+
+**Status — GCS upload still pending, this is the important operational fact for
+next session**: `product_assets/besque_magic_body_oil_cutout_v3_shadow_stripped.png`
+(both fixes applied, chained on top of `v2`) is committed and sitting in the repo.
+Upload to GCS failed every time it was attempted this session (`RefreshError:
+Reauthentication is needed`, checked 4 separate times including right before this
+note was written) - needs `gcloud auth application-default login`, then upload
+`v3` to the bucket, then update `PRODUCT_CUTOUT_GCS_KEY` (`generate_image_prompt.py:1794`,
+unchanged this session) to point at it. **Until that happens,
+`_fetch_product_cutout_bytes()` still fetches the ORIGINAL, uncorrected asset in
+production** - none of this session's cutout work is live yet.
+
+### D2 — Route B gate widened, scope exact
+
+`_composite_gate` (`generate_image_prompt.py`) now admits more than one
+`kind=="product"`/`disposition=="substitute"` object ONLY when
+`deconstruct.resolve_product_group_dispositions` confirms every one of them is
+part of the same `same_product_as`-linked group (multiple instances of ONE product
+line - e.g. a standard + jumbo size of the same product). Genuinely distinct
+competitor products still reject exactly as before - mutation-verified live
+(disabling the confirmation check let two differently-branded, unlinked products
+wrongly proceed).
+
+**Deliberately untouched, per explicit instruction, and why**: the held/gripped
+gate and the general (non-instance) bbox-overlap gate. Front/behind is genuinely
+unrecorded anywhere in this schema - grepped `schema/blueprint.schema.json` for any
+z-order/layer/depth field, zero matches - and there is no reliable way to infer it
+from an object's `role` or any other existing field. A `role=="environment"`-based
+heuristic was considered and explicitly rejected: guessing wrong pastes a bottle
+over a face or a card with no way to verify the guess afterward, worse than the
+current "reject and fall back to native" behaviour. This is why gate 1 (product
+count) could be safely widened while held/occlusion stay conservative - the
+multi-instance case had an ALREADY-TRUSTED mechanical signal
+(`same_product_as`, used elsewhere for the identical question) to defer to;
+front/behind has no equivalent signal anywhere in this codebase today.
+
+Gates 2-4 now run per admitted instance, not once - a linked group where ONE
+instance is held rejects the WHOLE group, never a partial composite. Sibling
+instances are explicitly excluded from occluding each other (two instances of the
+identical Besque asset overlapping reads as "one bottle in front of another of the
+same product," not the foreign-object case gate 3 exists to catch) - a documented
+judgement call, not an automatic implication of "gates run independently."
+
+### Deconstruct — three findings this session, none fixed
+
+- **`max_tokens=4096` (`deconstruct.py:1067`) has never been empirically measured** -
+  its own code comment says so directly ("a reasoned safety margin, NOT an
+  empirically measured fix"). The typography trim (`c08dd80`) reduces output for
+  one specific object category but was confirmed NOT to fix the original
+  truncating ad live this session - the ceiling itself remains a guess.
+- **Claims enum gap, found live this session, NOT fixed**: `deconstruct.py:62`'s
+  `claims` field only allows `efficacy/sensory/ingredient/social_proof/offer` - a
+  supplement pouch covered in certification badges produced `'certification' is
+  not one of [...] (at $.claims[2])` (B2's own path-naming confirmed working, live,
+  on this exact failure). Needs either a schema addition or a prompt correction -
+  not decided, not built.
+- **The retry budget is SHARED across unrelated failure types, and this cost a
+  real retry this session**: `_MAX_DECONSTRUCT_ATTEMPTS=2` is ONE budget for the
+  whole call, not one-per-failure-class. On the live re-verification of ad
+  `1034475782796626`, attempt 1 failed on the claims-enum bug above (unrelated to
+  truncation) - which consumed the ONE retry - so when attempt 2 then hit the
+  ORIGINAL `max_tokens` truncation, there was no attempt 3 left to recover with. A
+  future fix to either bug in isolation could still leave an ad failing simply
+  because the OTHER bug fired first and burned the shared retry - worth
+  remembering before declaring either fix "done" from a single test run.
+
+### `_draft.png` has no version backup on the native path — reconfirmed, and why it
+mattered tonight
+
+Already documented under the FORCE_REPROCESS section above; restated here because
+it drove real operational decisions this session, not just a repeated fact:
+`generate_image` rewrites `assets/<ad_id>_draft.png` at the same key on every
+call, no version suffix, no backup - only `edit_image` versions. This is why every
+live-verification candidate this session was explicitly screened
+(`dedupe.get_artifact` plus a local-file check) for "no existing artifact row, no
+existing local draft" BEFORE running Generate on it - running Generate on an
+already-drafted ad would have silently destroyed the exact evidence being compared
+against, with no way to recover it afterward.
+
+### Operational: the dashboard header clock is NOT a generation timestamp
+
+`templates/dashboard.html:218` (`<div class="sub" id="clock">`) plus `:1396-1397`
+(`function tick(){...new Date().toLocaleString()...}`, `setInterval(tick,1000)`) -
+this is a live, continuously-ticking CURRENT-time clock in the page header,
+unrelated to any specific ad or generation event. It updates every second from the
+moment the page loads, not from when any draft finished generating. The per-card
+timestamp that DOES reflect a real generation (`a.created_at`,
+`dashboard.html:863`) is a different element entirely, sourced from the artifact
+row's own DB timestamp. Don't read the header clock as "when this batch
+finished" - it never was that.
