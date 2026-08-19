@@ -3536,33 +3536,56 @@ DEFAULT_STYLE_GUIDANCE = "Style: clean, editorial, aspirational, natural light. 
 
 
 def _cutout_authority_framing():
-    """Native path only (2026-08-19, native-identity fix): the product cutout (a real,
-    background-removed photograph of the actual Besque bottle) was already being
-    attached as an image Part alongside any other configured product reference photos
-    (2026-08-16), but with no framing distinguishing it from them - it fell into the
-    same generic "reference product photo" bucket _reference_framing() already gives
-    the whole reference_images list. Confirmed live, four ads on 2026-08-19 (21:37
-    among them): Gemini invented a wholly wrong bottle - wrong typeface, no gold
-    border bands, no MAGIC wordmark, wrong cert icons - with _bottle_identity_clause/
-    _bottle_geometry_clause BOTH present in the prompt. Text-only identity facts do
-    not reliably bind on the image path - the same class of failure CLAUDE.md
-    documents repeatedly (testimonials, disclaimers, the illustrated-bottle leak). The
-    structural fix, same shape as every prior instance of this pattern: give Gemini
-    the real pixels, not just words, and say explicitly which is authoritative for
-    what. Only meaningful on the NATIVE path (suppress_bottle_identity/should_
-    composite False) - when Route B is compositing, the real cutout gets pasted in
-    directly after generation and Gemini is told not to draw a bottle there at all, so
-    there is nothing for an identity-authority framing to usefully bind to."""
+    """Native path only (2026-08-19, native-identity fix; extended 2026-08-19, attempt
+    A on the shape gap). The product cutout (a real, background-removed photograph of
+    the actual Besque bottle) was already being attached as an image Part alongside
+    any other configured product reference photos (2026-08-16), but with no framing
+    distinguishing it from them - it fell into the same generic "reference product
+    photo" bucket _reference_framing() already gives the whole reference_images list.
+    Confirmed live, four ads on 2026-08-19 (21:37 among them): Gemini invented a
+    wholly wrong bottle - wrong typeface, no gold border bands, no MAGIC wordmark,
+    wrong cert icons - with _bottle_identity_clause/_bottle_geometry_clause BOTH
+    present in the prompt. Text-only identity facts do not reliably bind on the image
+    path - the same class of failure CLAUDE.md documents repeatedly (testimonials,
+    disclaimers, the illustrated-bottle leak). The fix: give Gemini the real pixels,
+    not just words, and say explicitly which is authoritative for what.
+
+    Attempt A revision (2026-08-19, same day): the first version of this framing
+    explicitly EXCLUDED shape from the photo's authority ("geometry for shape, this
+    image for identity") and handed shape entirely to _bottle_geometry_clause's text
+    - live evidence since (artifacts 1382-1386) shows label artwork correct while
+    proportions and hardware are wrong, with that geometry clause byte-identical
+    across correct and wrong renders, confirming the text-only clause was never
+    binding on its own. This revision makes the photo authoritative for proportions/
+    silhouette/hardware FORM too, alongside identity - _bottle_geometry_clause's own
+    numbers are UNCHANGED and still composed into the prompt (see build_image_prompt),
+    now stated here as a cross-check on the photo rather than a separate, sufficient
+    source for shape. This is still a WORDING change riding on an already-attached
+    real photo, not a new structural mechanism (unlike Route B compositing, which
+    removes drawing from Gemini entirely) - it can fail the same way any prompt-only
+    reweighting can, which is why this is called "attempt A" and not treated as
+    resolved without a live pixel measurement (see the verification plan in the
+    commit that introduces this).
+
+    Only meaningful on the NATIVE path (suppress_bottle_identity/should_composite
+    False) - when Route B is compositing, the real cutout gets pasted in directly
+    after generation and Gemini is told not to draw a bottle there at all, so there is
+    nothing for an identity-authority framing to usefully bind to."""
     return (
         "ONE OF THE REFERENCE PRODUCT PHOTOS ABOVE IS A CLEAN, BACKGROUND-REMOVED "
         "CUTOUT OF THE REAL BESQUE BOTTLE (STRICT, AUTHORITATIVE): treat it as ground "
         "truth for everything a photograph shows better than words can - the exact "
         "label artwork and wordmark, typeface, border/rule detail, certification "
-        "icons, and the collar/pump/cap's real colour and material finish. Match what "
-        "this image actually shows, never a generic or approximate version of it. The "
-        "BOTTLE GEOMETRY clause elsewhere in this prompt supplies proportions (numbers, "
-        "not pixels) - the two are complementary, never conflicting: geometry for "
-        "shape, this image for identity. "
+        "icons, the collar/pump/cap's real colour and material finish, and - just as "
+        "much - the bottle's actual proportions, silhouette, and the physical form of "
+        "the collar and pump hardware: how tall and narrow the bottle is, and how the "
+        "shoulder, collar, and pump stack against each other. Match what this image "
+        "actually shows, never a generic, approximate, or differently-proportioned "
+        "version of it. The BOTTLE GEOMETRY clause elsewhere in this prompt states "
+        "these same proportions as fixed numbers - read it as a cross-check "
+        "confirming what this photo already shows, never as a second, independent "
+        "source you could satisfy while drawing a bottle shaped differently from the "
+        "photo. "
     )
 
 

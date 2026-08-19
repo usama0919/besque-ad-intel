@@ -76,7 +76,18 @@ def test_native_path_attaches_cutout_and_labels_it_authoritative(monkeypatch, tm
     assert isinstance(contents, list)
     assert any(getattr(p, "inline_data", None) and p.inline_data.data == cutout_bytes for p in contents[:-1])
     assert "CLEAN, BACKGROUND-REMOVED CUTOUT OF THE REAL BESQUE BOTTLE" in contents[-1]
-    assert "geometry for shape, this image for identity" in contents[-1]
+    # 2026-08-19 (attempt A, shape gap): the photo is now authoritative for proportions/
+    # silhouette/hardware form too, not just identity - the old exclusion sentence
+    # ("geometry for shape, this image for identity") must be GONE, and the geometry
+    # clause's numbers must be reframed as a cross-check, never a separate sufficient
+    # source for shape.
+    assert "geometry for shape, this image for identity" not in contents[-1]
+    assert "the bottle's actual proportions, silhouette" in contents[-1]
+    assert "cross-check" in contents[-1]
+    # _bottle_geometry_clause itself is UNCHANGED and still composed into the prompt -
+    # this attempt only changes what the framing text says its ROLE is, never removes
+    # or edits the numbers themselves.
+    assert generate_image_prompt._bottle_geometry_clause() in contents[-1]
 
 
 def test_compositing_path_attaches_cutout_but_does_not_label_it(monkeypatch, tmp_path):
