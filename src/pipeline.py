@@ -900,6 +900,10 @@ def _regenerate_existing_draft(ad, angle_id, angle_slug, delta_instruction, shou
         ),
     }
 
+    # Hallucinated-text-object guard (2026-08-19): build_image_prompt itself applies
+    # deconstruct.drop_hallucinated_text_objects AND records the warning on what it
+    # drops, co-located in one place - no separate call needed here. See that
+    # function's own docstring (generate_image_prompt.py).
     rebuilt_prompt = generate_image_prompt.build_image_prompt(
         blueprint, product=product, include_product=include_product,
         text_in_image=text_in_image, headline=generated_copy.get("headline"),

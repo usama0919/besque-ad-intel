@@ -106,8 +106,28 @@ def reference_has_text_zone(blueprint):
     kind=="text" object whose text_purpose is headline/subtext/cta - the same three
     purposes the deleted structural_zones' sub_line/body_copy/cta zone_types used to mean,
     named more precisely now that text_purpose classifies by JOB rather than a generic
-    sub_line/body_copy split."""
+    sub_line/body_copy split.
+
+    REWIRED AGAIN 2026-08-19 (hallucinated-text-object fix): checks
+    deconstruct.blueprint_signals_no_in_image_text(blueprint) FIRST and returns False
+    unconditionally when it fires - the same blueprint-level "no text is baked into the
+    image at all" signal drop_hallucinated_text_objects uses to drop every kind=='text'
+    object, checked here too because this function answers exactly the question that
+    signal contradicts. Without this, a caller reading this function directly on a raw,
+    unfiltered blueprint (pipeline.py's element_provenance bookkeeping, at least -
+    see below) could see True from a hallucinated object's headline_verbatim/text_purpose
+    even though build_image_prompt's own guard will correctly drop that same object
+    moments later - a real, confirmed gap: pipeline._regenerate_existing_draft calls this
+    function directly on the blueprint BEFORE build_image_prompt's filter ever runs,
+    to decide element_provenance["text"] ("substituted" vs "added"). Left unfixed, that
+    bookkeeping could read "substituted" for an object the actual generation never
+    renders - the same record-vs-reality mismatch shape as the 2026-08-14
+    element_provenance.product="added" bug (CLAUDE.md). Checked before headline_verbatim/
+    objects, not after, because the "no in-image text" signal is a statement about the
+    WHOLE blueprint, not about any one field it might otherwise contradict."""
     blueprint = blueprint or {}
+    if deconstruct.blueprint_signals_no_in_image_text(blueprint):
+        return False
     if (blueprint.get("headline_verbatim") or "").strip():
         return True
     return _objects_have_text_purpose(blueprint.get("objects"), _TEXT_PURPOSE_ZONE_TYPES)
@@ -277,6 +297,42 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
     _bottle_identity_clause/_bottle_geometry_clause in every branch - see
     _no_product_placement_clause's own docstring for the live evidence (an invented
     side table, an invented tray) this replaces "ADD it somewhere" guesswork with."""
+    # Hallucinated-text-object guard (2026-08-19) - see deconstruct.drop_hallucinated_
+    # text_objects's own docstring for what this catches and why. Applied HERE,
+    # unconditionally, so the invariant "a kind=='text' object that does not correspond
+    # to text visible in the reference image never reaches this function's own
+    # prompt-assembly logic" holds regardless of which caller reached this function -
+    # nothing downstream (_objects_clause, _object_typography_clause,
+    # reference_has_text_zone, resolve_authorised_product_count, or any future reader of
+    # blueprint.get("objects")) ever has to re-derive it.
+    #
+    # The record_warning call below is CO-LOCATED with the drop itself, not left to
+    # generate_image/pipeline._regenerate_existing_draft to remember to call separately
+    # (an earlier version of this fix did exactly that, as two independent calls to
+    # drop_hallucinated_text_objects - one here for enforcement, one in each caller for
+    # the trace). That shape had a real gap: a future caller of build_image_prompt
+    # outside those two paths would drop objects with no warning at all - the same
+    # defect class this whole fix exists to close, just moved one level up. Co-locating
+    # means ANY caller, present or future, gets both the guarantee and the trace from
+    # the same unconditional call - there is nothing left for a caller to forget.
+    # build_image_prompt is otherwise a pure function (no DB access) - this is the one
+    # exception, and only fires on the rare path where something is actually dropped;
+    # the common case (nothing dropped) touches no DB at all.
+    filtered_objects, dropped_hallucinated_text_objects = deconstruct.drop_hallucinated_text_objects(blueprint)
+    blueprint = dict(blueprint)
+    blueprint["objects"] = filtered_objects
+    if dropped_hallucinated_text_objects:
+        from src import dedupe as _dedupe
+        _dedupe.init_pipeline_warnings()
+        _dedupe.record_warning(
+            "hallucinated_text_object_dropped",
+            f"Ad {blueprint.get('ad_id')}: dropped {len(dropped_hallucinated_text_objects)} "
+            f"kind=='text' object(s) from the blueprint before building the prompt - each "
+            f"one does not correspond to text visibly present in the reference image (it "
+            f"was likely folded in from the ad's scraped caption copy instead). Dropped: "
+            f"{dropped_hallucinated_text_objects}",
+        )
+
     visual = blueprint.get("visual", {})
     # visual.subject is deliberately NOT read here. In practice it's where the vision
     # deconstruct step puts rich, identity-carrying descriptions of the competitor ad's
@@ -3825,6 +3881,10 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
         blueprint, include_product
     )
     log.info("Ad %s: composite gate -> %s (%s)", ad_id, should_composite, composite_gate_reason)
+    # Hallucinated-text-object guard (2026-08-19): build_image_prompt itself applies
+    # deconstruct.drop_hallucinated_text_objects AND records the warning on what it
+    # drops, co-located in one place - no separate call needed here. See that
+    # function's own docstring.
     prompt = build_image_prompt(blueprint, product=product, include_product=include_product,
                                  text_in_image=text_in_image, headline=headline, subtext=subtext,
                                  creative_description=creative_description, edit_mode=edit_mode,

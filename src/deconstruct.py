@@ -16,7 +16,7 @@ log = logging.getLogger("deconstruct")
 
 BLUEPRINT_PROMPT = """You are an image decomposition system. Your first job is to decompose the attached advertising image into its constituent visual elements - every product, person, text block, logo, prop, and graphic - as a structured object inventory. Your second job is to record the ad's structural and strategic facts around that inventory. Return a single JSON creative blueprint, ONLY valid JSON, no preamble or markdown.
 
-Scraped ad copy, if supplied as a separate text block, is the source of truth for the headline and offer where it conflicts with what is legible in the image.
+Scraped ad copy, if supplied as a separate text block, is the source of truth for the headline and offer where it conflicts with what is legible in the image. It is NEVER a source for objects: every entry in objects[] must correspond to something visibly present in the attached image itself - if the scraped copy contains a testimonial, CTA, or other text that is not actually rendered in the image's own pixels, that text must NOT appear in objects[] at all, no matter how prominently it features in the scraped copy.
 
 The JSON must have exactly these fields:
 - ad_id (string): use the value "{ad_id}"
@@ -695,6 +695,119 @@ def resolve_testimonial_dispositions(objects, context=None):
         else:
             result[object_id] = "drop"
     return result
+
+
+# HALLUCINATED TEXT OBJECT FILTER (2026-08-19): deconstruct_image (below) attaches the
+# ad's scraped Facebook caption to the SAME API call as the image (see the "Scraped ad
+# copy" paragraph in BLUEPRINT_PROMPT above), stated as the source of truth for headline
+# and offer wording where it conflicts with the image - but until this session nothing in
+# that prompt said objects[] may describe ONLY what is visibly present in the attached
+# image, as distinct from that scraped copy block. Confirmed live on two artifacts (1377,
+# 1386, structural shapes reproduced in tests/test_hallucinated_text_objects.py): the
+# model folded the scraped caption's testimonial/CTA text into objects[] entries with a
+# defaulted full-frame bbox ([0.0, 0.0, 1.0, 1.0]), while the SAME blueprint's own
+# layout_detail.text_zone/legibility_notes correctly recorded "no text is overlaid on the
+# image itself." The BLUEPRINT_PROMPT wording above is fixed alongside this to reduce
+# recurrence at the source, but per this file's own standing lesson ("prompt-only rules
+# do not bind on the image path" - CLAUDE.md) that wording is not the enforcement; this
+# function is.
+FULLFRAME_TEXT_BBOX_AREA_THRESHOLD = 0.9
+
+_NO_IN_IMAGE_TEXT_SIGNAL_RE = re.compile(
+    r"no in-image text|no text is overlaid|none in-image|external to (the )?image|"
+    r"external ad (body )?text|external ad copy|external, not in-image|"
+    r"delivered as external|not (baked|overlaid) (into|on) the image|all copy is (external|delivered)",
+    re.IGNORECASE,
+)
+
+
+def _text_object_bbox_area(bbox):
+    if not (isinstance(bbox, (list, tuple)) and len(bbox) == 4):
+        return None
+    try:
+        _, _, w, h = bbox
+        return float(w) * float(h)
+    except (TypeError, ValueError):
+        return None
+
+
+def blueprint_signals_no_in_image_text(blueprint):
+    """True when layout_detail.text_zone or legibility_notes states, in free text, that
+    no text is baked into the image itself (e.g. "external to image", "no text is
+    overlaid on the image itself"). Keyword-matched against free text the model writes,
+    the same fragility tradeoff as every other free-text signal this codebase already
+    keys behaviour off (e.g. output_critic's testimonial-shaped-category match) - a false
+    negative (wording this doesn't recognise) leaves the contradiction check silent for
+    that one blueprint; both real instances found so far (1377, 1386) use near-identical
+    phrasing to each other, which is why this is one signal, not the only one -
+    drop_hallucinated_text_objects's bbox check below is independent of this."""
+    blueprint = blueprint or {}
+    layout_detail = blueprint.get("layout_detail") or {}
+    text_zone = str(layout_detail.get("text_zone") or "")
+    legibility_notes = str(blueprint.get("legibility_notes") or "")
+    return bool(_NO_IN_IMAGE_TEXT_SIGNAL_RE.search(f"{text_zone} || {legibility_notes}"))
+
+
+def drop_hallucinated_text_objects(blueprint):
+    """Filters blueprint.objects[] down to the objects eligible to reach
+    build_image_prompt, dropping any kind=="text" object matching EITHER of two
+    INDEPENDENT signals that it describes text from the ad's external scraped caption
+    copy rather than something visibly rendered in the reference image:
+
+    1. full_frame_bbox: the object's own bbox covers >= FULLFRAME_TEXT_BBOX_AREA_THRESHOLD
+       of the frame - a real in-image text block (a headline, a CTA button, a testimonial
+       card) occupies a bounded region; a hallucinated one, with no real pixels to anchor
+       to, was observed defaulting to the whole frame ([0.0, 0.0, 1.0, 1.0]) on both known
+       instances.
+    2. contradicts_no_in_image_text: blueprint_signals_no_in_image_text(blueprint) is
+       True - the SAME blueprint's own layout_detail.text_zone/legibility_notes state
+       that no text is baked into the image at all, directly contradicting the existence
+       of ANY kind=="text" object. When this fires, EVERY kind=="text" object in the
+       blueprint is dropped, not just the one(s) also caught by the bbox check - a
+       blueprint-level "no in-image text exists" statement makes every one of them
+       suspect, not only the most obviously oversized one.
+
+    Deliberately two independent checks, not one merged condition: a future edit to
+    either one must not silently leave the other as the only cover. Both known real
+    instances happen to trip both signals at once, but there is no guarantee a future
+    hallucinated object will always be full-frame AND have a contradicting text_zone -
+    e.g. a hallucinated headline placed at a plausible, non-full-frame bbox despite
+    text_zone correctly saying "external" is exactly the case signal 2 exists to still
+    catch without signal 1.
+
+    Returns (kept_objects, dropped) - kept_objects is a NEW list (the input list/dicts
+    are never mutated), dropped is a list of {"object_id", "description", "reasons"}
+    dicts, one per removed object, reasons a list containing "full_frame_bbox" and/or
+    "contradicts_no_in_image_text". Pure function, no logging/DB access - a caller with
+    DB access (generate_image, pipeline._regenerate_existing_draft) calls this itself to
+    record_warning on a non-empty `dropped`; build_image_prompt also calls this directly
+    so the invariant ("a hallucinated text object never reaches the built prompt") holds
+    unconditionally regardless of whether a caller remembers to check - meaning this runs
+    twice on the normal generate path. That's cheap (a list scan, no API call), the same
+    recompute-fresh-never-trust-a-cached-call tradeoff already made by
+    resolve_testimonial_dispositions/resolve_product_group_dispositions above."""
+    objects = [obj for obj in ((blueprint or {}).get("objects") or []) if isinstance(obj, dict)]
+    no_text_signal = blueprint_signals_no_in_image_text(blueprint)
+    kept, dropped = [], []
+    for obj in objects:
+        if obj.get("kind") != "text":
+            kept.append(obj)
+            continue
+        reasons = []
+        area = _text_object_bbox_area(obj.get("bbox"))
+        if area is not None and area >= FULLFRAME_TEXT_BBOX_AREA_THRESHOLD:
+            reasons.append("full_frame_bbox")
+        if no_text_signal:
+            reasons.append("contradicts_no_in_image_text")
+        if reasons:
+            dropped.append({
+                "object_id": obj.get("object_id"),
+                "description": obj.get("description"),
+                "reasons": reasons,
+            })
+        else:
+            kept.append(obj)
+    return kept, dropped
 
 
 def _assert_no_competitor_branded_object_kept(blueprint):

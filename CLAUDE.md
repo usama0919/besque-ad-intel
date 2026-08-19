@@ -103,10 +103,131 @@ of the three applies to every new failure branch — "it's logged" is not one of
    not even `log.warning`; none of the three. On Cloud Run, where local disk may be
    ephemeral, this can mean the draft becomes unreachable after the container recycles,
    indistinguishable from a successful save until someone goes looking.
+7. **Fixed 2026-08-19: hallucinated text objects reaching build_image_prompt undetected**
+   — `deconstruct.py` sends the ad's scraped Facebook caption to Claude alongside the
+   image, stated as the source of truth for headline/offer wording; nothing said
+   `objects[]` may describe only what is visibly IN the image. Confirmed live on two
+   artifacts: the model folded the scraped caption's testimonial/CTA text into `objects[]`
+   entries with a defaulted full-frame bbox, while the SAME blueprint's own
+   `layout_detail.text_zone`/`legibility_notes` correctly recorded "no text is overlaid on
+   the image itself" — a real, approved customer review (correctly selected by
+   `select_testimonial_review`) then got baked into the drafted pixels via a wholly
+   invented SCENE OBJECTS slot, with the artifact's `review_status` never reflecting
+   anything was wrong. See the dedicated section below for the invariant, the fix, and
+   the mutation-verify results.
 
 Items 5 and 6 are catalogued here specifically so they don't have to be rediscovered from
 scratch — fix them the same way as items 1-4: pick one of the three signals, not a fourth
 option.
+
+## Hallucinated text objects — `deconstruct.py` folds scraped caption copy into `objects[]`, fixed 2026-08-19
+**The invariant**: a `kind=="text"` object that does not correspond to text visibly
+present in the reference image must never reach `build_image_prompt`.
+
+**How it happened**: `deconstruct.deconstruct_image` (`src/deconstruct.py:903`) attaches
+the ad's scraped Facebook caption (`ad_creative_bodies`, via `scrape._map_ad` →
+`pipeline.process_ad`'s `ad_text=ad.get("text", "")`) to the SAME API call as the
+reference image, folded in at `deconstruct.py:931-932` as "Scraped ad copy (verbatim from
+the source page)". `BLUEPRINT_PROMPT`'s own framing of this (`deconstruct.py:19`, before
+this fix) said only that scraped copy is "the source of truth for the headline and offer
+where it conflicts with what is legible in the image" — it never said `objects[]` may
+describe only what is visibly present in the attached image, as distinct from that
+scraped copy block. Confirmed live on two artifacts: the model classified the scraped
+caption's own testimonial/CTA text as `objects[]` entries, defaulting their bbox to the
+whole frame (`[0.0, 0.0, 1.0, 1.0]` — no real pixels exist to anchor a bbox to) while the
+SAME blueprint's `layout_detail.text_zone`/`legibility_notes` correctly recorded "no text
+is overlaid on the image itself." Downstream, `deconstruct.resolve_testimonial_dispositions`
+correctly flipped the hallucinated testimonial object from its deconstruct-time "drop" to
+"substitute" once a real, correctly-selected customer review existed for that run — the
+dual-resolution mechanism worked exactly as designed, on an object that should never have
+existed. The result: a real, approved review got baked into the drafted image via a scene
+element the reference never had, with the misspelling/garbling on top explained by a
+second, narrower contradiction (rule 6's fixed text budget vs. the SCENE OBJECTS
+inventory unconditionally demanding the same testimonial+CTA text rule 6 had just banned)
+plus the substituted (short) quote being dressed with the hallucinated object's own
+(much longer) typography metadata.
+
+**The fix, two halves** (per this file's own standing lesson that prompt-only rules do
+not bind on the image path — the guardrails note at the top of this file):
+- **Prompt half** (`deconstruct.py:19`): states explicitly that scraped ad copy is
+  "NEVER a source for objects" — best-effort, reduces recurrence at the source, but see
+  below: it is not the enforcement and has zero test coverage on its own.
+- **Structural half** (`deconstruct.drop_hallucinated_text_objects`, `deconstruct.py`,
+  ~line 700): two INDEPENDENT signals, either one drops a `kind=="text"` object before
+  it reaches a prompt — (1) `full_frame_bbox`: bbox area ≥
+  `FULLFRAME_TEXT_BBOX_AREA_THRESHOLD` (0.9); (2) `contradicts_no_in_image_text`: the
+  blueprint's own `layout_detail.text_zone`/`legibility_notes` state no text is baked
+  into the image at all (`blueprint_signals_no_in_image_text`), which drops EVERY
+  `kind=="text"` object in that blueprint, not only the one(s) also caught by the bbox
+  check.
+
+**The drop and its trace are CO-LOCATED in one call, inside `build_image_prompt` itself**
+(2026-08-19, second pass, prompted by a direct question about the wiring) — not two
+separate calls to `drop_hallucinated_text_objects`, one for enforcement inside
+`build_image_prompt` and one for `dedupe.record_warning` in each of its two production
+callers, which is how this was first shipped. That first shape had a real gap: a future
+third caller of `build_image_prompt` would drop objects with no warning at all — the same
+silent-defect class this whole fix exists to close, just moved up one level, and
+`generate_image`/`pipeline._regenerate_existing_draft`'s own duplicate calls have since
+been deleted, not merely left alongside the co-located one. `build_image_prompt` is
+otherwise a pure function (no DB access) — this is the one deliberate exception, and it
+only touches the DB on the rare path where something is actually dropped; the common case
+(nothing dropped) makes no DB call at all, so this doesn't turn every prompt build into a
+DB round trip. `ad_id` for the warning message comes from `blueprint.get("ad_id")` (the
+function has no separate `ad_id` parameter of its own) — in production this is always the
+same value passed to `generate_image`/`pipeline`, both sourced from the same scraped ad at
+deconstruct time.
+
+**Tests**: `tests/test_hallucinated_text_objects.py` (16 tests) — the discriminator (a
+legitimate in-image text object with a normal bbox still passes, proving the filter
+isn't trivially satisfied by rejecting everything), each of the two drop signals tested
+independently with the other explicitly absent, both known artifact shapes reproduced
+structurally (no `ad_id`/`page_id`, per this file's own standing rule on that), two
+end-to-end `build_image_prompt` tests (one proving the legitimate object still reaches
+the prompt so this isn't just an emptied SCENE OBJECTS block, one a leak-guard checking
+no substring of the caption-derived quote survives anywhere in the output — same pattern
+as `test_objects_clause_end_to_end_brand_field_never_leaks_into_prompt`,
+`tests/test_generate_image_prompt.py`), a test calling `build_image_prompt` DIRECTLY
+(bypassing both production callers) to prove co-location — the exact test a hypothetical
+third caller would need for the drop to be discoverable at all, and two
+`generate_image`-level tests confirming the co-located mechanism still fires correctly
+when reached via that real caller. Four `reference_has_text_zone` tests cover its own
+extension (see below).
+
+**Mutation-verify** (each half reverted independently, tests re-run, then restored):
+- Prompt half reverted alone → **all tests still pass**. Confirms the prompt-half
+  wording has **zero test coverage of its own** and is doing no enforcement work —
+  exactly as expected, since a prompt instruction can't be deterministically unit-tested,
+  and consistent with this file's own standing lesson that prompt-only rules don't bind
+  on the image path. Kept anyway (reduces recurrence at the source), but nobody should
+  mistake it for the guarantee.
+- The entire co-located block reverted (filter + warning together, since they're now one
+  block) → `test_build_image_prompt_never_receives_hallucinated_text_object`,
+  `test_build_image_prompt_caption_derived_text_never_leaks_any_substring`,
+  `test_build_image_prompt_records_warning_directly_without_generate_image`, AND
+  `test_generate_image_records_warning_when_dropping_hallucinated_text_object` **all
+  fail together** — a single revert now breaks both the guarantee and the trace at once,
+  which is the whole point of co-locating them: there is no longer a way to disable one
+  without disabling the other.
+- `reference_has_text_zone`'s new early-return line reverted alone →
+  `test_reference_has_text_zone_signal_overrides_headline_verbatim` and
+  `test_reference_has_text_zone_signal_overrides_hallucinated_text_purpose_object`
+  **fail**, the pre-existing `test_edit_mode.py` tests for this function (which never set
+  `layout_detail`/`legibility_notes`) are unaffected either way.
+
+**`reference_has_text_zone` (2026-08-19, implemented, not just recommended)**:
+`generate_image_prompt.py:93-132` now checks
+`deconstruct.blueprint_signals_no_in_image_text(blueprint)` FIRST and returns `False`
+unconditionally when it fires, before reading `headline_verbatim`/`objects[]` at all —
+closing a real, confirmed gap: `pipeline.py:886` calls this function directly on the RAW,
+unfiltered blueprint, BEFORE `build_image_prompt`'s own guard ever runs, to decide
+`element_provenance["text"]` ("substituted" vs. "added") for the artifact record. Left
+unfixed, a hallucinated object could make this return `True` there, recording
+`element_provenance.text="substituted"` even though the actual generation, moments later,
+correctly drops that same object — the same record-vs-reality mismatch shape as the
+2026-08-14 `element_provenance.product="added"` bug elsewhere in this file. Uses the
+identical signal `drop_hallucinated_text_objects` already computes, not a second,
+differently-worded check that could drift from it.
 
 ## Prompt-only guardrails do not bind on the image path — read this before adding
 ## an eighth instruction
