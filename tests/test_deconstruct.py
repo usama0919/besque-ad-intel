@@ -146,6 +146,71 @@ def test_build_prompt_background_reduced_to_surface_colour_light():
     assert '"light"' in prompt
 
 
+# ---- 2026-08-19: per-object brand field (item 2) ----
+
+def test_build_prompt_includes_brand_field_instruction():
+    prompt = deconstruct.build_prompt("AD1", "PageX", "2026-01-01")
+    assert '"brand"' in prompt
+    assert "GlowCo" in prompt
+
+
+def test_assert_no_competitor_branded_object_kept_names_brand_when_present():
+    """The 2026-08-19 logging touch: brand is quoted into the raised message when
+    present, purely for diagnostics - it plays no role in the check itself."""
+    blueprint = {"objects": [
+        {"object_id": "obj_01", "kind": "product", "ownership": "competitor_branded",
+         "carries_brand_mark": True, "brand": "GlowCo", "disposition": "keep"},
+    ]}
+    with pytest.raises(deconstruct.BlueprintValidationError) as exc_info:
+        deconstruct._assert_no_competitor_branded_object_kept(blueprint)
+    assert "brand='GlowCo'" in str(exc_info.value)
+
+
+def test_assert_no_competitor_branded_object_kept_omits_brand_note_when_absent():
+    """Legacy object with no brand field - the message degrades cleanly, no
+    "brand=None" or similar noise."""
+    blueprint = {"objects": [
+        {"object_id": "obj_01", "kind": "product", "ownership": "competitor_branded",
+         "carries_brand_mark": True, "disposition": "keep"},
+    ]}
+    with pytest.raises(deconstruct.BlueprintValidationError) as exc_info:
+        deconstruct._assert_no_competitor_branded_object_kept(blueprint)
+    assert "brand=" not in str(exc_info.value)
+
+
+# ---- 2026-08-19: decomposition-first framing + objects-first field order (item 8) ----
+
+def test_build_prompt_persona_framed_as_image_decomposition():
+    prompt = deconstruct.build_prompt("AD1", "PageX", "2026-01-01")
+    assert "image decomposition system" in prompt
+    assert "expert ad analyst" not in prompt
+
+
+def test_build_prompt_objects_precede_ad_analysis_fields():
+    """objects must be the first substantive field in the prompt's field list - before
+    format/hook/angle/awareness_stage/claims/creative_objective/target_audience, none
+    of which changed content, only position."""
+    prompt = deconstruct.build_prompt("AD1", "PageX", "2026-01-01")
+    i_objects = prompt.index("- objects (array)")
+    for field in ("- format (string)", "- hook (object)", "- angle (string)",
+                  "- awareness_stage (string)", "- claims (array)",
+                  "- creative_objective (string)", "- target_audience (string)"):
+        assert i_objects < prompt.index(field), f"{field} did not stay after objects"
+
+
+def test_build_prompt_ad_analysis_field_content_unchanged():
+    """The reorder/reframe must not touch the WORDING of the fields the operator
+    explicitly said copy generation depends on."""
+    prompt = deconstruct.build_prompt("AD1", "PageX", "2026-01-01")
+    assert 'one of question/bold_claim/problem_agitate/social_proof/other' in prompt
+    assert "the core persuasive angle" in prompt
+    assert "one of unaware, problem, solution, product, most_aware" in prompt
+    assert "any of efficacy, sensory, ingredient, social_proof, offer" in prompt
+    assert 'the ad\'s primary strategic goal in one short phrase' in prompt
+    assert "who this ad is speaking to, in one short phrase" in prompt
+    assert 'what this object exists to DO in the ad\'s argument' in prompt
+
+
 def test_deconstruct_image_scraped_ad_copy_with_braces_does_not_raise(monkeypatch):
     """ad_text/cta are passed to Claude as a SEPARATE content block, never through
     .format() - confirmed end to end: literal { and } in scraped ad copy must not raise

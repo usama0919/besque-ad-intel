@@ -78,6 +78,10 @@
             "enum": ["hero", "secondary", "supporting_prop", "environment"]
           },
           "carries_brand_mark": { "type": "boolean" },
+          "brand": {
+            "type": ["string", "null"],
+            "description": "2026-08-19 (per-object brand identity): the specific brand/company name this object visibly belongs to or names - the advertiser's own brand, OR a third-party brand appearing in the frame (e.g. a comparison ad showing a rival's product). A single, clean value distinct from `description` (which may also carry the name as part of ordinary prose) and from `appearance` (which must NEVER carry a brand/product name - see that field's own docstring). Exists so anything downstream that needs to know WHICH brand an object belongs to can read one structured value instead of parsing free text. null/omit when ownership is 'generic'/'besque'/'person', or when no specific brand name is actually legible/attributable in the image - never guess a brand from generic visual cues alone. Purely descriptive: it does NOT drive disposition (ownership/carries_brand_mark already do that, unchanged) and must never be quoted into any image-generation prompt text - the same identity-must-never-transfer principle `appearance` exists to enforce. Additive and optional - a pre-existing blueprint predating this field remains valid and unaffected."
+          },
           "persuasive_function": { "type": "string" },
           "disposition": {
             "type": "string",

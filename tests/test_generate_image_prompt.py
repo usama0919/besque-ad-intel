@@ -1421,3 +1421,37 @@ def test_objects_clause_end_to_end_product_appearance_never_leaks_brand_name():
     assert "a cylindrical glass bottle, warm amber liquid" in prompt
     assert "GlowCo Radiance Serum" not in prompt
     assert "Only the bottle's lighting, grading, and finish adapt to match the rendering register" in prompt
+
+
+# ---- Per-object brand field (2026-08-19, item 2) - descriptive only, must never
+# reach any assembled generation prompt - the same leak vector the appearance split
+# above exists to close, now guarded for this field too. ----
+
+def test_objects_clause_end_to_end_brand_field_never_leaks_into_prompt():
+    """A distinctive brand value, present on the object but absent from appearance/
+    description, must never surface anywhere in build_image_prompt's output - no
+    consumer in generate_image_prompt.py should ever read/quote `brand`."""
+    bp = {
+        "visual": {"layout": "flat lay", "subject": "", "palette_mood": "warm",
+                   "text_placement": "lower"},
+        "objects": [{
+            "object_id": "obj_bottle", "kind": "product", "bbox": [0.1, 0.2, 0.3, 0.4],
+            "description": "a competitor serum bottle", "appearance": "a squat glass jar",
+            "brand": "ZorbaxCosmeticsInc", "disposition": "substitute",
+        }],
+    }
+    prompt = generate_image_prompt.build_image_prompt(bp)
+    assert "ZorbaxCosmeticsInc" not in prompt
+
+
+def test_substitute_object_line_never_reads_brand_field():
+    """Direct check on the helper itself, not just the end-to-end path: passing a
+    distinctive brand value must not change the SUBSTITUTE line's text at all."""
+    obj_without_brand = _product_object(appearance="a squat glass jar")
+    obj_with_brand = dict(obj_without_brand, brand="ZorbaxCosmeticsInc")
+    line_without = generate_image_prompt._substitute_object_line(
+        obj_without_brand, "product", None, obj_without_brand["description"], {})
+    line_with = generate_image_prompt._substitute_object_line(
+        obj_with_brand, "product", None, obj_with_brand["description"], {})
+    assert line_without == line_with
+    assert "ZorbaxCosmeticsInc" not in line_with
