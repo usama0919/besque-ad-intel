@@ -208,6 +208,50 @@ def test_build_prompt_ad_analysis_field_content_unchanged():
     assert "any of efficacy, sensory, ingredient, social_proof, offer" in prompt
     assert 'the ad\'s primary strategic goal in one short phrase' in prompt
     assert "who this ad is speaking to, in one short phrase" in prompt
+
+
+# ---- 2026-08-19 (A, typography trim): omit typography for on-pack branding /
+# award / disclaimer text - these always resolve to "drop" (resolve_disposition /
+# _resolve_text_disposition) and _object_typography_clause never reads typography
+# for a dropped object, so generating it for these was pure output-budget waste.
+#
+# This is a PROMPT-WORDING change only - it cannot be unit-tested for whether the
+# model actually complies (see CLAUDE.md's own standing lesson: prompt-only rules
+# are only ever verified by a live call, never a unit test). These tests only guard
+# that the instruction text itself is present and that the nested typography object
+# spec plus its trailing sentence were not touched - not that Claude obeys it.
+
+def test_build_prompt_typography_omit_instruction_present():
+    prompt = deconstruct.build_prompt("AD1", "PageX", "2026-01-01")
+    assert "on-pack branding" in prompt
+    assert "award or disclaimer text" in prompt
+    assert "typographic treatment is not needed" in prompt
+
+
+def test_build_prompt_typography_nested_spec_byte_identical():
+    """Only the intro clause before the nested typography object changed - the
+    field spec itself and the trailing "THREE OR FOUR distinct typographic
+    levels" sentence must be untouched."""
+    prompt = deconstruct.build_prompt("AD1", "PageX", "2026-01-01")
+    # BLUEPRINT_PROMPT's own {{ }} (escaped literal braces) collapse to single { }
+    # once .format() runs - matching against the POST-format text, same as every
+    # other field-spec assertion in this file.
+    assert (
+        '{ "typeface_class": serif/sans/script, "weight": e.g. bold/light/regular, '
+        '"case": upper/title/sentence, "letter_spacing": tight/normal/wide, "colour": '
+        "this text's OWN colour - distinct from the scene's overall palette_mood, e.g. "
+        '"gold" or "white", "size_relative": e.g. large/medium/small relative to the '
+        'frame, "decorative_elements": array of short phrases for anything attached '
+        "(a pipe divider, a rule, an underline, a bullet mark) or [] if none, "
+        '"line_count": number of lines this text actually occupies }'
+    ) in prompt
+    assert (
+        "A reference commonly has THREE OR FOUR distinct typographic levels across "
+        "its several text objects (e.g. a large serif headline, a small-caps accent "
+        "line with wide letter-spacing, small body copy, a button label) - give each "
+        "its own accurate treatment, never the same values copied across every text "
+        "object just because one was easy to read."
+    ) in prompt
     assert 'what this object exists to DO in the ad\'s argument' in prompt
 
 
