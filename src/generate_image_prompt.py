@@ -2129,16 +2129,22 @@ def _composite_gate(blueprint, include_product=True):
     structural, blueprint-level fact - none require the generated image itself, which
     is what makes evaluating this before the Gemini call possible at all.
 
-    Returns (proceed: bool, reason: str, product_object: dict|None). product_object is
-    the single qualifying objects[] entry when proceed is True, else None - the caller
-    reuses it directly for the bbox rather than re-deriving it a second time. Any
-    failing gate returns proceed=False immediately; reason names exactly which one, for
-    the caller to log at INFO - never a silent skip.
+    Returns (proceed: bool, reason: str, product_objects: list[dict]). product_objects
+    is every qualifying objects[] entry when proceed is True (see gate 1's widening
+    below - almost always a single-element list, occasionally more), else [] - the
+    caller loops composite_product once per entry, reusing each one's own bbox rather
+    than re-deriving it. Any failing gate returns proceed=False immediately; reason
+    names exactly which one, for the caller to log at INFO - never a silent skip.
 
     Gates (every one must pass):
-    1. Exactly one objects[] entry with kind=="product" and disposition=="substitute",
-       and it has a usable (4-element) bbox - Pillow needs one unambiguous placement,
-       never a guess between several candidates or a fallback when none exists.
+    1. At least one objects[] entry with kind=="product" and disposition=="substitute".
+       MORE than one is admitted ONLY when deconstruct.resolve_product_group_
+       dispositions (2026-08-19, D2 widening - see below) confirms every one of them
+       is part of the SAME winning group, i.e. same_product_as-linked instances of one
+       product line - never multiple genuinely-distinct products, which that function
+       already collapses to a single winner on its own terms. Every admitted instance
+       still needs its own usable (4-element) bbox - Pillow needs one unambiguous
+       placement per instance, never a guess.
     2. Not held/gripped: no kind=="prop" object whose serves_object_id names this
        product (serves_object_id is only ever populated on text/prop objects per
        schema/blueprint.schema.json, never "person" - a hand is always tracked as a
@@ -2148,20 +2154,71 @@ def _composite_gate(blueprint, include_product=True):
        object's kind (2026-08-19, held-product gate fix - see below). A held
        bottle needs a grip shadow following finger contours and a scale relationship
        to a hand that a flat pasted cutout cannot produce convincingly (see the Phase 1
-       diagnostic's Pillow-feasibility assessment).
+       diagnostic's Pillow-feasibility assessment). Checked INDEPENDENTLY for every
+       admitted instance (2026-08-19, D2) - one held instance rejects the whole
+       generation, never just that one instance while pasting the rest.
     3. No occlusion: no OTHER object's bbox overlaps the product object's bbox at all,
        whatever that object's kind or disposition (2026-08-19, occlusion gate fix - see
        below). composite_product pastes a flat, static PNG on top of every pixel
        Gemini already drew - it cannot render behind a hand, a text card, a badge, or
        anything else that belongs in front of the bottle, and nothing downstream ever
-       inspects what the paste is covering before it happens.
+       inspects what the paste is covering before it happens. Also checked
+       independently per admitted instance (2026-08-19, D2) - EXCEPT that a sibling
+       instance (another member of the same admitted group) is never itself counted as
+       an occluder of another sibling; see the D2 section below for why.
     4. background.light does not read as hard or strongly directional (see
        _HARD_LIGHT_KEYWORDS) - a pasted cutout has no cast shadow/highlight matching a
-       specific hard light direction.
+       specific hard light direction. Global, not per-instance - one scene has one
+       background.
 
     Deliberately does NOT gate on production_style/realism (e.g. "illustrated") - not
     in the task's own three named gates, so not added here; flagged in the handover
     notes as a known residual risk, not silently folded into this function.
+
+    Gate 1 widening (2026-08-19, D2): previously rejected outright whenever more than
+    one objects[] entry resolved to kind=="product"/disposition=="substitute" -
+    "expected exactly one... found N". That count conflated two structurally different
+    situations this function had no way to tell apart: multiple INSTANCES of the same
+    product line (e.g. a standard-size and a jumbo-size bottle of one product, the
+    OSEA "You'll Wish You Went Jumbo" reference - see deconstruct.
+    resolve_product_group_dispositions's own docstring for the full history), which
+    Route B can composite once per instance perfectly well, versus multiple
+    GENUINELY DIFFERENT competitor products, which it cannot (there is only one
+    Besque cutout asset). resolve_product_group_dispositions already resolves this
+    exact ambiguity elsewhere in the pipeline (rule 7, _objects_clause,
+    resolve_authorised_product_count all defer to it) - by its own construction, if it
+    ever maps MORE than one object_id to "substitute", those object_ids are
+    guaranteed to be one linked group, because it already collapses any set of
+    genuinely-distinct products down to a single winner before returning. So checking
+    "does every one of gate 1's raw candidates also come back 'substitute' from
+    resolve_product_group_dispositions" is sufficient to admit the true-instances case
+    and reject the genuinely-distinct-products case, with no new grouping logic
+    duplicated here.
+
+    Deliberately conservative in three ways, none loosened by this widening: (a) the
+    N==1 case is completely unchanged - resolve_product_group_dispositions is never
+    even called unless len(candidates) > 1, so the single-product path (the
+    overwhelming majority of traffic) carries zero risk of behaving differently. (b)
+    Gates 2-4 still run per instance - a group of 3 linked instances where only 2 are
+    free-standing and 1 is held rejects the WHOLE group (falls back to native
+    rendering for the entire scene), never a partial composite of 2-of-3, since a
+    mixed native/composited bottle look was never asked for and adds a new visual
+    failure mode nothing here is designed to avoid. (c) Sibling instances are
+    excluded from EACH OTHER's occlusion check (gate 3) by object_id, a deliberate,
+    explicit judgement call: two instances of the identical Besque bottle asset
+    partially overlapping each other reads as "one bottle mostly in front of another,
+    same product" in the composited result, which is a plausible real photo
+    composition, not the "something foreign occludes the bottle" case gate 3 exists
+    to catch - excluding siblings from this specific check is a narrower claim than
+    "gates 2-4 run independently," stated explicitly here rather than left implicit.
+
+    Explicitly NOT touched by this widening, per instruction: the held/gripped gate
+    (2) and the general (non-instance) bbox-overlap gate (3) are unchanged - front/
+    behind is genuinely unrecorded anywhere in this schema (no z-order/layer/depth
+    field exists), and guessing it from an object's `role` (e.g. "environment" objects
+    are probably background) risks pasting a bottle over a face or a card with no way
+    to verify the guess was right. No role-based heuristic was added anywhere in this
+    function.
 
     include_product=False short-circuits to proceed=False before inspecting anything
     else - there is no product to composite when the run itself doesn't want one.
@@ -2212,84 +2269,111 @@ def _composite_gate(blueprint, include_product=True):
     native path, where Gemini renders the whole scene (including the bottle) in one
     pass and can correctly place fingers or a card in front of it."""
     if not include_product:
-        return False, "include_product is False", None
+        return False, "include_product is False", []
     objects = blueprint.get("objects") or []
     candidates = [
         obj for obj in objects
         if isinstance(obj, dict) and obj.get("kind") == "product" and obj.get("disposition") == "substitute"
     ]
-    if len(candidates) != 1:
-        return False, (
-            f"expected exactly one substitute-marked product object, found {len(candidates)}"
-        ), None
-    product_object = candidates[0]
-    bbox = product_object.get("bbox")
-    if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
-        return False, "product object has no usable 4-element bbox", None
-    object_id = product_object.get("object_id")
-    description = (product_object.get("description") or "").lower()
-    if any(kw in description for kw in _GRIP_DESCRIPTION_KEYWORDS):
-        return False, (
-            f"product description reads as held/gripped: {product_object.get('description')!r}"
-        ), None
-    holder = next(
-        (obj for obj in objects
-         if isinstance(obj, dict) and obj.get("kind") == "prop" and obj.get("serves_object_id") == object_id),
-        None,
-    )
-    if holder is not None:
-        return False, (
-            f"object {holder.get('object_id')!r} (prop) serves this product - held or "
-            f"staged, not free-standing"
-        ), None
-    # Held-by-another-object language (2026-08-19, held-product gate fix): the two
-    # checks above only ever look at the PRODUCT object's own description and
-    # kind=="prop" objects naming it via serves_object_id - neither catches a
-    # reference where the holding is described on a DIFFERENT object instead (a
-    # person's description reading "...holding the product beside her face" is the
-    # confirmed live shape, ad 1252553972969618). Scans every OTHER object's
-    # description, whatever its kind, for the same grip-shaped keywords - see this
-    # function's own docstring for why this is deliberately broad rather than trying
-    # to confirm the description names THIS specific product.
-    other_holder = next(
-        (obj for obj in objects
-         if isinstance(obj, dict) and obj.get("object_id") != object_id
-         and any(kw in (obj.get("description") or "").lower() for kw in _GRIP_DESCRIPTION_KEYWORDS)),
-        None,
-    )
-    if other_holder is not None:
-        return False, (
-            f"object {other_holder.get('object_id')!r} ({other_holder.get('kind')!r}) "
-            f"description reads as held/gripped: {other_holder.get('description')!r}"
-        ), None
-    # Occlusion (2026-08-19, occlusion gate fix): composite_product pastes a flat,
-    # static PNG on top of every pixel Gemini already drew - it cannot render behind a
-    # hand, a text card, a badge, or anything else, and nothing downstream inspects
-    # what the paste is covering before it happens. ANY other object whose bbox
-    # overlaps the product's own bbox at all means something belongs in front of (or
-    # behind) the bottle in the final composition - checked regardless of that other
-    # object's kind or disposition, including "drop": a dropped object is an
-    # instruction to Gemini to remove it, never a guarantee the rendered pixels end up
-    # empty there. Confirmed live, ad 1252553972969618: obj_03 (a testimonial card,
-    # disposition "drop") overlapped the product's own bbox, and the pasted bottle
-    # covered it in the generated draft. See this function's own docstring.
-    occluder = next(
-        (obj for obj in objects
-         if isinstance(obj, dict) and obj.get("object_id") != object_id
-         and isinstance(obj.get("bbox"), (list, tuple)) and len(obj.get("bbox")) == 4
-         and _bboxes_overlap(bbox, obj.get("bbox"))),
-        None,
-    )
-    if occluder is not None:
-        return False, (
-            f"object {occluder.get('object_id')!r} ({occluder.get('kind')!r}) bbox "
-            f"overlaps the product's own bbox - something belongs in front of or "
-            f"behind the bottle here, which a flat paste can never reproduce"
-        ), None
+    if len(candidates) == 0:
+        return False, "expected at least one substitute-marked product object, found 0", []
+    if len(candidates) > 1:
+        # D2 widening (2026-08-19): more than one raw candidate no longer rejects
+        # outright - admitted ONLY when deconstruct.resolve_product_group_dispositions
+        # (the SAME mechanical authority rule 7/_objects_clause/resolve_authorised_
+        # product_count already defer to) agrees every one of them is part of the one
+        # winning group. That function's own construction guarantees more-than-one
+        # "substitute" result can only ever mean same_product_as-linked instances of
+        # one line - a genuinely-distinct second product always loses and comes back
+        # "drop" here, so a mixed/unconfirmed set still rejects exactly as before.
+        group_dispositions = deconstruct.resolve_product_group_dispositions(objects)
+        if not all(group_dispositions.get(c.get("object_id")) == "substitute" for c in candidates):
+            return False, (
+                f"expected exactly one substitute-marked product object (or a "
+                f"same_product_as-linked group all confirmed as one product line), "
+                f"found {len(candidates)} not all confirmed as one linked group"
+            ), []
+
+    candidate_ids = {c.get("object_id") for c in candidates}
+    for product_object in candidates:
+        bbox = product_object.get("bbox")
+        if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+            return False, (
+                f"product object {product_object.get('object_id')!r} has no usable "
+                f"4-element bbox"
+            ), []
+        object_id = product_object.get("object_id")
+        description = (product_object.get("description") or "").lower()
+        if any(kw in description for kw in _GRIP_DESCRIPTION_KEYWORDS):
+            return False, (
+                f"product object {object_id!r} description reads as held/gripped: "
+                f"{product_object.get('description')!r}"
+            ), []
+        holder = next(
+            (obj for obj in objects
+             if isinstance(obj, dict) and obj.get("kind") == "prop"
+             and obj.get("serves_object_id") == object_id),
+            None,
+        )
+        if holder is not None:
+            return False, (
+                f"object {holder.get('object_id')!r} (prop) serves product "
+                f"{object_id!r} - held or staged, not free-standing"
+            ), []
+        # Held-by-another-object language (2026-08-19, held-product gate fix): the two
+        # checks above only ever look at the PRODUCT object's own description and
+        # kind=="prop" objects naming it via serves_object_id - neither catches a
+        # reference where the holding is described on a DIFFERENT object instead (a
+        # person's description reading "...holding the product beside her face" is the
+        # confirmed live shape, ad 1252553972969618). Scans every OTHER object's
+        # description, whatever its kind, for the same grip-shaped keywords - see this
+        # function's own docstring for why this is deliberately broad rather than
+        # trying to confirm the description names THIS specific product.
+        other_holder = next(
+            (obj for obj in objects
+             if isinstance(obj, dict) and obj.get("object_id") != object_id
+             and any(kw in (obj.get("description") or "").lower() for kw in _GRIP_DESCRIPTION_KEYWORDS)),
+            None,
+        )
+        if other_holder is not None:
+            return False, (
+                f"object {other_holder.get('object_id')!r} ({other_holder.get('kind')!r}) "
+                f"description reads as held/gripped: {other_holder.get('description')!r}"
+            ), []
+        # Occlusion (2026-08-19, occlusion gate fix): composite_product pastes a flat,
+        # static PNG on top of every pixel Gemini already drew - it cannot render
+        # behind a hand, a text card, a badge, or anything else, and nothing
+        # downstream inspects what the paste is covering before it happens. ANY other
+        # object whose bbox overlaps this instance's own bbox means something belongs
+        # in front of (or behind) the bottle in the final composition - checked
+        # regardless of that other object's kind or disposition, including "drop": a
+        # dropped object is an instruction to Gemini to remove it, never a guarantee
+        # the rendered pixels end up empty there. A SIBLING instance (another member
+        # of `candidates`) is excluded from this check (2026-08-19, D2) - two
+        # instances of the identical Besque bottle asset overlapping each other is
+        # "one bottle in front of another, same product," never the foreign-object
+        # occlusion this gate exists to catch; see this function's own docstring for
+        # why this exclusion is stated explicitly rather than left implicit.
+        occluder = next(
+            (obj for obj in objects
+             if isinstance(obj, dict) and obj.get("object_id") != object_id
+             and obj.get("object_id") not in candidate_ids
+             and isinstance(obj.get("bbox"), (list, tuple)) and len(obj.get("bbox")) == 4
+             and _bboxes_overlap(bbox, obj.get("bbox"))),
+            None,
+        )
+        if occluder is not None:
+            return False, (
+                f"object {occluder.get('object_id')!r} ({occluder.get('kind')!r}) bbox "
+                f"overlaps the product's own bbox (object {object_id!r}) - something "
+                f"belongs in front of or behind the bottle here, which a flat paste "
+                f"can never reproduce"
+            ), []
+
     light = ((blueprint.get("background") or {}).get("light") or "").lower()
     if any(kw in light for kw in _HARD_LIGHT_KEYWORDS):
-        return False, f"background.light reads as hard/directional: {light!r}", None
-    return True, "ok", product_object
+        return False, f"background.light reads as hard/directional: {light!r}", []
+    return True, "ok", candidates
 
 
 
@@ -3900,7 +3984,7 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
     # never disagree about whether Gemini is being asked to draw the bottle. Every gate
     # is a structural blueprint fact (see _composite_gate's own docstring), so this
     # never needs the generated image itself to decide.
-    should_composite, composite_gate_reason, composite_product_object = _composite_gate(
+    should_composite, composite_gate_reason, composite_product_objects = _composite_gate(
         blueprint, include_product
     )
     log.info("Ad %s: composite gate -> %s (%s)", ad_id, should_composite, composite_gate_reason)
@@ -4096,13 +4180,24 @@ def generate_image(blueprint, ad_id, product=None, reference_images=None, angle_
                 log.warning("Ad %s: composite gate passed but the product cutout is "
                             "unavailable - keeping Gemini's own render", ad_id)
             else:
-                try:
-                    image_bytes = composite_product(
-                        image_bytes, cutout_bytes, composite_product_object["bbox"])
-                    log.info("Ad %s: composited the real product cutout into the draft", ad_id)
-                except Exception as e:
-                    log.warning("Ad %s: compositing failed (%s: %s) - keeping Gemini's "
-                                "own render", ad_id, type(e).__name__, e)
+                # D2 (2026-08-19): loop once per admitted instance (almost always one,
+                # occasionally more - see _composite_gate's own docstring for the
+                # same_product_as widening). Each instance's paste is independently
+                # try/excepted - a failure on one instance logs and leaves THAT
+                # instance's region as whatever Gemini already drew there, never
+                # aborting an already-successful earlier instance's paste, matching
+                # this loop's own pre-D2 fail-open contract for the single-instance
+                # case exactly.
+                for product_object in composite_product_objects:
+                    try:
+                        image_bytes = composite_product(
+                            image_bytes, cutout_bytes, product_object["bbox"])
+                        log.info("Ad %s: composited the real product cutout into the "
+                                 "draft (object %s)", ad_id, product_object.get("object_id"))
+                    except Exception as e:
+                        log.warning("Ad %s: compositing object %s failed (%s: %s) - "
+                                    "keeping Gemini's own render for that instance",
+                                    ad_id, product_object.get("object_id"), type(e).__name__, e)
 
         ASSET_DIR.mkdir(exist_ok=True)
         dest = ASSET_DIR / f"{stem}_draft.png"

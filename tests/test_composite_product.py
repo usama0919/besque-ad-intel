@@ -129,40 +129,33 @@ def _clean_blueprint(**overrides):
 
 
 def test_composite_gate_accepts_the_clean_case():
-    proceed, reason, obj = generate_image_prompt._composite_gate(_clean_blueprint())
+    proceed, reason, objs = generate_image_prompt._composite_gate(_clean_blueprint())
     assert proceed is True
     assert reason == "ok"
-    assert obj["object_id"] == "obj_01"
+    assert len(objs) == 1
+    assert objs[0]["object_id"] == "obj_01"
 
 
 def test_composite_gate_rejects_when_include_product_false():
-    proceed, reason, obj = generate_image_prompt._composite_gate(
+    proceed, reason, objs = generate_image_prompt._composite_gate(
         _clean_blueprint(), include_product=False)
     assert proceed is False
     assert "include_product" in reason
-    assert obj is None
+    assert objs == []
 
 
 def test_composite_gate_rejects_when_no_product_object():
     bp = _clean_blueprint(objects=[])
-    proceed, reason, obj = generate_image_prompt._composite_gate(bp)
+    proceed, reason, objs = generate_image_prompt._composite_gate(bp)
     assert proceed is False
     assert "found 0" in reason
-    assert obj is None
-
-
-def test_composite_gate_rejects_when_multiple_substitute_products():
-    bp = _clean_blueprint()
-    bp["objects"].append({**bp["objects"][0], "object_id": "obj_02"})
-    proceed, reason, obj = generate_image_prompt._composite_gate(bp)
-    assert proceed is False
-    assert "found 2" in reason
+    assert objs == []
 
 
 def test_composite_gate_rejects_when_disposition_is_not_substitute():
     bp = _clean_blueprint()
     bp["objects"][0]["disposition"] = "keep"
-    proceed, reason, obj = generate_image_prompt._composite_gate(bp)
+    proceed, reason, objs = generate_image_prompt._composite_gate(bp)
     assert proceed is False
     assert "found 0" in reason
 
@@ -170,7 +163,7 @@ def test_composite_gate_rejects_when_disposition_is_not_substitute():
 def test_composite_gate_rejects_when_bbox_missing():
     bp = _clean_blueprint()
     del bp["objects"][0]["bbox"]
-    proceed, reason, obj = generate_image_prompt._composite_gate(bp)
+    proceed, reason, objs = generate_image_prompt._composite_gate(bp)
     assert proceed is False
     assert "no usable" in reason
 
@@ -178,7 +171,7 @@ def test_composite_gate_rejects_when_bbox_missing():
 def test_composite_gate_rejects_when_bbox_malformed():
     bp = _clean_blueprint()
     bp["objects"][0]["bbox"] = [0.1, 0.2]
-    proceed, reason, obj = generate_image_prompt._composite_gate(bp)
+    proceed, reason, objs = generate_image_prompt._composite_gate(bp)
     assert proceed is False
     assert "no usable" in reason
 
@@ -186,7 +179,7 @@ def test_composite_gate_rejects_when_bbox_malformed():
 def test_composite_gate_rejects_when_description_reads_as_held():
     bp = _clean_blueprint()
     bp["objects"][0]["description"] = "amber bottle held in a hand"
-    proceed, reason, obj = generate_image_prompt._composite_gate(bp)
+    proceed, reason, objs = generate_image_prompt._composite_gate(bp)
     assert proceed is False
     assert "held/gripped" in reason
 
@@ -199,7 +192,7 @@ def test_composite_gate_rejects_when_a_prop_serves_the_product():
         "persuasive_function": "holds the product", "disposition": "keep",
         "serves_object_id": "obj_01",
     })
-    proceed, reason, obj = generate_image_prompt._composite_gate(bp)
+    proceed, reason, objs = generate_image_prompt._composite_gate(bp)
     assert proceed is False
     assert "obj_hand" in reason
     assert "held or staged" in reason
@@ -216,7 +209,7 @@ def test_composite_gate_does_not_reject_when_a_text_object_serves_the_product():
         "persuasive_function": "names the product", "disposition": "substitute",
         "serves_object_id": "obj_01",
     })
-    proceed, reason, obj = generate_image_prompt._composite_gate(bp)
+    proceed, reason, objs = generate_image_prompt._composite_gate(bp)
     assert proceed is True
 
 
@@ -234,7 +227,7 @@ def test_composite_gate_rejects_when_only_the_person_object_mentions_holding():
         "ownership": "person", "carries_brand_mark": False, "role": "hero",
         "persuasive_function": "demonstrates the product", "disposition": "substitute",
     })
-    proceed, reason, obj = generate_image_prompt._composite_gate(bp)
+    proceed, reason, objs = generate_image_prompt._composite_gate(bp)
     assert proceed is False
     assert "obj_person" in reason
     assert "held/gripped" in reason
@@ -250,7 +243,7 @@ def test_composite_gate_does_not_reject_when_person_description_has_no_grip_lang
         "ownership": "person", "carries_brand_mark": False, "role": "hero",
         "persuasive_function": "demonstrates the product", "disposition": "substitute",
     })
-    proceed, reason, obj = generate_image_prompt._composite_gate(bp)
+    proceed, reason, objs = generate_image_prompt._composite_gate(bp)
     assert proceed is True
 
 
@@ -278,10 +271,119 @@ def test_composite_gate_rejects_the_real_ad_1252553972969618_blueprint_for_holdi
         ],
         "background": {"light": "soft available indoor light, slightly warm, no visible directional rig"},
     }
-    proceed, reason, obj = generate_image_prompt._composite_gate(bp)
+    proceed, reason, objs = generate_image_prompt._composite_gate(bp)
     assert proceed is False
     assert "obj_01" in reason
     assert "held/gripped" in reason
+
+
+# ---- D2 (2026-08-19): gate 1 widened for same_product_as-linked instances ----
+
+def test_composite_gate_admits_two_same_product_as_linked_instances():
+    """The OSEA-shaped case this widening exists for: two product objects, the
+    second explicitly linked to the first via same_product_as (same product line,
+    different size/format) - both must be admitted, both bboxes returned."""
+    bp = _clean_blueprint()
+    bp["objects"].append({
+        **bp["objects"][0], "object_id": "obj_02",
+        "bbox": [0.6, 0.4, 0.2, 0.35],
+        "same_product_as": "obj_01",
+    })
+    proceed, reason, objs = generate_image_prompt._composite_gate(bp)
+    assert proceed is True
+    assert reason == "ok"
+    assert {o["object_id"] for o in objs} == {"obj_01", "obj_02"}
+
+
+def test_composite_gate_rejects_two_genuinely_distinct_products_no_same_product_as():
+    """Mutation-verify requirement, explicit: two product objects with DIFFERENT
+    descriptions/brands and NO same_product_as link must still reject - this is
+    exactly the case the widening must never admit, since Route B has only one
+    Besque cutout asset and pasting it twice for two different competitor products
+    would be wrong both times."""
+    bp = _clean_blueprint()
+    bp["objects"][0]["brand"] = "GlowCo"
+    bp["objects"].append({
+        "object_id": "obj_02", "kind": "product",
+        "description": "a completely different rival jar of face cream",
+        "bbox": [0.6, 0.4, 0.2, 0.35], "ownership": "competitor_branded",
+        "carries_brand_mark": True, "role": "secondary", "brand": "RivalCo",
+        "persuasive_function": "second, distinct product", "disposition": "substitute",
+    })
+    proceed, reason, objs = generate_image_prompt._composite_gate(bp)
+    assert proceed is False
+    assert "found 2" in reason
+    assert "not all confirmed as one linked group" in reason
+    assert objs == []
+
+
+def test_composite_gate_admits_three_linked_instances_via_a_same_product_as_chain():
+    """Not just a pair - a same_product_as CHAIN (obj_03 -> obj_02 -> obj_01) must
+    also be fully admitted, all three."""
+    bp = _clean_blueprint()
+    bp["objects"].append({
+        **bp["objects"][0], "object_id": "obj_02",
+        "bbox": [0.6, 0.4, 0.15, 0.3], "same_product_as": "obj_01",
+    })
+    bp["objects"].append({
+        **bp["objects"][0], "object_id": "obj_03",
+        "bbox": [0.05, 0.4, 0.15, 0.3], "same_product_as": "obj_02",
+    })
+    proceed, reason, objs = generate_image_prompt._composite_gate(bp)
+    assert proceed is True
+    assert {o["object_id"] for o in objs} == {"obj_01", "obj_02", "obj_03"}
+
+
+def test_composite_gate_rejects_linked_pair_when_one_instance_is_held():
+    """Gates 2-4 still run per instance (2026-08-19, D2) - a linked pair where ONE
+    instance is held rejects the WHOLE group, never a partial admit of just the
+    free-standing one."""
+    bp = _clean_blueprint()
+    bp["objects"].append({
+        **bp["objects"][0], "object_id": "obj_02",
+        "bbox": [0.6, 0.4, 0.2, 0.35], "same_product_as": "obj_01",
+        "description": "amber body oil bottle held in a hand",
+    })
+    proceed, reason, objs = generate_image_prompt._composite_gate(bp)
+    assert proceed is False
+    assert "obj_02" in reason
+    assert "held/gripped" in reason
+
+
+def test_composite_gate_does_not_treat_sibling_instances_as_occluding_each_other():
+    """A linked pair whose bboxes happen to overlap each other must NOT be rejected
+    by the occlusion gate - a sibling instance of the identical Besque asset is
+    never the 'something foreign is in front of/behind the bottle' case gate 3
+    exists to catch (2026-08-19, D2 - explicit, documented judgement call)."""
+    bp = _clean_blueprint()  # obj_01 bbox: [0.3, 0.4, 0.2, 0.35] -> x[0.3,0.5] y[0.4,0.75]
+    bp["objects"].append({
+        **bp["objects"][0], "object_id": "obj_02",
+        "bbox": [0.4, 0.4, 0.2, 0.35],  # x[0.4,0.6] y[0.4,0.75] - overlaps obj_01
+        "same_product_as": "obj_01",
+    })
+    proceed, reason, objs = generate_image_prompt._composite_gate(bp)
+    assert proceed is True
+    assert {o["object_id"] for o in objs} == {"obj_01", "obj_02"}
+
+
+def test_composite_gate_still_rejects_when_a_foreign_object_occludes_one_linked_instance():
+    """Control for the test above - a genuinely foreign object (not a sibling
+    instance) overlapping ONE linked instance's bbox must still reject the whole
+    group, exactly as the pre-existing occlusion gate always has."""
+    bp = _clean_blueprint()
+    bp["objects"].append({
+        **bp["objects"][0], "object_id": "obj_02",
+        "bbox": [0.6, 0.4, 0.2, 0.35], "same_product_as": "obj_01",
+    })
+    bp["objects"].append({
+        "object_id": "obj_card", "kind": "text", "disposition": "drop",
+        "bbox": [0.55, 0.4, 0.2, 0.35],  # overlaps obj_02, not a sibling
+        "description": "testimonial card",
+    })
+    proceed, reason, objs = generate_image_prompt._composite_gate(bp)
+    assert proceed is False
+    assert "obj_card" in reason
+    assert "obj_02" in reason
 
 
 # ---- Occlusion gate (2026-08-19): any other object's bbox overlapping the product's
