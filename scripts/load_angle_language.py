@@ -8,8 +8,14 @@ this script at all - not filtered out, simply out of the parsed range - so
 docs/angle_language.md's own override note ("The loader ignores both sections")
 holds structurally, not just by convention.
 
-best_verbatims is not parsed in this pass - every row gets [] regardless of the
-doc's "The best verbatims" section content.
+best_verbatims IS now parsed (2026-08-19, fabricated-testimonial fix - see
+CLAUDE.md): each angle's "The best verbatims" section is split into
+{"quote": str, "customer_name": str, "age": str|None} entries - see
+_parse_best_verbatims/_parse_attribution below for the exact parsing rules,
+including the two entries per doc ("weight loss customer sentiment", "customer
+sentiment across multiple reviews") that are deliberately EXCLUDED because they
+read as a composite/aggregate sentiment across many reviews rather than one real
+customer's own words - the same fabrication risk this whole change exists to close.
 
 --dry-run parses and prints diagnostics only - it never opens a DB connection,
 so it cannot write, or even read, anything in prod.
@@ -89,6 +95,78 @@ def _split_phrases(lines):
     return [p for p in parts if p]
 
 
+# Matches ONE '"quote text" — Attribution' pair inside a flattened best-verbatims
+# block. Quotes are always literal double-quoted text with no embedded '"'
+# character, so the em-dash that appears INSIDE several real quotes (e.g. "...they
+# feel so much firmer.") never gets mistaken for the quote/attribution boundary -
+# the boundary is always the next literal '"', never the dash itself. The
+# attribution group is non-greedy, bounded by the next '"' (the following entry)
+# or end of string - re.DOTALL so a quote/attribution that wrapped across markdown
+# lines (already flattened to spaces by _join_paragraph before this runs) still
+# matches as one unit.
+_VERBATIM_PATTERN = re.compile(r'"([^"]+)"\s*—\s*([^"]+?)(?=\s*"|\Z)', re.DOTALL)
+
+# A bare age ("68") or a decade ("70s") - deliberately narrow, same principle as
+# deconstruct.py's own bottle-shape-keyword filter: match the one unambiguous
+# shape, never guess from a longer descriptive clause ("3 months of use", "Florida
+# golfer") that happens to share the comma position but isn't an age at all.
+_AGE_PATTERN = re.compile(r"^\d{2,3}s?$")
+
+# Real-but-unnamed attribution, used verbatim in the doc (e.g. "verified customer")
+# - a real customer whose specific name wasn't recorded, NOT a fabricated identity.
+# Mirrors the same generic fallback string generate_image_prompt._substitute_
+# object_line already uses when no attribution is available at all, so the two
+# never disagree on what "no specific name" reads as downstream.
+_GENERIC_CUSTOMER_LABELS = {"verified customer", "customer"}
+
+# Marks a composite/aggregate sentiment summary across MANY reviews, not one real
+# customer's own words (e.g. "weight loss customer sentiment", "customer sentiment
+# across multiple reviews" - both observed in the doc). Excluded entirely rather
+# than loaded with a generic name, since presenting a paraphrased composite as if
+# it were one customer's real quote is exactly the fabrication risk this change
+# exists to close - a real quote needs a real (even if unnamed) customer behind it.
+_SENTIMENT_MARKER = "sentiment"
+
+
+def _parse_attribution(raw):
+    """Raw attribution text -> (customer_name, age) or None to exclude this
+    verbatim entirely (see _SENTIMENT_MARKER above). age is None whenever the
+    text after ', ' isn't a bare age/decade - never guessed from a longer
+    descriptive clause. Never strips a trailing '.' - that's the real customer's
+    own last-initial abbreviation (e.g. "Tara C."), not stray punctuation."""
+    text = re.sub(r"\s+", " ", raw).strip()
+    if _SENTIMENT_MARKER in text.lower():
+        return None
+    if text.lower() in _GENERIC_CUSTOMER_LABELS:
+        return "a verified customer", None
+    if ", " in text:
+        name_part, rest = text.split(", ", 1)
+        rest = rest.strip()
+        if _AGE_PATTERN.match(rest):
+            return name_part.strip(), rest
+        return name_part.strip(), None
+    return text, None
+
+
+def _parse_best_verbatims(lines):
+    """One angle's raw 'best verbatims' section lines -> a list of
+    {"quote": str, "customer_name": str, "age": str|None} dicts, in doc order.
+    Flattens word-wrapped markdown lines into one string first (same as every
+    other multi-line field this parser handles), then extracts every quote/
+    attribution pair - see _VERBATIM_PATTERN's own docstring for why the
+    boundary detection is safe against an em-dash that appears INSIDE a quote."""
+    flattened = _join_paragraph(lines)
+    entries = []
+    for match in _VERBATIM_PATTERN.finditer(flattened):
+        quote = match.group(1).strip()
+        parsed = _parse_attribution(match.group(2))
+        if parsed is None:
+            continue
+        customer_name, age = parsed
+        entries.append({"quote": quote, "customer_name": customer_name, "age": age})
+    return entries
+
+
 def find_angles_anchor(lines):
     """Locate the exact line that scopes parsing to the Angles section. Returns
     (0-based index, line text). Raises if it's missing, so a heading rename in
@@ -143,7 +221,7 @@ def parse_doc(text):
             "main_benefit": _join_paragraph(fields.get("main_benefit", [])),
             "common_phrases": _split_phrases(fields.get("common_phrases", [])),
             "result_phrases": _split_phrases(fields.get("result_phrases", [])),
-            "best_verbatims": [],
+            "best_verbatims": _parse_best_verbatims(fields.get("best_verbatims", [])),
             "image_direction": strip_leadin(_join_paragraph(fields.get("image_direction", []))),
         }
     return rows, (anchor_index, anchor_line)
@@ -172,21 +250,26 @@ def _print_dry_run_report(rows, anchor):
     print()
     for slug in ANGLE_SLUGS.values():
         row = rows[slug]
-        cp, rp = row["common_phrases"], row["result_phrases"]
+        cp, rp, bv = row["common_phrases"], row["result_phrases"], row["best_verbatims"]
         first_12_words = " ".join(row["image_direction"].split()[:12])
+        with_age = sum(1 for v in bv if v["age"])
+        generic = sum(1 for v in bv if v["customer_name"] == "a verified customer")
         print(f"--- {slug} ---")
         print(f"common_phrases: count={len(cp)}")
         print(f"result_phrases: count={len(rp)}")
+        print(f"best_verbatims: count={len(bv)} (with_age={with_age}, generic_attribution={generic})")
         print(f"image_direction (first 12 words): {first_12_words!r}")
         print()
     for slug in ("loose_skin", "glp1"):
         row = rows[slug]
-        cp, rp = row["common_phrases"], row["result_phrases"]
+        cp, rp, bv = row["common_phrases"], row["result_phrases"], row["best_verbatims"]
         print(f"--- {slug} (detail) ---")
         print(f"common_phrases: count={len(cp)} first_3={cp[:3]} last_3={cp[-3:]}")
         print(f"result_phrases: count={len(rp)} first_3={rp[:3]} last_3={rp[-3:]}")
         print(f"image_direction: {row['image_direction']!r}")
-        print(f"best_verbatims == []: {row['best_verbatims'] == []}")
+        print(f"best_verbatims: count={len(bv)}")
+        for v in bv:
+            print(f"  quote={v['quote'][:60]!r}... customer_name={v['customer_name']!r} age={v['age']!r}")
         print()
     print("check_no_unstripped_leadin: all six clear (no ValueError raised above this line)")
 
@@ -260,7 +343,8 @@ def main():
         )
         print(
             f"{slug}: {len(row['common_phrases'])} common phrases, "
-            f"{len(row['result_phrases'])} result phrases loaded"
+            f"{len(row['result_phrases'])} result phrases, "
+            f"{len(row['best_verbatims'])} best verbatims loaded"
         )
 
     print()

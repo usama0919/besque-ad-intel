@@ -70,7 +70,33 @@ def _reads_like_a_complaint(review_text):
     return any(signal in lowered for signal in _TESTIMONIAL_COMPLAINT_SIGNALS)
 
 
-def select_testimonial_review(blueprint, product, ad_id, max_chars=140):
+def _select_angle_verbatim(angle_slug, ad_id, max_chars):
+    """The angle-matched half of select_testimonial_review (2026-08-19, fabricated-
+    named-testimonials fix - see CLAUDE.md). Returns {"quote", "customer_name", "age"}
+    or None - None means "no real verbatim curated for this angle short enough to use",
+    which the caller must treat as drop, never a cue to fall back to product_reviews
+    (angle_language.best_verbatims is authoritative once an angle is set - see this
+    module's own docstring for why product_reviews is never mixed back in here).
+
+    age is read from the table but deliberately never returned to a caller that
+    renders anything - see select_testimonial_review's own return, which drops it -
+    preserving the standing "no age shown on the image" team decision (CLAUDE.md
+    2026-08-04) even though the table now stores it for completeness.
+
+    Deterministic by ad_id, same _stable_index discipline as the product_reviews
+    path below, so a regenerate never silently swaps which real quote is shown."""
+    language = dedupe.get_angle_language(angle_slug)
+    if not language:
+        return None
+    candidates = [v for v in (language.get("best_verbatims") or [])
+                  if len((v or {}).get("quote") or "") <= max_chars]
+    if not candidates:
+        return None
+    candidates_sorted = sorted(candidates, key=lambda v: v["quote"])
+    return candidates_sorted[_stable_index(ad_id, len(candidates_sorted))]
+
+
+def select_testimonial_review(blueprint, product, ad_id, max_chars=140, angle_slug=None):
     """Pick a REAL, approved customer review to substitute into a testimonial-purposed
     text object - real review or nothing, never fabricated (2026-08-06: Gemini was
     inventing customer quotes wholesale for a testimonial-shaped zone it had nothing
@@ -90,16 +116,40 @@ def select_testimonial_review(blueprint, product, ad_id, max_chars=140):
     anywhere downstream (held pending Harry, see CLAUDE.md), so this can never
     accidentally start rendering one.
 
+    ANGLE-MATCHED VERBATIMS NOW AUTHORITATIVE WHEN AN ANGLE IS SET (2026-08-19,
+    fabricated-named-testimonials fix - five real drafts rendered invented named
+    quotes, e.g. "Cynthia Renee W.", none of them real customers, despite
+    docs/angle_language.md's own hand-curated "best verbatims" existing per angle and
+    never having been loaded - see CLAUDE.md). When angle_slug is given, this function
+    draws EXCLUSIVELY from angle_language.best_verbatims (via _select_angle_verbatim)
+    - NEVER falls back to product_reviews below, even if a product_reviews candidate
+    would have existed: a real quote curated for a DIFFERENT angle is exactly the kind
+    of mismatch this fix exists to prevent, not a fallback worth preferring over a
+    clean drop. No matching verbatim for that angle -> None -> the testimonial object
+    drops, never invents one.
+
+    angle_slug=None (no angle selected for this run - a real, common case: every
+    scheduled Cloud Run Job sweep runs angle-less by default, and pool.html's operator
+    UI has an explicit "No angle" option) leaves this function's ORIGINAL
+    product_reviews-based behaviour completely unchanged - there is no angle to match
+    against, and this isn't the failure mode the fix above addresses.
+
     Deterministic by ad_id, not random: the SAME ad picks the SAME review on every
     regenerate (reproducible - a real review disappearing and reappearing on repeat runs
     would itself look like a bug), while different ads spread across the pool.
 
-    No angle or reuse-cooldown matching yet - product_reviews has no angle tag and no
-    per-review "last used" tracking exists (the team's stated want for a future version
-    of this feature, not buildable with today's schema) - deferred rather than guessed
-    at; see CLAUDE.md 2026-08-06. max_chars keeps the pick short enough to read as a
-    single in-image line, the same "short line" constraint image_subtext already
-    applies - not a length pulled from nowhere."""
+    Every outcome is logged by name (2026-08-19) - which verbatim/review was selected
+    (angle-matched or product_reviews-based), or that none was found and the
+    testimonial object(s) will drop - so a run's own log shows whether the angle table
+    was actually consulted, never silently.
+
+    max_chars keeps the pick short enough to read as a single in-image line, the same
+    "short line" constraint image_subtext already applies - not a length pulled from
+    nowhere. Reuse-cooldown matching is still not built (product_reviews has no
+    per-review "last used" tracking, and best_verbatims has no independent
+    "times used" state either) - the team's stated want for a future version of this
+    feature, not buildable with today's schema; deferred rather than guessed at, same
+    as before this fix (see CLAUDE.md 2026-08-06)."""
     objects = (blueprint or {}).get("objects") or []
     wants_quote = any(
         (obj or {}).get("kind") == "text" and (obj or {}).get("text_purpose") == "testimonial"
@@ -107,6 +157,22 @@ def select_testimonial_review(blueprint, product, ad_id, max_chars=140):
     )
     if not wants_quote:
         return None
+
+    if angle_slug:
+        verbatim = _select_angle_verbatim(angle_slug, ad_id, max_chars)
+        if verbatim is None:
+            log.info(
+                "Ad %s: no angle-matched testimonial verbatim found for angle=%r "
+                "(short enough, %s chars) - testimonial object(s) will drop",
+                ad_id, angle_slug, max_chars,
+            )
+            return None
+        log.info(
+            "Ad %s: testimonial verbatim selected for angle=%r: customer=%r",
+            ad_id, angle_slug, verbatim.get("customer_name") or "",
+        )
+        return {"quote": verbatim["quote"], "attribution": verbatim.get("customer_name") or ""}
+
     product_id = (product or {}).get("id")
     if product_id is None:
         return None
@@ -118,9 +184,13 @@ def select_testimonial_review(blueprint, product, ad_id, max_chars=140):
         and not _reads_like_a_complaint(r.get("review_text"))
     ]
     if not candidates:
+        log.info("Ad %s: no product_reviews testimonial candidate found (no angle set) "
+                  "- testimonial object(s) will drop", ad_id)
         return None
     candidates.sort(key=lambda r: r["id"])
     chosen = candidates[_stable_index(ad_id, len(candidates))]
+    log.info("Ad %s: testimonial review selected from product_reviews (no angle set): "
+              "customer=%r", ad_id, chosen.get("nickname") or "")
     return {"quote": chosen["review_text"].strip(), "attribution": chosen.get("nickname") or ""}
 
 
@@ -798,7 +868,7 @@ def _regenerate_existing_draft(ad, angle_id, angle_slug, delta_instruction, shou
     # Recomputed fresh, not read from the artifact - select_testimonial_review is
     # deterministic by ad_id, so this reproduces the SAME pick a normal generation would
     # make with this same blueprint/product, no separate storage needed (2026-08-06).
-    testimonial = select_testimonial_review(blueprint, product, ad_id)
+    testimonial = select_testimonial_review(blueprint, product, ad_id, angle_slug=angle_slug)
     # element_provenance (2026-08-07, reference usability gate reversal): recomputed
     # fresh here too, same reasoning as testimonial above - regenerate always rebuilds
     # against edit_mode=True (this function's only mode, see build_image_prompt call
@@ -1525,7 +1595,7 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
         # the retry loop below - select_testimonial_review is deterministic by ad_id, so
         # every attempt (including the corrective retry) gets the SAME real review, never
         # a different one and never a fabricated one.
-        testimonial = select_testimonial_review(blueprint, product, ad_id)
+        testimonial = select_testimonial_review(blueprint, product, ad_id, angle_slug=angle_slug)
 
         # Corrective-retry loop (2026-08-05): observe (generate) -> evaluate (critic) ->
         # correct (feed the specific findings back) -> re-generate, capped at ONE retry.

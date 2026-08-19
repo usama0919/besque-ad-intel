@@ -1,4 +1,5 @@
 """Tests for the pipeline orchestrator. All live stages monkeypatched - no network, no spend."""
+import logging
 import uuid
 from src import pipeline, dedupe
 
@@ -2186,6 +2187,101 @@ def test_select_testimonial_review_falls_back_attribution_when_nickname_empty(mo
     monkeypatch.setattr(pipeline.dedupe, "get_reviews_for_product", lambda *a, **k: [review])
     result = pipeline.select_testimonial_review(_quote_blueprint(), {"id": 1}, "AD1")
     assert result == {"quote": "Great product.", "attribution": ""}
+
+
+# ---- angle-matched verbatim path (2026-08-19, fabricated-named-testimonials fix):
+# when angle_slug is given, draws exclusively from angle_language.best_verbatims,
+# never falling back to product_reviews. angle_slug=None (no angle set) must leave
+# every test above byte-for-byte unaffected - already confirmed by the full run of
+# the pre-existing tests above still passing unmodified. ----
+
+def _fake_verbatim(quote, customer_name="Tara C.", age=None):
+    return {"quote": quote, "customer_name": customer_name, "age": age}
+
+
+def test_select_testimonial_review_uses_angle_verbatim_when_angle_set(monkeypatch):
+    monkeypatch.setattr(
+        pipeline.dedupe, "get_angle_language",
+        lambda slug: {"best_verbatims": [_fake_verbatim("My arms feel firmer.", "Tara C.")]},
+    )
+    calls = []
+    monkeypatch.setattr(pipeline.dedupe, "get_reviews_for_product", lambda *a, **k: calls.append(1) or [])
+    result = pipeline.select_testimonial_review(
+        _quote_blueprint(), {"id": 1}, "AD1", angle_slug="loose_skin")
+    assert result == {"quote": "My arms feel firmer.", "attribution": "Tara C."}
+    assert calls == [], "product_reviews must never be consulted once an angle is set"
+
+
+def test_select_testimonial_review_age_never_reaches_the_returned_dict(monkeypatch):
+    """age is stored in angle_language.best_verbatims but must never surface in what
+    this function returns - preserves the standing 'no age shown' rule even though
+    the table now captures it."""
+    monkeypatch.setattr(
+        pipeline.dedupe, "get_angle_language",
+        lambda slug: {"best_verbatims": [_fake_verbatim("Skin looks great.", "Mona S.", age="68")]},
+    )
+    result = pipeline.select_testimonial_review(
+        _quote_blueprint(), {"id": 1}, "AD1", angle_slug="loose_skin")
+    assert result == {"quote": "Skin looks great.", "attribution": "Mona S."}
+    assert "68" not in str(result)
+    assert "age" not in result
+
+
+def test_select_testimonial_review_drops_when_angle_has_no_verbatim(monkeypatch):
+    """No matching verbatim for the angle -> None -> drop, even when a product_reviews
+    candidate exists - a real quote curated for a DIFFERENT angle must never substitute
+    just because SOME real review exists somewhere."""
+    monkeypatch.setattr(pipeline.dedupe, "get_angle_language", lambda slug: {"best_verbatims": []})
+    monkeypatch.setattr(
+        pipeline.dedupe, "get_reviews_for_product",
+        lambda *a, **k: [_fake_review(1, "This oil changed my skin.", "Jane D.")],
+    )
+    result = pipeline.select_testimonial_review(
+        _quote_blueprint(), {"id": 1}, "AD1", angle_slug="glp1")
+    assert result is None
+
+
+def test_select_testimonial_review_drops_when_angle_has_no_language_row_at_all(monkeypatch):
+    monkeypatch.setattr(pipeline.dedupe, "get_angle_language", lambda slug: None)
+    result = pipeline.select_testimonial_review(
+        _quote_blueprint(), {"id": 1}, "AD1", angle_slug="unseen_angle")
+    assert result is None
+
+
+def test_select_testimonial_review_excludes_angle_verbatims_too_long(monkeypatch):
+    monkeypatch.setattr(
+        pipeline.dedupe, "get_angle_language",
+        lambda slug: {"best_verbatims": [_fake_verbatim("x" * 500)]},
+    )
+    result = pipeline.select_testimonial_review(
+        _quote_blueprint(), {"id": 1}, "AD1", angle_slug="loose_skin", max_chars=140)
+    assert result is None
+
+
+def test_select_testimonial_review_angle_verbatim_deterministic_for_the_same_ad(monkeypatch):
+    verbatims = [_fake_verbatim(f"Quote number {i} is great.", f"Customer {i}") for i in range(20)]
+    monkeypatch.setattr(pipeline.dedupe, "get_angle_language", lambda slug: {"best_verbatims": verbatims})
+    first = pipeline.select_testimonial_review(
+        _quote_blueprint(), {"id": 1}, "SAME_AD_ID", angle_slug="loose_skin")
+    second = pipeline.select_testimonial_review(
+        _quote_blueprint(), {"id": 1}, "SAME_AD_ID", angle_slug="loose_skin")
+    assert first == second
+
+
+def test_select_testimonial_review_logs_selection_and_drop(monkeypatch, caplog):
+    monkeypatch.setattr(
+        pipeline.dedupe, "get_angle_language",
+        lambda slug: {"best_verbatims": [_fake_verbatim("My arms feel firmer.", "Tara C.")]},
+    )
+    with caplog.at_level(logging.INFO, logger="pipeline"):
+        pipeline.select_testimonial_review(_quote_blueprint(), {"id": 1}, "AD1", angle_slug="loose_skin")
+    assert any("testimonial verbatim selected" in r.getMessage() for r in caplog.records)
+
+    caplog.clear()
+    monkeypatch.setattr(pipeline.dedupe, "get_angle_language", lambda slug: {"best_verbatims": []})
+    with caplog.at_level(logging.INFO, logger="pipeline"):
+        pipeline.select_testimonial_review(_quote_blueprint(), {"id": 1}, "AD1", angle_slug="glp1")
+    assert any("no angle-matched testimonial verbatim found" in r.getMessage() for r in caplog.records)
 
 
 def test_stable_index_is_stable_across_calls():
