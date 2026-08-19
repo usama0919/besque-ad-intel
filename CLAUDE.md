@@ -57,6 +57,57 @@ needs a "skip already-generated ads" or "replay stored state" mode again, it nee
 **new, explicitly named** parameter and a **separate, explicitly named** entry point — never
 a resurrected `regenerate` check on this one.
 
+## STANDING RULE (2026-08-19): no failure in the generation pipeline may produce an artifact that looks clean
+**A failure anywhere in the generation pipeline must always be visible.** It must carry
+the failure in `review_status` (a card marked `failed-review`, never a silent `ok`), a
+`pipeline_warnings` row (`dedupe.record_warning`, read back by the warnings feed), or a
+raised exception (something a caller has to actively handle, not swallow). An outcome
+that satisfies none of these three — a bare `log.warning`/`print()`, a caught exception
+that just falls through to a "success" return, a flag computed but never persisted — is
+the exact shape of bug this codebase keeps finding, independently, in different modules,
+often months apart. When touching code in the generation/save path, actively check which
+of the three applies to every new failure branch — "it's logged" is not one of them.
+
+**Confirmed instances of this exact bug, in the order found:**
+1. **Cached product-cutout fetch failure** (`generate_image_prompt._fetch_product_cutout_bytes`,
+   2026-08-16/19) — a failed GCS fetch was cached as a permanent `None` with only a
+   `log.warning`, silently degrading every later generation's bottle-identity reference
+   with no visible signal; fixed to retry on every call (never cache a failure) and to
+   `record_warning` once per process.
+2. **`save_artifact(regenerate=False)` silently discarding a paid generation** (2026-08-10,
+   Chunk 5 Item 7, and reintroduced/refixed 2026-08-19) — an existing artifact caused
+   `save_artifact`'s own dedupe-skip gate (`SELECT 1 ... if found: return`) to no-op an
+   entire completed, paid deconstruct+copy+image run with no error, no warning, and no
+   `review_status` change — the ad simply looked like it was never touched.
+3. **Pool-send routing into stored-state replay** (2026-08-19) — `explicit_selection`
+   requests could be silently routed into `_regenerate_existing_draft`/stored-prompt
+   replay instead of a fresh generation, with no signal that the "fresh" request had
+   actually reused frozen historical state. See the standing rule above this one.
+4. **The critic-retry hole** (2026-08-19, artifact 1386) — a HIGH-confidence critic
+   finding on attempt 1, followed by attempt 2's own `generate_image()` raising or
+   returning no image, left `review_status` at its loop-initial `"ok"` with no
+   `record_warning` fired at all — four HIGH findings, including C6 nudity/sexualised
+   content and C1 subject identity, shipped indistinguishable from a genuinely clean
+   draft. Fixed via a high-water-mark (`ever_high_confidence`/`critic_never_ran` in
+   `process_ad`) resolved once, after the retry loop, never inline mid-loop — a HIGH
+   finding is never lost to a failure (an errored/no-image/skipped retry, or a critic that
+   never ran), but IS correctly cleared when a later attempt actually completes and comes
+   back with a genuinely clean verdict of its own.
+5. **Open, not fixed: Route B compositing failure** (`generate_image_prompt.py:4020`) — a
+   Pillow/compositing exception during the real-cutout paste falls back to Gemini's own
+   uncomposited render with only a `log.warning`; none of the three. An operator sees a
+   bottle that may be structurally wrong with no signal anywhere that compositing was
+   supposed to happen but silently didn't.
+6. **Open, not fixed: GCS draft-upload failure** (`generate_image_prompt.py:4033`) — a
+   failed bucket upload after the local file already exists is caught by a bare `print()`,
+   not even `log.warning`; none of the three. On Cloud Run, where local disk may be
+   ephemeral, this can mean the draft becomes unreachable after the container recycles,
+   indistinguishable from a successful save until someone goes looking.
+
+Items 5 and 6 are catalogued here specifically so they don't have to be rediscovered from
+scratch — fix them the same way as items 1-4: pick one of the three signals, not a fourth
+option.
+
 ## Prompt-only guardrails do not bind on the image path — read this before adding
 ## an eighth instruction
 Four rounds of increasingly explicit `brand_rules()`/writer instructions failed to stop

@@ -1,7 +1,27 @@
 """Tests for the pipeline orchestrator. All live stages monkeypatched - no network, no spend."""
 import logging
 import uuid
+import pytest
 from src import pipeline, dedupe
+
+# 2026-08-19 (critic-retry hole fix): a check that never ran is not a check that passed.
+# The two tests this marks assert the OLD, now-explicitly-wrong behaviour - "a failed
+# check is not a finding" / "card left unflagged" - for the case where the critic
+# mechanism itself never produced a verdict (check_draft/its wrapping try-except raised).
+# Under the corrected policy, this must mark review_status='failed-review' ("needs manual
+# review"), never leave it at 'ok' just because there happen to be no findings to show.
+# See tests/test_silent_failure_invariants.py's own
+# test_critic_api_connection_error_marks_for_manual_review/
+# test_critic_missing_draft_file_marks_for_manual_review for the corrected coverage of
+# this exact scenario. Skipped, not deleted or rewritten, per this repo's standing rule
+# on tests.
+_CRITIC_NEVER_RAN_SKIP_REASON = (
+    "2026-08-19 critic-retry hole fix: a check that never ran is not a check that passed. "
+    "This test asserts the old 'card left unflagged when the critic itself fails to run' "
+    "behaviour, which the corrected policy explicitly overturns - such a draft must now be "
+    "marked review_status='failed-review' for manual review. See "
+    "tests/test_silent_failure_invariants.py for the corrected coverage of this scenario."
+)
 
 
 def test_process_ad_missing_id_is_failed():
@@ -1375,6 +1395,7 @@ def test_rule6_and_critic_authorised_text_never_contradict():
     assert "NONE - no text was authorised for this image" not in critic_prompt_on
 
 
+@pytest.mark.skip(reason=_CRITIC_NEVER_RAN_SKIP_REASON)
 def test_process_ad_records_warning_and_leaves_card_unflagged_when_critic_fails(monkeypatch, tmp_path):
     dedupe.init_db()
     dedupe.init_artifacts()
@@ -1614,6 +1635,7 @@ def test_process_ad_retry_still_high_never_triggers_a_second_retry(monkeypatch, 
 # Test 5/5: a critic EXCEPTION (not check_draft's normal None-on-failure return, an actual
 # raise reaching pipeline's own try/except around the call) must never lose the draft or
 # trigger a retry it has no verdict to justify.
+@pytest.mark.skip(reason=_CRITIC_NEVER_RAN_SKIP_REASON)
 def test_process_ad_critic_exception_saves_draft_without_retrying(monkeypatch, tmp_path):
     _mock_dedupe_db(monkeypatch)
     ad_id, ad = _mock_ad_and_early_stages(monkeypatch)

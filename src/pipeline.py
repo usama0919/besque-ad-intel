@@ -1622,6 +1622,42 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
         MAX_IMAGE_ATTEMPTS = 2
         draft_image, img_prompt, findings = None, "", None
         review_status = "ok"
+        # High-water marks (2026-08-19, critic-retry hole fix, corrected same day):
+        # review_status is decided ONCE, after the loop, from these two flags - never
+        # inline mid-loop. Before this fix, `review_status = "failed-review"` was set ONLY
+        # inside the `image_attempt >= MAX_IMAGE_ATTEMPTS` branch below - if attempt 1 found
+        # HIGH-confidence findings and attempt 2 (the retry) then raised or returned no
+        # image, the loop broke via the EARLIER `if not new_draft_image: if draft_image:
+        # break` path (a few lines below) without ever reaching that branch, leaving
+        # review_status at its loop-initial "ok" and firing no record_warning at all - a
+        # draft carrying real HIGH findings (confirmed live, artifact 1386: garbled
+        # testimonial, unauthorised CTA, C6 nudity/sexualised content, C1 subject identity)
+        # shipped indistinguishable from a genuinely clean one on both the dashboard badge
+        # and the warnings feed.
+        #
+        # The invariant this fixes is narrower than "never downgrade": a HIGH finding must
+        # never be LOST TO A FAILURE - a retry that errors, returns no image, is skipped
+        # (stop requested), or whose OWN critic check itself never ran - but IS correctly
+        # cleared when a later attempt actually completes and its own real critic verdict
+        # comes back clean. `ever_high_confidence` is set the MOMENT any attempt's
+        # post-drop findings are HIGH; it is explicitly RESET, later in this loop, only at
+        # the one place a later attempt's genuine clean verdict is confirmed (see that
+        # branch's own comment) - every failure shape above reaches a `break`/`continue`
+        # before ever reaching that reset point, so none of them can accidentally clear it.
+        ever_high_confidence = False
+        # last_high_findings (not `findings` itself) is what gets PERSISTED as
+        # critic_findings when ever_high_confidence is True at the end of the loop - kept
+        # in sync with ever_high_confidence (set together, reset together) so it never
+        # holds a stale HIGH finding a later clean verdict already superseded.
+        last_high_findings = None
+        # critic_never_ran: the critic mechanism itself failed to produce a verdict at all
+        # (the try/except around the check_draft call below caught an exception - e.g. the
+        # draft file missing on disk, or brand_rules() raising - never check_draft's OWN
+        # internal API/parse failures, which output_critic.py already converts to a
+        # synthetic HIGH finding rather than None, per its own "never returns None any
+        # more" contract). A check that could not run is never the same as a check that
+        # ran and found nothing - both used to reach review_status="ok" identically.
+        critic_never_ran = False
         for image_attempt in range(1, MAX_IMAGE_ATTEMPTS + 1):
             gen_kwargs = {}
             if image_attempt > 1:
@@ -1757,12 +1793,21 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
                 findings = None
 
             if findings is None:
+                # 2026-08-19 (critic-retry hole fix): this is the wrapping try/except at
+                # this block's own top catching something OTHER than a check_draft
+                # failure (check_draft itself never returns None any more - see
+                # critic_never_ran's own comment above) - e.g. the draft file missing on
+                # disk, or brand_rules() raising. Marked for manual review, never left
+                # indistinguishable from "checked and clean" - decided together with
+                # ever_high_confidence after the loop, never inline here, so an EARLIER
+                # attempt's real HIGH finding is never lost underneath this one.
+                critic_never_ran = True
                 dedupe.init_pipeline_warnings()
                 dedupe.record_warning(
                     "critic_failed",
                     f"Ad {ad_id} ({ad.get('page_name', '?')}): output critic check "
-                    f"failed or was unparseable - draft saved and shown unflagged, "
-                    f"not automatically re-checked.",
+                    f"failed or was unparseable - draft saved and marked for manual "
+                    f"review, not automatically re-checked.",
                 )
                 break
             # Mechanical backstop, general - not testimonial-specific (2026-08-07): drop
@@ -1782,27 +1827,77 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
                     "content, %s remain", ad_id, dropped_count - len(findings), len(findings),
                 )
             if not output_critic.has_high_confidence(findings):
-                break  # clean, or medium/low only - keep this draft
+                # This attempt genuinely completed and its own real critic verdict is
+                # clean (or medium/low only) - this is the ONE place ever_high_confidence
+                # is reset (2026-08-19, corrected same day): the invariant is that a HIGH
+                # finding must never be LOST TO A FAILURE, not that a genuine fix can never
+                # clear it. Every failure shape that must NOT clear it - the retry raising,
+                # returning no image, being skipped (stop requested), or its critic itself
+                # never running - reaches its own `break`/`continue` earlier in this loop,
+                # before ever reaching this line, so none of them can land here by
+                # accident. Safe to reset unconditionally even on attempt 1's own first,
+                # already-clean pass: both flags already started False, so this is a no-op
+                # exactly when there was nothing to clear.
+                ever_high_confidence = False
+                last_high_findings = None
+                break  # keep this draft
+            # HIGH-confidence finding(s) on THIS attempt: record the high-water mark
+            # immediately, unconditionally - never gated on whether a retry remains,
+            # whether the retry will succeed, or whether stop was requested. Confirmed
+            # live before this fix: ad 820540537722129 saved with no failure signal
+            # anywhere - critic_findings alone was NOT read by dashboard.html to drive any
+            # card state; review_status is the actual mechanism, rendered as a distinct
+            # "Failed Review" badge (see templates/dashboard.html).
+            ever_high_confidence = True
+            last_high_findings = findings
             if image_attempt >= MAX_IMAGE_ATTEMPTS:
-                # Retry exhausted and still HIGH: never discard the draft, but mark it
-                # review_status='failed-review' (2026-08-10) so it can never look clean.
-                # Confirmed live before this fix: ad 820540537722129 saved with no
-                # failure signal anywhere - critic_findings alone was NOT read by
-                # dashboard.html to drive any card state (that claim, made here
-                # previously, was wrong); review_status is the actual mechanism, written
-                # in the same call as the findings below, and rendered as a distinct
-                # "Failed Review" badge in dashboard.html (see templates/dashboard.html).
-                review_status = "failed-review"
-                dedupe.init_pipeline_warnings()
-                dedupe.record_warning(
-                    "critic_high_after_retry",
-                    f"Ad {ad_id} ({ad.get('page_name', '?')}): output critic still found "
-                    f"high-confidence issue(s) after one corrective retry - draft saved "
-                    f"but marked failed review: {findings}",
-                )
                 break
             # HIGH finding(s), and a retry remains - loop continues into the next
             # attempt, which feeds `findings` back as gen_kwargs["critic_feedback"] above.
+            # A retry that fails in any way (errors, returns no image, is skipped, or
+            # whose own critic never runs) can never lower this mark - only that retry
+            # actually completing AND coming back genuinely clean can, at the reset point
+            # above.
+
+        # 2026-08-19 (critic-retry hole fix, corrected same day): review_status is
+        # resolved ONCE, HERE, from the high-water marks set inside the loop - never
+        # inline mid-loop. This is what actually closes the hole: previously,
+        # `review_status = "failed-review"` was set only inside the loop's own
+        # `image_attempt >= MAX_IMAGE_ATTEMPTS` branch, which a retry that errored/
+        # returned no image (the `if not new_draft_image: if draft_image: break` path,
+        # above) could skip entirely, leaving review_status at its loop-initial "ok" -
+        # artifact 1386's exact shape: attempt 1 found 4 HIGH findings (including C6
+        # nudity/sexualised content and C1 subject identity), attempt 2's generate_image()
+        # raised, the loop broke via the missing-image path, and "ok" shipped unflagged on
+        # both the dashboard badge and the warnings feed.
+        #
+        # By the time control reaches here, `ever_high_confidence` is True ONLY when no
+        # later attempt both completed AND came back genuinely clean (the one reset point,
+        # inside the loop, already cleared it otherwise) - so this branch firing always
+        # means a real, still-standing HIGH finding, never one a subsequent fix already
+        # resolved. `findings` is overwritten with `last_high_findings` here so a reviewer
+        # looking at a "Failed Review" card sees the finding that actually justifies it,
+        # never an empty list next to a failed badge.
+        if ever_high_confidence:
+            review_status = "failed-review"
+            findings = last_high_findings
+            dedupe.init_pipeline_warnings()
+            dedupe.record_warning(
+                "critic_high_after_retry",
+                f"Ad {ad_id} ({ad.get('page_name', '?')}): output critic found "
+                f"high-confidence issue(s) during generation, and no later attempt both "
+                f"completed and came back clean to supersede it - draft saved but marked "
+                f"failed review: {last_high_findings}",
+            )
+        elif critic_never_ran:
+            # The critic mechanism itself never produced a verdict (see critic_never_ran's
+            # own comment above) - "checked and clean" and "never checked" must never look
+            # the same. No separate review_status value exists for "needs manual review
+            # because the check itself failed" distinct from "checked and found a real
+            # violation" - both reuse "failed-review", the only value dashboard.html's
+            # badge and export_drafts.py's default exclusion already act on. The
+            # 'critic_failed' warning recorded inline above already explains why.
+            review_status = "failed-review"
 
         # Critic-gate continuation (2026-08-10, re-scoped 2026-08-19): save_artifact
         # (regenerate=True) DELETEs then re-INSERTs, and critic_findings/review_status are
@@ -1881,16 +1976,32 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
             # FORCE_REPROCESS-driven default exactly for run_once, unchanged.
             regenerate=(True if explicit_selection else None),
         )
-        # findings is None when check_output was off, or the critic never produced a
-        # verdict (failure/timeout) - distinct from an empty list (checked, clean), which
-        # still needs writing so critic_findings reflects an actual clean check.
+        # findings is None when check_output was off, or the critic mechanism itself never
+        # produced a verdict (critic_never_ran) - distinct from an empty list (checked,
+        # clean), which still needs writing so critic_findings reflects an actual clean
+        # check.
         if findings is not None:
             dedupe.update_artifact_findings(ad_id, findings, angle_id=angle_id, review_status=review_status)
+        elif review_status == "failed-review":
+            # 2026-08-19 (critic-retry hole fix): critic_never_ran escalated review_status
+            # above, but findings itself stayed None (no verdict exists to persist) -
+            # save_artifact's own INSERT left review_status at its schema default ('ok'),
+            # so this escalation is LOST unless written here explicitly, via the SAME
+            # mechanism as every other review_status write. This branch must be checked
+            # BEFORE the prior-review-status carry-forward below: a manual-review
+            # escalation from THIS run's own critic failure must never be silently
+            # overwritten by an EARLIER run's (possibly clean) review_status, however
+            # unlikely the ordering, and it must never depend on explicit_selection (a
+            # plain run_once first-generation critic failure needs this write exactly as
+            # much as a pool-send regenerate does - prior_review_status is None there,
+            # so falling through to the elif below would silently do nothing at all).
+            dedupe.update_artifact_findings(ad_id, [], angle_id=angle_id, review_status=review_status)
         elif prior_review_status is not None:
-            # No fresh verdict this run, but this pool send DID replace an existing row -
-            # carry the prior findings/review_status forward explicitly. Skipping this
-            # write would NOT preserve it - the save_artifact call above already reset it
-            # via its DELETE+INSERT; this is the only way to undo that.
+            # No fresh verdict this run (check_output was off), but this pool send DID
+            # replace an existing row - carry the prior findings/review_status forward
+            # explicitly. Skipping this write would NOT preserve it - the save_artifact
+            # call above already reset it via its DELETE+INSERT; this is the only way to
+            # undo that.
             dedupe.update_artifact_findings(ad_id, prior_critic_findings, angle_id=angle_id,
                                              review_status=prior_review_status)
 
