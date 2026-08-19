@@ -4545,7 +4545,12 @@ def _regenerate_image_bytes(current_image_bytes, stored_prompt, instruction):
 
 
 def regenerate_from_stored_prompt(current_image_bytes, stored_prompt, instruction, ad_id, angle_slug=None):
-    """Regenerate a draft by applying `instruction` as a delta to `stored_prompt` (the
+    """UNREACHABLE FROM PRODUCTION as of 2026-08-19 (the pool-send routing fix, src/pipeline.py) -
+    its only caller was pipeline._regenerate_existing_draft, which process_ad no longer
+    calls under any value of `regenerate`. Retained, not deleted, pending a commit-2
+    decision on whether a dedicated (non-pool) regenerate entry point should call it.
+
+    Regenerate a draft by applying `instruction` as a delta to `stored_prompt` (the
     exact prompt that produced current_image_bytes), never a fresh rebuild from current
     form state. Aspect ratio is derived from current_image_bytes itself, never a
     parameter. Caller must version the outgoing draft before calling this - it only

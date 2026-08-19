@@ -4,9 +4,28 @@ rows (uuid-suffixed, cleaned up in finally). Gemini/Claude mocked throughout via
 pipeline's own stage modules - no network, no spend."""
 import threading
 import uuid
+import pytest
 import dashboard
 from fastapi.testclient import TestClient
 from src import dedupe, pipeline
+
+# 2026-08-19 (pool-send routing fix, second pass): the "Item 7a" already_generated skip in
+# process_ad - `if explicit_selection and not regenerate: existing =
+# dedupe.get_artifact(...); if existing: return "already_generated"` - is REMOVED
+# structurally. POST /api/generate (pool send, the only caller of this code path) is now
+# unconditionally a fresh generation for every selected ad, including one that already has
+# an artifact - it must run deconstruct/copy/image, never skip and spend nothing. See
+# tests/test_generate_from_selection.py for the pipeline-level twin of this same skip and
+# its identical reasoning.
+_POOL_ROUTING_FIX_ALREADY_GENERATED_SKIP_REASON = (
+    "2026-08-19 pool-send routing fix (second pass): the already_generated skip was "
+    "removed from process_ad structurally - pool send (POST /api/generate) is now "
+    "unconditionally a fresh generation, so an ad with an existing artifact runs "
+    "deconstruct/copy/image like any other selected ad, never skips and spends nothing. "
+    "This test asserts the removed contract for the only production caller. Retained, not "
+    "deleted or rewritten, pending the commit-2 decision on a dedicated regenerate/"
+    "already-generated-aware entry point, if one is built."
+)
 
 
 def _make_competitor():
@@ -362,6 +381,7 @@ def test_api_generate_product_scoping_respected(monkeypatch):
 
 # ---- Item 3: skip path spends nothing when already generated and not regenerating ----
 
+@pytest.mark.skip(reason=_POOL_ROUTING_FIX_ALREADY_GENERATED_SKIP_REASON)
 def test_api_generate_already_generated_skip_spends_nothing(monkeypatch):
     cid = _make_competitor()
     ad_id = _seed_scraped_ad(cid)

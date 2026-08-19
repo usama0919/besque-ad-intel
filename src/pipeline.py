@@ -667,7 +667,15 @@ def _regenerate_existing_draft(ad, angle_id, angle_slug, delta_instruction, shou
                                 live_include_product=None, live_retheme_colours=None,
                                 live_realism=None, live_body_area=None, live_offer_text=None,
                                 check_output=False, clone_mode=False):
-    """Apply delta_instruction as a targeted change to a prompt REBUILT from CURRENT code
+    """UNREACHABLE FROM PRODUCTION as of 2026-08-19 (the pool-send routing fix) - process_ad
+    no longer calls this function under any value of `regenerate`; explicit_selection is
+    exclusively pool send (generate_from_selection, dashboard.py's POST /api/generate), and
+    pool send is now a permanent fresh-generation entry point. Retained, not deleted,
+    pending a commit-2 decision on whether a dedicated (non-pool) regenerate entry point
+    should call it. tests/test_pipeline.py's own direct calls into this function (bypassing
+    process_ad) remain valid coverage of the function in isolation.
+
+    Apply delta_instruction as a targeted change to a prompt REBUILT from CURRENT code
     (generate_image_prompt.build_image_prompt) and the artifact's own stored inputs - never
     the artifact's frozen historical image_prompt text.
 
@@ -1181,15 +1189,20 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
     end exactly as normal (unchanged), so a LATER non-explicit run (run_once) still treats
     it as seen.
 
-    regenerate: only meaningful when explicit_selection=True (run_once never regenerates).
-    False (default) returns "already_generated" if an artifact exists, spending nothing.
-    True hands off to _regenerate_existing_draft - REBUILDS the image prompt from current
-    code and the artifact's own stored inputs (2026-08-06 - never the artifact's frozen
-    historical image_prompt text, see that function's docstring for why), then applies
-    operator_instruction as a targeted delta on top. Never a fresh deconstruct/copy run -
-    those stay reused from the existing artifact. Falls back to a normal first generation
-    (this same function, from the top) when no artifact exists yet, rather than failing an
-    ad for having no history.
+    regenerate: as of 2026-08-19 (second pass), this parameter is VESTIGIAL when
+    explicit_selection=True - nothing in this function's body reads it any more.
+    explicit_selection is exclusively pool send (generate_from_selection, dashboard.py's
+    POST /api/generate - no other caller exists), and pool send is now UNCONDITIONALLY a
+    fresh generation: no existing artifact, no stored blueprint, no stored prompt, and no
+    value of `regenerate` changes that - there is no "already_generated" skip left to
+    bypass or not bypass. Kept on the signature rather than deleted (a signature change
+    touches generate_from_selection and dashboard.py too - out of scope for a routing
+    fix), but genuinely unused here now; still forwarded from generate_from_selection
+    unchanged, since dashboard.py may still send it (or default it False) with no effect
+    either way. See the module-level notes on _regenerate_existing_draft and
+    regenerate_from_stored_prompt for why THOSE functions are kept, unreachable, rather
+    than deleted - same reasoning, this parameter is the last remaining thing that used
+    to route to them and no longer does.
 
     config, if given, is a BatchAdConfig (frozen, generate_from_selection) snapshot of the
     eight run-strip fields it holds - belt and braces with the caller's own explicit
@@ -1241,33 +1254,31 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
             log.info("Ad %s already seen for angle_id=%s, skipping", ad_id, angle_id)
             return "skipped"
 
-        # Item 7a: check BEFORE any paid call, not after. explicit_selection is the only
-        # path this can ever fire on - run_once never sets it, so its behaviour is
-        # untouched. Never pay for a deconstruct/Gemini call just to have save_artifact
-        # silently discard the result afterward.
-        if explicit_selection and not regenerate:
-            existing = dedupe.get_artifact(ad_id, angle_id=angle_id)
-            if existing is not None:
-                log.info("Ad %s already generated for angle_id=%s, skipping (regenerate not requested)",
-                         ad_id, angle_id)
-                return "already_generated"
-
-        # Regenerate supersedes the rest of this pipeline entirely - no deconstruct, no
-        # fresh copy - but the image PROMPT is rebuilt from current code (2026-08-06),
-        # never replayed frozen. Falls through to a normal first generation below when no
-        # artifact exists yet for this (ad_id, angle_id) - never fails an ad for having no
-        # history.
-        if explicit_selection and regenerate:
-            regen_result = _regenerate_existing_draft(
-                ad, angle_id, angle_slug, operator_instruction, should_stop,
-                live_include_product=live_include_product, live_retheme_colours=live_retheme_colours,
-                live_realism=live_realism, live_body_area=live_body_area, live_offer_text=live_offer_text,
-                check_output=check_output, clone_mode=clone_mode,
-            )
-            if regen_result is not None:
-                return regen_result
-            # else: no existing artifact yet - fall through, exactly as if regenerate had
-            # never been requested.
+        # 2026-08-19 (pool-send routing fix, second pass): the "Item 7a" already_generated
+        # skip that used to live here - `if explicit_selection and not regenerate: existing
+        # = dedupe.get_artifact(...); if existing: return "already_generated"` - is REMOVED
+        # (not gated behind another conditional). explicit_selection is exclusively pool
+        # send (generate_from_selection, dashboard.py's POST /api/generate) - confirmed by
+        # grep, there is no other production caller. Pool send is now STRUCTURALLY a
+        # fresh-generation entry point: this function no longer reads artifact existence
+        # anywhere in the explicit-selection branch to decide whether to run deconstruct/
+        # copy/image, so a future change cannot silently reintroduce a stored-state skip
+        # here by flipping a conditional back on - the dedupe.get_artifact(...) call that
+        # skip depended on is gone from this branch entirely, not merely bypassed. The
+        # `not explicit_selection` seen_ads skip immediately above is UNCHANGED - it
+        # governs run_once, a different caller with different semantics entirely
+        # (angle-scoped dedup against seen_ads, never artifact existence).
+        #
+        # Removing this skip alone was NOT sufficient - two downstream reads of
+        # `regenerate` had to change too, or an ad with an existing artifact would run the
+        # full paid pipeline below and then have save_artifact's own dedupe-skip gate
+        # silently discard the result (the exact "paid call, silently discarded" defect
+        # class Chunk 5 Item 7 already fixed once - see both of those changes' own
+        # comments, near save_artifact's call further down). Nothing here routes on
+        # `regenerate` any more; _regenerate_existing_draft and
+        # regenerate_from_stored_prompt remain unreachable from process_ad for the same
+        # reason as the first pass of this fix, now completely (see their own
+        # module-level notes).
 
         log.info("Ad %s (index %s/%s): deconstruct starting", ad_id, ad_index, total_ads)
         image_bytes = assets.download_image_bytes(ad["image_url"])
@@ -1793,20 +1804,28 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
             # HIGH finding(s), and a retry remains - loop continues into the next
             # attempt, which feeds `findings` back as gen_kwargs["critic_feedback"] above.
 
-        # Critic-gate continuation (2026-08-10): save_artifact(regenerate=True) DELETEs
-        # then re-INSERTs, and critic_findings/review_status are not in that INSERT's
-        # column list (see the dedupe.py schema audit) - they would silently reset to
-        # '[]'/'ok' on every regenerate unless the PRIOR values are captured before the
-        # DELETE destroys them and explicitly rewritten afterward. Mirrors
-        # _regenerate_existing_draft's own fix exactly - this is the sibling gap that
-        # fix didn't close, because THIS save_artifact call belongs to process_ad's own
-        # fresh-generation body, reached via the Task F point 2 fallthrough (existing
-        # row, unreadable draft image) when explicit_selection+regenerate are both true.
-        # Gated on the SAME condition save_artifact's own `regenerate=` argument below
-        # resolves truthy on - a genuine first generation has no prior row and must not
-        # fetch one.
+        # Critic-gate continuation (2026-08-10, re-scoped 2026-08-19): save_artifact
+        # (regenerate=True) DELETEs then re-INSERTs, and critic_findings/review_status are
+        # not in that INSERT's column list (see the dedupe.py schema audit) - they would
+        # silently reset to '[]'/'ok' on every such replace unless the PRIOR values are
+        # captured before the DELETE destroys them and explicitly rewritten afterward.
+        # Mirrors _regenerate_existing_draft's own fix exactly - this is the sibling gap
+        # that fix didn't close, because THIS save_artifact call belongs to process_ad's
+        # own fresh-generation body.
+        #
+        # 2026-08-19 (pool-send routing fix, second pass): re-scoped from `explicit_selection
+        # and regenerate` to `explicit_selection` alone. Pool send is now UNCONDITIONALLY a
+        # fresh generation for every selected ad (the already_generated skip above is gone
+        # entirely, not just bypassed) - an ad with an existing artifact reaches this point
+        # regardless of `regenerate`'s value, and save_artifact below now always passes
+        # regenerate=True for explicit_selection (see its own comment). This fetch MUST run
+        # for every explicit-selection call that might hit an existing row, not only when
+        # the now-vestigial `regenerate` flag happened to be True - gating it on `regenerate`
+        # would silently reset critic_findings/review_status on every pool send of an
+        # already-generated ad, the exact defect this block exists to prevent. A genuine
+        # first generation still has no prior row, so this is a no-op for it either way.
         prior_critic_findings, prior_review_status = None, None
-        if explicit_selection and regenerate:
+        if explicit_selection:
             prior_artifact = dedupe.get_artifact(ad_id, angle_id=angle_id)
             if prior_artifact is not None:
                 prior_critic_findings = prior_artifact.get("critic_findings") or []
@@ -1847,10 +1866,20 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
             offer_text=offer_text,
             product_id=(product or {}).get("id"),
             element_provenance=element_provenance,
-            # None (not explicit_selection) preserves save_artifact's own
-            # FORCE_REPROCESS-driven default exactly - only an explicit-selection
-            # regenerate passes an explicit True, per Item 7b.
-            regenerate=(regenerate if explicit_selection else None),
+            # 2026-08-19 (pool-send routing fix, second pass): explicit_selection ALONE
+            # decides this now, never the `regenerate` parameter. Pool send is
+            # unconditionally a fresh generation, so it must ALWAYS be allowed to replace
+            # whatever row already exists for this (ad_id, angle_id) - not only when the
+            # (now vestigial) `regenerate` flag happened to be True. The previous
+            # `regenerate=(regenerate if explicit_selection else None)` would silently
+            # no-op this ENTIRE paid generation via save_artifact's own dedupe-skip gate
+            # (dedupe.py: `SELECT 1 ... if found: return`) whenever an artifact already
+            # existed and `regenerate` was False - exactly the "paid call, silently
+            # discarded" defect Chunk 5 Item 7 already fixed once, reintroduced in a new
+            # shape by removing the already_generated skip above without this companion
+            # fix. None (not explicit_selection) preserves save_artifact's own
+            # FORCE_REPROCESS-driven default exactly for run_once, unchanged.
+            regenerate=(True if explicit_selection else None),
         )
         # findings is None when check_output was off, or the critic never produced a
         # verdict (failure/timeout) - distinct from an empty list (checked, clean), which
@@ -1858,7 +1887,7 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
         if findings is not None:
             dedupe.update_artifact_findings(ad_id, findings, angle_id=angle_id, review_status=review_status)
         elif prior_review_status is not None:
-            # No fresh verdict this run, but this WAS a regenerate of an existing row -
+            # No fresh verdict this run, but this pool send DID replace an existing row -
             # carry the prior findings/review_status forward explicitly. Skipping this
             # write would NOT preserve it - the save_artifact call above already reset it
             # via its DELETE+INSERT; this is the only way to undo that.

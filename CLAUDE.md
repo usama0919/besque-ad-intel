@@ -17,6 +17,46 @@ gives you one last chance to notice it mattered before it's too late to ask. A
 deleted test is not information; it is silence, and silence is how six capability
 losses shipped undetected long enough to need a forensic audit to find them.
 
+## STANDING RULE (2026-08-19): pool send is unconditionally fresh — never reintroduce `regenerate` as a routing input
+**Pool send (`generate_from_selection`, `dashboard.py`'s `POST /api/generate` — the only
+production caller of `process_ad(explicit_selection=True, ...)`) is a permanent
+fresh-generation entry point.** No existing artifact, no stored blueprint, no stored
+prompt, and no value of the `regenerate` parameter may route it into stored-state replay.
+`process_ad`'s old `if explicit_selection and not regenerate: ... return
+"already_generated"` skip is **removed structurally**, not gated behind another
+conditional — there is nothing left in that function reading artifact existence to decide
+whether to run deconstruct/copy/image for an explicit-selection ad.
+
+**`regenerate` is now VESTIGIAL in three places, left in place rather than deleted (per
+the standing rule above), and each one is re-wirable by someone later who doesn't know
+this history:**
+1. `process_ad`'s own `regenerate` parameter — confirmed by AST walk to have zero
+   remaining reads in the function body.
+2. `dashboard.py:1592` still reads `regenerate` off the `POST /api/generate` body and
+   forwards it — pool.html no longer sends it, so this is always `False`/absent in
+   practice, but nothing stops a future caller from sending `True` again.
+3. `pool.html`'s `selectionIncludesAlreadyGenerated()` — still computed, but only to drive
+   the informational `regenerateNote` banner/status-line copy, never sent in the request
+   body.
+
+**`_regenerate_existing_draft` (`src/pipeline.py`) and `regenerate_from_stored_prompt`
+(`src/generate_image_prompt.py`) are UNREACHABLE FROM PRODUCTION** as a direct consequence
+— `_regenerate_existing_draft`'s only caller was `process_ad`, and `regenerate_from_stored_prompt`'s
+only caller was `_regenerate_existing_draft`. Both are kept, not deleted, each carrying a
+module-level docstring note saying so, pending a decision on whether a dedicated
+(non-pool) regenerate entry point should ever call them again.
+
+**Do not "fix" any of this by reading `regenerate` again inside `process_ad`'s
+explicit-selection branch, or by having `dashboard.py`/`pool.html` start sending it as a
+routing signal.** That is exactly the shape of bug this fix closed: an ad with an existing
+artifact silently discarding a full paid generation via `save_artifact`'s own dedupe-skip
+gate (`SELECT 1 ... if found: return`) when `save_artifact(regenerate=...)` was keyed off
+this same flag instead of `explicit_selection` alone — a real, live defect found and fixed
+in the same commit as the routing removal, not merely a hypothetical. If pool send ever
+needs a "skip already-generated ads" or "replay stored state" mode again, it needs a
+**new, explicitly named** parameter and a **separate, explicitly named** entry point — never
+a resurrected `regenerate` check on this one.
+
 ## Prompt-only guardrails do not bind on the image path — read this before adding
 ## an eighth instruction
 Four rounds of increasingly explicit `brand_rules()`/writer instructions failed to stop

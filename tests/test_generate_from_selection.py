@@ -4,7 +4,45 @@ live stages (deconstruct/copy/compliance/image/Slack) monkeypatched - no network
 no spend. Real DB for scraped_ads/seen_ads/artifacts, uuid-suffixed rows, cleaned
 up in finally."""
 import uuid
+import pytest
 from src import pipeline, dedupe
+
+# 2026-08-19 (pool-send routing fix): explicit_selection is exclusively pool send
+# (generate_from_selection, dashboard.py's POST /api/generate) - there is no other
+# production caller. Pool send is now a permanent fresh-generation entry point, so
+# process_ad no longer routes into _regenerate_existing_draft/regenerate_from_stored_prompt
+# under any value of `regenerate`. The ten tests below assert the OLD contract for that
+# exact call path (deconstruct/copy skipped, regenerate_from_stored_prompt invoked, stored
+# blueprint/prompt reused) and are now false statements about the only real caller -
+# skipped, not deleted or rewritten, pending the commit-2 decision on whether a dedicated
+# (non-pool) regenerate entry point gets built and, if so, what re-targets this coverage.
+_POOL_ROUTING_FIX_SKIP_REASON = (
+    "2026-08-19 pool-send routing fix: explicit_selection is exclusively pool send, which "
+    "is now a permanent fresh-generation entry point - process_ad no longer calls "
+    "_regenerate_existing_draft/regenerate_from_stored_prompt under any `regenerate` value, "
+    "so this test's asserted contract (deconstruct/copy skipped, stored prompt/blueprint "
+    "reused) is no longer true of the only production caller. Retained, not deleted or "
+    "rewritten, pending the commit-2 decision on a dedicated regenerate entry point."
+)
+
+# 2026-08-19 (pool-send routing fix, second pass): the "Item 7a" already_generated skip
+# in process_ad - `if explicit_selection and not regenerate: existing =
+# dedupe.get_artifact(...); if existing: return "already_generated"` - is REMOVED
+# structurally, not gated behind another conditional. Pool send is now unconditionally a
+# fresh generation for every selected ad, including one that already has an artifact - it
+# must run deconstruct/copy/image, never skip and spend nothing. The test below asserts
+# exactly the removed contract for the only production caller (pool send /
+# generate_from_selection) - skipped, not deleted or rewritten, for the same reason as the
+# ten above.
+_POOL_ROUTING_FIX_ALREADY_GENERATED_SKIP_REASON = (
+    "2026-08-19 pool-send routing fix (second pass): the already_generated skip was "
+    "removed from process_ad structurally - pool send is now unconditionally a fresh "
+    "generation, so an ad with an existing artifact runs deconstruct/copy/image like any "
+    "other selected ad, never skips and spends nothing. This test asserts the removed "
+    "contract for the only production caller (pool send / generate_from_selection). "
+    "Retained, not deleted or rewritten, pending the commit-2 decision on a dedicated "
+    "regenerate/already-generated-aware entry point, if one is built."
+)
 
 
 def _make_competitor():
@@ -725,6 +763,7 @@ def test_generate_from_selection_overrides_seen_ads_skip(monkeypatch):
         _cleanup(cid, [ad_id])
 
 
+@pytest.mark.skip(reason=_POOL_ROUTING_FIX_ALREADY_GENERATED_SKIP_REASON)
 def test_generate_from_selection_already_generated_skip_spends_nothing(monkeypatch):
     """Chunk 5, Item 7 fix: the ordering defect is closed by checking for an
     existing artifact BEFORE any paid call. regenerate=False (the default) means
@@ -758,6 +797,7 @@ def test_generate_from_selection_already_generated_skip_spends_nothing(monkeypat
         _cleanup(cid, [ad_id])
 
 
+@pytest.mark.skip(reason=_POOL_ROUTING_FIX_SKIP_REASON)
 def test_generate_from_selection_regenerate_versions_draft_and_applies_delta_to_stored_prompt(monkeypatch):
     """regenerate=True REBUILDS the image prompt from current code and the artifact's
     stored inputs (2026-08-06 - see pipeline._regenerate_existing_draft), then applies
@@ -815,6 +855,7 @@ def test_generate_from_selection_regenerate_versions_draft_and_applies_delta_to_
 # forcing one in risks the artifact-1136 failure mode (a prompt that simultaneously demands
 # and forbids the same element). ----
 
+@pytest.mark.skip(reason=_POOL_ROUTING_FIX_SKIP_REASON)
 def test_generate_from_selection_regenerate_check_output_high_sets_failed_review(monkeypatch):
     cid = _make_competitor()
     ad_id = _seed_scraped_ad(cid)
@@ -846,6 +887,7 @@ def test_generate_from_selection_regenerate_check_output_high_sets_failed_review
         _cleanup(cid, [ad_id])
 
 
+@pytest.mark.skip(reason=_POOL_ROUTING_FIX_SKIP_REASON)
 def test_generate_from_selection_regenerate_check_output_clean_sets_ok(monkeypatch):
     cid = _make_competitor()
     ad_id = _seed_scraped_ad(cid)
@@ -876,6 +918,7 @@ def test_generate_from_selection_regenerate_check_output_clean_sets_ok(monkeypat
         _cleanup(cid, [ad_id])
 
 
+@pytest.mark.skip(reason=_POOL_ROUTING_FIX_SKIP_REASON)
 def test_generate_from_selection_regenerate_check_output_false_leaves_review_status_untouched(monkeypatch):
     cid = _make_competitor()
     ad_id = _seed_scraped_ad(cid)
@@ -911,6 +954,7 @@ def test_generate_from_selection_regenerate_check_output_false_leaves_review_sta
         _cleanup(cid, [ad_id])
 
 
+@pytest.mark.skip(reason=_POOL_ROUTING_FIX_SKIP_REASON)
 def test_process_ad_regenerate_fallthrough_check_output_false_leaves_review_status_untouched(monkeypatch):
     """Task F point 2 fallthrough (existing row, unreadable draft image) + check_output=False:
     process_ad's OWN save_artifact(regenerate=True) call must not silently clear a prior
@@ -944,6 +988,7 @@ def test_process_ad_regenerate_fallthrough_check_output_false_leaves_review_stat
         _cleanup(cid, [ad_id])
 
 
+@pytest.mark.skip(reason=_POOL_ROUTING_FIX_SKIP_REASON)
 def test_generate_from_selection_regenerate_rebuilds_prompt_from_current_code(monkeypatch):
     """THE property that was silently false until 2026-08-06: a rule present in CURRENT
     build_image_prompt/brand_rules/compliance code must appear in a regenerated draft's
@@ -990,6 +1035,7 @@ def test_generate_from_selection_regenerate_rebuilds_prompt_from_current_code(mo
         _cleanup(cid, [ad_id])
 
 
+@pytest.mark.skip(reason=_POOL_ROUTING_FIX_SKIP_REASON)
 def test_generate_from_selection_regenerate_falls_back_to_normal_generation_when_no_artifact(monkeypatch):
     """regenerate=True with NO existing artifact for this (ad_id, angle_id) must fall
     back to a normal first generation - never fail an ad just for having no history.
@@ -1010,6 +1056,7 @@ def test_generate_from_selection_regenerate_falls_back_to_normal_generation_when
         _cleanup(cid, [ad_id])
 
 
+@pytest.mark.skip(reason=_POOL_ROUTING_FIX_SKIP_REASON)
 def test_generate_from_selection_regenerate_live_input_overrides_stored(monkeypatch):
     """Task F, point 1 (2026-08-07): live operator input for THIS regenerate call must
     win over the stored artifact value - reproduces the exact bug shape ads
@@ -1048,6 +1095,7 @@ def test_generate_from_selection_regenerate_live_input_overrides_stored(monkeypa
         _cleanup(cid, [ad_id])
 
 
+@pytest.mark.skip(reason=_POOL_ROUTING_FIX_SKIP_REASON)
 def test_generate_from_selection_regenerate_missing_draft_image_falls_back_preserving_edit_mode(monkeypatch):
     """Task F, point 2 (2026-08-07): the artifact ROW exists but its draft image does not
     (ad 1888339248562394 - "regenerate requested but no current draft image could be
@@ -1088,6 +1136,7 @@ def test_generate_from_selection_regenerate_missing_draft_image_falls_back_prese
         _cleanup(cid, [ad_id])
 
 
+@pytest.mark.skip(reason=_POOL_ROUTING_FIX_SKIP_REASON)
 def test_generate_from_selection_regenerate_fails_loudly_without_stored_blueprint(monkeypatch):
     """No blueprint on the existing artifact must fail, never silently rebuild a prompt
     from nothing - blueprint is the one truly required input for a rebuild (unlike
@@ -1178,6 +1227,273 @@ def test_save_artifact_regenerate_false_no_ops_regardless_of_module_flag(monkeyp
         with dedupe.get_conn() as conn, conn.cursor() as cur:
             cur.execute("DELETE FROM artifacts WHERE ad_id=%s", (ad_id,))
             conn.commit()
+
+
+# ---- 2026-08-19: pool-send routing fix - regression tests (six, as specified) ----
+#
+# Pool send (generate_from_selection, dashboard.py's POST /api/generate) is the ONLY
+# production caller that ever sets process_ad's explicit_selection=True - confirmed by
+# grepping every call site of process_ad and of _regenerate_existing_draft. These six
+# tests assert ROUTING, not output: that pool send always reaches the real fresh-
+# generation path (deconstruct -> copy -> generate_image) and never
+# _regenerate_existing_draft/regenerate_from_stored_prompt, regardless of `regenerate`,
+# an existing artifact, a stored blueprint, or a stored prompt.
+
+def test_pool_send_existing_artifact_calls_generate_image_not_regenerate_from_stored_prompt(monkeypatch):
+    """Test 1/6: an ad that already has an artifact must still run the REAL
+    fresh-generation path when pool send asks to regenerate it - never
+    regenerate_from_stored_prompt, which would replay THIS ad's own prior blueprint/copy
+    instead of re-deriving everything from the pool-selected reference image."""
+    cid = _make_competitor()
+    ad_id = _seed_scraped_ad(cid)
+    dedupe.init_artifacts()
+    dedupe.save_artifact(
+        ad_id=ad_id, page_name="Brand", image_path="assets/x.jpg",
+        blueprint={"format": "old_hero"}, generated_copy={"headline": "Old"},
+        draft_image="assets/x_draft.png", metadata={"cta": "Shop", "destination_url": "http://x"},
+        image_prompt="STORED PROMPT TEXT",
+    )
+    _mock_success(monkeypatch)
+    generate_image_calls = []
+    regenerate_calls = []
+    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image",
+                        lambda bp, aid, product=None, reference_images=None, **k:
+                            generate_image_calls.append(1) or "draft.png")
+    monkeypatch.setattr(pipeline.generate_image_prompt, "regenerate_from_stored_prompt",
+                        lambda *a, **k: regenerate_calls.append(1) or "should-not-be-called.png")
+    try:
+        result = pipeline.generate_from_selection([ad_id], regenerate=True)
+        assert result["by_ad"][ad_id] == "processed"
+        assert generate_image_calls == [1], "pool send must call generate_image for an already-generated ad"
+        assert regenerate_calls == [], "pool send must never call regenerate_from_stored_prompt"
+    finally:
+        _cleanup(cid, [ad_id])
+
+
+def test_pool_send_regenerate_flag_leak_guard_still_calls_generate_image(monkeypatch):
+    """Test 2/6: regenerate=True on a pool-send request with NO prior history for this ad
+    must behave exactly like any other first-time pool send - generate_image is called,
+    regenerate_from_stored_prompt never is. Guards against a future change reading
+    `regenerate` anywhere in process_ad's fresh-path branch and rerouting on it."""
+    cid = _make_competitor()
+    ad_id = _seed_scraped_ad(cid)
+    dedupe.init_artifacts()  # no existing artifact row at all
+    _mock_success(monkeypatch)
+    generate_image_calls = []
+    regenerate_calls = []
+    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image",
+                        lambda bp, aid, product=None, reference_images=None, **k:
+                            generate_image_calls.append(1) or "draft.png")
+    monkeypatch.setattr(pipeline.generate_image_prompt, "regenerate_from_stored_prompt",
+                        lambda *a, **k: regenerate_calls.append(1) or "should-not-be-called.png")
+    try:
+        result = pipeline.generate_from_selection([ad_id], regenerate=True)
+        assert result["by_ad"][ad_id] == "processed"
+        assert generate_image_calls == [1], "regenerate=True must not prevent a normal pool-send generation"
+        assert regenerate_calls == [], "regenerate=True must never call regenerate_from_stored_prompt"
+    finally:
+        _cleanup(cid, [ad_id])
+
+
+def test_pool_send_existing_stored_blueprint_deconstruct_still_runs(monkeypatch):
+    """Test 3/6: an ad with a real stored blueprint on its existing artifact must still
+    get a fresh deconstruct call from pool send - the stored blueprint must never be
+    reused in place of re-deriving it from the pool-selected reference image."""
+    cid = _make_competitor()
+    ad_id = _seed_scraped_ad(cid)
+    dedupe.init_artifacts()
+    dedupe.save_artifact(
+        ad_id=ad_id, page_name="Brand", image_path="assets/x.jpg",
+        blueprint={"format": "old_hero", "objects": [{"object_id": "old", "kind": "text"}]},
+        generated_copy={"headline": "Old"},
+        draft_image="assets/x_draft.png", metadata={"cta": "Shop", "destination_url": "http://x"},
+    )
+    _mock_success(monkeypatch)
+    deconstruct_calls = []
+    monkeypatch.setattr(pipeline.deconstruct, "deconstruct_image",
+                        lambda **k: deconstruct_calls.append(1) or {"format": "hero", "angle": "a"})
+    try:
+        result = pipeline.generate_from_selection([ad_id], regenerate=True)
+        assert result["by_ad"][ad_id] == "processed"
+        assert deconstruct_calls == [1], "pool send must always deconstruct, even with a stored blueprint present"
+    finally:
+        _cleanup(cid, [ad_id])
+
+
+def test_pool_send_existing_stored_prompt_still_calls_generate_image_with_fresh_prompt(monkeypatch):
+    """Test 4/6: an ad with a stored image_prompt on its existing artifact must still get
+    a genuinely fresh prompt built and persisted - the stored prompt text must never
+    survive into the new artifact row, proving the run didn't quietly fall back to
+    replaying it."""
+    cid = _make_competitor()
+    ad_id = _seed_scraped_ad(cid)
+    dedupe.init_artifacts()
+    dedupe.save_artifact(
+        ad_id=ad_id, page_name="Brand", image_path="assets/x.jpg",
+        blueprint={"format": "old_hero"}, generated_copy={"headline": "Old"},
+        draft_image="assets/x_draft.png", metadata={"cta": "Shop", "destination_url": "http://x"},
+        image_prompt="STALE STORED PROMPT TEXT",
+    )
+    _mock_success(monkeypatch)
+    generate_image_calls = []
+    regenerate_calls = []
+
+    def fake_generate_image(bp, aid, product=None, reference_images=None, **k):
+        generate_image_calls.append(1)
+        fake_generate_image.last_prompt = "FRESHLY BUILT PROMPT TEXT"
+        return "draft.png"
+    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image", fake_generate_image)
+    monkeypatch.setattr(pipeline.generate_image_prompt, "regenerate_from_stored_prompt",
+                        lambda *a, **k: regenerate_calls.append(1) or "should-not-be-called.png")
+    try:
+        result = pipeline.generate_from_selection([ad_id], regenerate=True)
+        assert result["by_ad"][ad_id] == "processed"
+        assert generate_image_calls == [1]
+        assert regenerate_calls == []
+        art = dedupe.get_artifact(ad_id)
+        assert art["image_prompt"] == "FRESHLY BUILT PROMPT TEXT"
+        assert "STALE STORED PROMPT TEXT" not in (art["image_prompt"] or "")
+    finally:
+        _cleanup(cid, [ad_id])
+
+
+def test_pool_send_deconstruct_receives_the_pool_selected_ads_own_reference_image(monkeypatch):
+    """Test 5/6: deconstruct must run against THIS ad's own reference image (its scraped
+    image_url/bytes and its own ad_id) - not merely be called at all. Distinguishes a
+    correct fresh deconstruct from one that accidentally reused another ad's or a stored
+    artifact's image."""
+    cid = _make_competitor()
+    ad_id = f"SEL_{uuid.uuid4().hex[:8]}"
+    own_url = f"http://x/{ad_id}.jpg"
+    own_bytes = f"REFERENCE-BYTES-FOR-{ad_id}".encode()
+    dedupe.init_scraped_ads()
+    raw = {
+        "ad_archive_id": ad_id, "page_name": "Brand", "media_type": "IMAGE",
+        "images": [own_url], "ad_delivery_start_time": "2026-01-01",
+        "cta_type": "SHOP_NOW", "link_url": "http://x", "ad_creative_bodies": ["body"],
+    }
+    dedupe.upsert_scraped_ad(ad_id=ad_id, competitor_id=cid, image_url=own_url,
+                              raw_meta=raw, media_type="IMAGE")
+    dedupe.init_artifacts()
+    dedupe.save_artifact(
+        ad_id=ad_id, page_name="Brand", image_path="assets/other.jpg",
+        blueprint={"format": "old_hero"}, generated_copy={"headline": "Old"},
+        draft_image="assets/x_draft.png", metadata={"cta": "Shop", "destination_url": "http://x"},
+    )
+    _mock_success(monkeypatch)
+    captured = {}
+    monkeypatch.setattr(pipeline.assets, "download_image_bytes",
+                        lambda url: own_bytes if url == own_url else b"WRONG-BYTES")
+    monkeypatch.setattr(pipeline.assets, "download_image",
+                        lambda url, aid: "fake.jpg" if url == own_url and aid == ad_id else "wrong.jpg")
+    monkeypatch.setattr(pipeline.deconstruct, "deconstruct_image",
+                        lambda **k: captured.update(k) or {"format": "hero", "angle": "a"})
+    try:
+        result = pipeline.generate_from_selection([ad_id], regenerate=True)
+        assert result["by_ad"][ad_id] == "processed"
+        assert captured.get("ad_id") == ad_id
+        assert captured.get("image_bytes") == own_bytes, \
+            "deconstruct must receive the pool-selected ad's own downloaded reference bytes"
+    finally:
+        _cleanup(cid, [ad_id])
+
+
+def test_pool_send_fresh_path_reaches_composite_gate_placement_and_cutout_framing():
+    """Test 6/6: static call-graph contract, not a runtime call. BFS's the real source of
+    process_ad (src/pipeline.py) and generate_image_prompt.py, following every Call node
+    reachable from process_ad, and asserts _composite_gate, find_supported_placement_bbox,
+    composite_product, and _cutout_authority_framing are all in that reachable set. This
+    must fail the day a future change routes pool send's fresh path through some other
+    function whose body never references these four - e.g. a reintroduced regenerate
+    branch, or a new image-generation function that skips compositing/placement
+    entirely. Deliberately NOT a mocked runtime invocation: find_supported_placement_bbox
+    is only reachable via resolve_no_product_placement, which process_ad calls directly
+    (pipeline.py) - not from inside generate_image_prompt.generate_image itself - so the
+    contract has to span both modules' real source, not just one function's body."""
+    import ast
+    import inspect
+    from src import pipeline as _pipeline_module
+    from src import generate_image_prompt as _gip_module
+
+    def _function_defs(module):
+        tree = ast.parse(inspect.getsource(module))
+        defs = {}
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                defs[node.name] = node
+        return defs
+
+    functions_by_name = {}
+    functions_by_name.update(_function_defs(_pipeline_module))
+    functions_by_name.update(_function_defs(_gip_module))
+
+    def _called_names(func_node):
+        names = set()
+        for node in ast.walk(func_node):
+            if isinstance(node, ast.Call):
+                if isinstance(node.func, ast.Name):
+                    names.add(node.func.id)
+                elif isinstance(node.func, ast.Attribute):
+                    names.add(node.func.attr)
+        return names
+
+    reachable = set()
+    stack = ["process_ad"]
+    while stack:
+        name = stack.pop()
+        if name in reachable or name not in functions_by_name:
+            continue
+        reachable.add(name)
+        for callee in _called_names(functions_by_name[name]):
+            if callee not in reachable:
+                stack.append(callee)
+
+    for target in ("_composite_gate", "find_supported_placement_bbox",
+                   "composite_product", "_cutout_authority_framing"):
+        assert target in reachable, (
+            f"{target} is no longer reachable from process_ad's fresh-generation path - "
+            f"a future change must not route pool send through a function that skips it"
+        )
+
+
+def test_pool_send_existing_artifact_regenerate_false_still_runs_fresh_and_replaces_row(monkeypatch):
+    """Test 7 (2026-08-19, second pass): pool.html no longer sends `regenerate` at all,
+    so the REAL production case is regenerate omitted/False with an existing artifact -
+    not regenerate=True, which every test above exercises. Proves two things the other
+    six tests can't: (1) process_ad's own already_generated skip is gone structurally, not
+    merely bypassed by a flag value it happens to receive; (2) save_artifact's own
+    dedupe-skip gate (dedupe.py: SELECT 1 ... if found: return, with no INSERT) does NOT
+    silently swallow the fresh generation - a real risk once the already_generated skip
+    was removed without also forcing save_artifact's own regenerate=True for
+    explicit_selection (see pipeline.py's own comment at that call site). A weaker
+    assertion like `result == "processed"` would NOT catch this - process_ad returns
+    "processed" regardless of whether save_artifact actually wrote anything, so the
+    discriminating check is the STORED ROW's content, not the return string."""
+    cid = _make_competitor()
+    ad_id = _seed_scraped_ad(cid)
+    dedupe.init_artifacts()
+    dedupe.save_artifact(
+        ad_id=ad_id, page_name="Brand", image_path="assets/old.jpg",
+        blueprint={"format": "old_hero"}, generated_copy={"headline": "Old"},
+        draft_image="assets/x_draft.png", metadata={"cta": "Shop", "destination_url": "http://x"},
+        image_prompt="STALE STORED PROMPT TEXT",
+    )
+    _mock_success(monkeypatch)
+    try:
+        result = pipeline.generate_from_selection([ad_id])  # regenerate omitted, as pool.html now sends it
+        assert result["by_ad"][ad_id] == "processed", \
+            "must never return already_generated - that skip is gone, not just bypassed"
+        assert result["already_generated"] == 0
+        rows = dedupe.get_artifacts(ad_id)
+        assert len(rows) == 1, "replaced in place (DELETE+INSERT), not left untouched or duplicated"
+        assert rows[0][1] == {"format": "hero", "angle": "a"}, \
+            "the OLD blueprint must be gone - a silent save_artifact no-op would leave {'format': 'old_hero'} here"
+        art = dedupe.get_artifact(ad_id)
+        assert art["image_prompt"] != "STALE STORED PROMPT TEXT"
+        row = dedupe.get_scraped_ads(competitor_id=cid)[0]
+        assert row["status"] == "processed"
+    finally:
+        _cleanup(cid, [ad_id])
 
 
 def test_save_artifact_regenerate_none_preserves_module_flag_behaviour(monkeypatch):

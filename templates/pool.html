@@ -182,7 +182,7 @@
     <div class="comp-panel selection-panel">
       <div><span id="selectionCount">0 selected</span></div>
       <div id="regenerateNote" style="font-size:11px;color:#8a5a12;margin-top:4px;display:none;">
-        One or more selected cards already have a draft for this angle - generating will version and replace it.
+        One or more selected cards already have a draft for this angle - Send treats them as new references: freshly deconstructed and sent through the full generation pipeline.
       </div>
     </div>
     <div class="comp-panel">
@@ -476,9 +476,13 @@ function cardHtml(c){
   const title = (c.ad_creative_link_titles || [])[0] || '';
   const body = (c.ad_creative_bodies || [])[0] || '';
   // Item 3: marked BEFORE the operator clicks, and it says what selecting it
-  // anyway means, rather than a bare badge with no explanation.
+  // anyway means, rather than a bare badge with no explanation. 2026-08-19 (pool-send
+  // routing fix, second pass): reworded - selecting an already-generated card no longer
+  // "versions & replaces" a stored prompt (that mechanism, _regenerate_existing_draft, is
+  // unreachable now) - it's treated as a brand new reference, deconstructed fresh and run
+  // through the full pipeline, same as any other selection.
   const note = c.already_generated
-    ? '<div class="pool-already-gen-note">Already generated for this angle - selecting will version &amp; replace it.</div>' : '';
+    ? '<div class="pool-already-gen-note">Already generated for this angle - selecting it treats it as a new reference: freshly deconstructed and sent through the full generation pipeline.</div>' : '';
   // Per-card realism override (batch-quality fix, realism only this pass): defaults to
   // "" (use run strip) - an untouched card's Map value stays null and contributes
   // nothing to per_ad_overrides. Hidden until the card is selected (see
@@ -524,10 +528,15 @@ function toggleSelect(el, adId){
   updateSelectionCount();
 }
 
-// Selecting an already-generated card IS the operator's explicit ask to
-// regenerate (Item 3/7c) - no separate confirmation step in this chunk. This
-// computes that from the currently loaded cards' own already_generated flag,
-// which is itself angle-specific (Item 3), so switching the angle changes what
+// 2026-08-19 (pool-send routing fix, second pass): this NO LONGER means "selecting an
+// already-generated card is the operator's ask to regenerate it" (Item 3/7c, superseded) -
+// Send treats EVERY selected card the same way now, already-generated or not: a fresh
+// deconstruct through the full pipeline (pool send is a permanent fresh-generation entry
+// point, and the process_ad skip this used to trigger is gone, not just bypassed). Kept
+// only to drive the regenerateNote banner/status-line, so the operator knows an
+// already-generated card's existing draft is about to be replaced, not preserved, before
+// clicking Send. Still computed from the currently loaded cards' own already_generated
+// flag, which is itself angle-specific (Item 3), so switching the angle changes what
 // counts as "already generated" without any extra bookkeeping here.
 function selectionIncludesAlreadyGenerated(){
   const genIds = new Set(_lastCards.filter(c => c.already_generated).map(c => c.ad_id));
@@ -595,7 +604,13 @@ async function generateSelection(){
   const offerText = document.getElementById('offerTextInput').value.trim();
   const instruction = document.getElementById('instructionInput').value.trim();
   try { localStorage.setItem('operatorInstruction', instruction); } catch(e) {}
-  const regenerate = selectionIncludesAlreadyGenerated();
+  // 2026-08-19 (pool-send routing fix): `regenerate` is no longer computed or sent here -
+  // pool send is now unconditionally a fresh generation for every selected ad, so this
+  // flag no longer has anything to tell the backend. selectionIncludesAlreadyGenerated()
+  // itself is kept (see updateSelectionCount below) purely to drive the informational
+  // regenerateNote banner and this function's own status line - neither reaches the
+  // request body.
+  const hasAlreadyGenerated = selectionIncludesAlreadyGenerated();
   // Chunk 6.1, Item 1: same five toggles dashboard.html's run strip already
   // sends to /api/run, read fresh at click time, same as every other field here.
   const textInImage = document.getElementById('textInImageToggle').checked;
@@ -617,14 +632,14 @@ async function generateSelection(){
   document.getElementById('generateBtn').disabled = true;
   document.getElementById('generateStopBtn').disabled = false;
   const status = document.getElementById('generateStatus');
-  status.textContent = 'Starting…' + (regenerate ? ' (regenerating already-generated selections)' : '');
+  status.textContent = 'Starting…' + (hasAlreadyGenerated ? ' (already-generated selections are treated as new references - freshly deconstructed and sent through the full pipeline)' : '');
 
   const r = await fetch('/api/generate', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({
       ad_ids: [...selectedAdIds.keys()], angle_id: angleId, body_area: bodyArea || null,
       offer_text: offerText || null, instruction: instruction || null,
-      product_id: selectedProductId, regenerate,
+      product_id: selectedProductId,
       text_in_image: textInImage, include_product: includeProduct, edit_mode: editMode,
       check_output: checkOutput, retheme_colours: rethemeColours, realism: realism || null,
       per_ad_overrides: Object.keys(perAdOverrides).length ? perAdOverrides : null,
