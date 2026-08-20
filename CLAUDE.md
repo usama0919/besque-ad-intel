@@ -125,6 +125,94 @@ Items 5 and 6 are catalogued here specifically so they don't have to be rediscov
 scratch — fix them the same way as items 1-4: pick one of the three signals, not a fourth
 option.
 
+## STANDING RULE (2026-08-20): four raising assertions guard the generation path — know exactly where each one's coverage ends before trusting it
+Same class as the silent-failure invariant above, stated as its own rule because these are
+now the concrete mechanism, not just the principle: **four assertions guard blueprint/prompt
+construction, and all four raise rather than warn.** Never weaken or bypass one of these to
+make a batch pass — every one of them fired on a real defect the day it was written.
+
+1. `deconstruct._assert_no_competitor_branded_object_kept` (`src/deconstruct.py`) — raises
+   `BlueprintValidationError` at **deconstruct time**, inside `deconstruct_from_response`,
+   immediately after `resolve_disposition` runs, before any prompt is ever built. Catches a
+   competitor-branded/brand-marked object (or its own `text_content` sub-object) that
+   somehow resolved to `disposition="keep"` — defence-in-depth for a bug in `resolve_
+   disposition` itself, not the primary enforcement (that's `resolve_disposition`'s own
+   logic, which should make this unreachable by construction).
+2. `generate_image_prompt._assert_product_count_consistent` — raises
+   `ProductCountConsistencyError` at the end of `build_image_prompt`. Scans the fully
+   assembled prompt for every "exactly N Besque bottle(s)/item(s)" statement and fails if
+   any two disagree with each other or with the resolved count.
+3. `generate_image_prompt._assert_no_text_content_leak` — raises `TextContentLeakError` at
+   the end of `build_image_prompt`. Scans every object's `text_content[].content` and fails
+   if any string ≥4 chars appears verbatim anywhere in the prompt.
+4. `generate_image_prompt._assert_no_prohibited_claim_leak` — raises
+   `ProhibitedClaimLeakError` at the end of `build_image_prompt`. Scans the prompt for
+   `compliance.PROHIBITED_CLAIM_PATTERNS`, with `compliance_rules.COMPLIANCE_RULES`'s own
+   verbatim text stripped out of the scan target FIRST — that constant legitimately quotes
+   "clinically proven" as a banned example (rule C3), so scanning it unconditionally raised
+   on literally every single call, real leak or not, the first time this assertion ever ran.
+
+Every one of these has already fired on a real defect: 2 and 3 fired within the session that
+added them (the eight text-leak sites cataloged below); 4 fired twice against its own first
+test run — first the shared `COMPLIANCE_RULES` text, then the SCENE OBJECTS "ABSENT" line
+quoting a dropped object's own banned phrase verbatim back into the prompt as the thing
+naming what to remove. **A raise here is the check doing its job, not a bug to route
+around** — the fix belongs at the SOURCE (scrub the field, don't emit the phrase, force the
+disposition correctly), never by loosening or catching-and-swallowing the assertion.
+
+**These four do NOT cover the targeted-edit path, and the gap is structural, not an
+oversight waiting to be inlined away.** `build_targeted_edit_instruction`, `build_object_
+removal_instruction`, and `build_drift_retry_instruction` (all `generate_image_prompt.py`,
+all called from `dashboard.py`'s Dynamic Edit System endpoint) build a short delta
+`instruction` string that reaches Gemini one of two ways, **neither of which re-runs any of
+the three `build_image_prompt` assertions on the actual final string sent**:
+- The object-removal path (`target=="object"`) concatenates the delta onto an
+  ALREADY-BUILT, already-asserted `build_image_prompt` output
+  (`_regenerate_image_bytes`: `prompt = stored_prompt.strip() +
+  _regenerate_delta_clause(instruction)`) — the assertions ran on `stored_prompt` alone;
+  the string Gemini actually receives is `stored_prompt + delta`, and the delta half was
+  never scanned by anything.
+- Every other targeted edit (`apply_targeted_edit`) sends `instruction` ALONE, with no base
+  prompt at all — none of the three assertions ever see any part of what reaches Gemini on
+  this path.
+
+This is exactly why the eight-text-leak-sites fix (below) scrubs `label`/`current_value`/
+`description` at the SOURCE inside all three `build_*_instruction` functions rather than
+relying on `_assert_no_text_content_leak` to catch a leak there — **it structurally
+cannot.** Any new targeted-edit/drift-retry text builder needs the same source-side scrub,
+not a hopeful assumption that `build_image_prompt`'s assertions have it covered.
+
+**`text_content[].content` is analysis-only.** It exists so a human/mechanical check can see
+what baked-in text was detected — never as a source a prompt may quote from. Text reaches a
+built prompt by `object_id`, `bbox`, and substituted copy only (`_substitute_object_line`/
+`_text_content_removal_note`), never by the source string itself. This governs every site
+that touches an object's own free text (`description`, `appearance`, a typography `label`)
+— see the eight-site fix below for what happens when a site quotes one of these fields
+without scrubbing known `text_content` strings out first.
+
+**`same_product_as` means a separate physical instance of the SAME product line** (a
+standard + jumbo size of one product) — **`part_of` means a component of ANOTHER object
+with no independent existence** (a lid, a cap, a dropper). Never conflate them: a tin
+marked `same_product_as` its own detached lid, instead of the lid being marked `part_of`
+the tin, is what produced the double-bottle defect `resolve_authorised_product_
+dispositions` (see the 20 Aug section below) now guards against structurally, with three
+independent, ordered safeguards — not just by hoping deconstruct classifies the
+relationship correctly every time.
+
+**Each fix in a merged/batched task must be independently attributable in its own output**
+— its own `pipeline_warnings` kind, its own raised exception type, or its own
+`output_critic` checklist category, never sharing a signal with a sibling fix in the same
+task. A shared signal makes it impossible to tell, after the fact, which of several
+changes actually fired on a given ad. Warning kinds now in use (non-exhaustive — this list
+will keep growing; grep `record_warning(` directly rather than trusting any list here as
+complete): `prohibited_claim_dropped`, `linked_text_disposition_aligned`,
+`empty_container_dropped` (deconstruct time) and `empty_container_dropped_at_generation`
+(generation time — deliberately two DIFFERENT kinds for the two resolution points, so a
+failure in one is diagnosable without auditing the other), `testimonial_slot_removed_
+no_source`, `unusable_reference`, `deconstruct_truncated`, `deconstruct_failed`,
+`product_count_corrected` (covers both the geometric-conflict and ceiling-exceeded
+corrections, distinguished inside the detail text's own `reason=` field, not by kind).
+
 ## Hallucinated text objects — `deconstruct.py` folds scraped caption copy into `objects[]`, fixed 2026-08-19
 **The invariant**: a `kind=="text"` object that does not correspond to text visibly
 present in the reference image must never reach `build_image_prompt`.
@@ -2817,3 +2905,192 @@ timestamp that DOES reflect a real generation (`a.created_at`,
 `dashboard.html:863`) is a different element entirely, sourced from the artifact
 row's own DB timestamp. Don't read the header clock as "when this batch
 finished" - it never was that.
+
+## 2026-08-20 — text layer completion (C10, linked-text alignment, empty containers,
+## verbatim binding), the generalised product-count fix (part_of/geometric/ceiling),
+## and deconstruct reliability
+
+Multiple tasks, same day, all on `feat/dynamic-edit-system`, none merged/deployed. See
+the new STANDING RULE above for the four assertions this session's work is organised
+around — that section and this one should be read together, not duplicated here.
+
+### Landed
+
+- **`resolve_authorised_product_dispositions`** (`generate_image_prompt.py`) —
+  generalises the 18 Aug three-voices fix after the tin+lid double-bottle bug proved the
+  same CLASS of defect (multiple product objects disagreeing about count) could recur
+  through a completely different mechanism than the original fix covered (`same_
+  product_as`/`part_of` confusion, not multiple genuinely-distinct competitor products).
+  Now the SINGLE place every count-consuming site (rule 7, `product_clause`,
+  `_edit_mode_instruction`, `_objects_clause`) reads from — never `deconstruct.
+  resolve_product_group_dispositions` directly, so a disagreement between them is
+  structurally impossible rather than merely coincidentally absent. Three ordered,
+  independent safeguards, each a backstop for the one before it failing: (1) **part_of
+  exclusion** — any product object naming `part_of` is force-set to "drop" in the
+  returned map regardless of what it would otherwise resolve to; (2) **geometric
+  backstop** (`_products_geometrically_conflict`) — among objects that resolved to
+  "substitute", any pairwise bbox containment/near-adjacency collapses the whole group to
+  its single hero-or-first winner; (3) **ceiling clamp** — the derived count can never
+  exceed whatever count was actually SPECIFIED for this run (operator count when given,
+  else the reference's own layout count). Every clamp/collapse calls `_record_product_
+  count_warning` (kind `product_count_corrected`). `_assert_product_count_consistent` +
+  `ProductCountConsistencyError` (see the standing rule above) is the runtime backstop
+  for the whole mechanism.
+- **Text sub-objects + the `resolve_disposition` dispatch fix.** `objects[].
+  text_content[]` (legible text baked into ANY object's own pixels, regardless of
+  `kind`) is now resolved at both dual-resolution points. Fixed a real dispatch bug in
+  `resolve_disposition` itself: it dispatched to the text-purpose logic on `kind=="text"`
+  alone, but a `text_content` sub-object has no `kind` field at all — it carries `text_
+  purpose` directly — so `text_purpose` was never consulted for a sub-object, and a
+  context-gated purpose (offer/certification/testimonial) on a sub-object could never
+  re-resolve once real run context existed. Fixed by dispatching on `kind=="text" OR
+  text_purpose is not None`.
+- **Eight text-leak sites fixed** (`tests/test_text_content_leak_sites.py`), found by
+  tracing every place that quotes `description`/`appearance`/a typography `label` into a
+  built prompt: `_objects_clause`'s `description`, `_substitute_object_line`'s product
+  `appearance_text`, `_object_typography_clause`'s `label`, `generate_copy._object_copy_
+  clause`'s `description`/`persuasive_function`, `generate_copy._blueprint_without_bbox`'s
+  raw blueprint dump (could let Claude's generated copy echo a detected string back into
+  `object_copy`, which then reaches the IMAGE prompt) — and, notably, since `_assert_
+  no_text_content_leak` structurally cannot reach them (see the standing rule above):
+  `build_targeted_edit_instruction`'s `label`/`current_value`, `build_object_removal_
+  instruction`'s `description`, `build_drift_retry_instruction`'s `label`. Fixed at the
+  source (scrub known `text_content` strings before quoting), not by weakening the
+  assertion — the assertion was working correctly.
+- **C10 — no efficacy, authority, or certification claims, ever, no approved-claims
+  escape hatch. Confirmed by the brand owner 20 Aug.** `compliance.PROHIBITED_CLAIM_
+  PATTERNS`/`prohibited_claim_match`/`check_prohibited_claim` — case-insensitive,
+  tolerant of hyphen/space variants: "clinically proven/tested/validated",
+  "dermatologist approved/developed/recommended/tested", "doctor approved/recommended/
+  developed", "medically proven", "scientifically proven", "board-certified". Enforced
+  at THREE independent points: `resolve_disposition` (checked FIRST, before `part_of` —
+  same structural position as the `part_of` inheritance check — on both top-level
+  objects and `text_content` sub-objects; can never resolve to keep/substitute
+  regardless of purpose or branding), `_assert_no_prohibited_claim_leak` (see the
+  standing rule above), and a new `output_critic` checklist category (added to `HIGH_
+  CONFIDENCE_BY_DEFAULT`) — the only enforcement for a phrase Gemini reproduces from the
+  attached reference image rather than one the prompt itself introduced. Live case: ad
+  1357229623024367 rendered "Clinically Proven" and "Dermatologist Developed" side by
+  side; only the first was already (accidentally) caught by the pre-existing stat-shape
+  check, because it happened to carry a number ("95% saw results...") and the second
+  didn't.
+- **Linked label/evidence disposition alignment.** A claim split across two objects (a
+  label object and its evidence/proof object, both linked via `serves_object_id` to a
+  shared icon, or sharing a `part_of`/`serves_object_id` target) could previously resolve
+  independently: the evidence dropped (correctly, stat-shaped), the label survived, and
+  the competitor's claim rendered with only its proof replaced. `deconstruct._text_
+  object_link_groups` (union-find, scoped to `kind=="text"` objects only — the served
+  non-text object itself is never grouped in) + `align_linked_text_dispositions` (drop >
+  substitute > keep) now runs as a final pass at BOTH resolution points, recording
+  `linked_text_disposition_aligned` only when a group genuinely disagreed and needed
+  realigning.
+- **Empty-container drop, extended to the `serves_object_id` shape, at BOTH resolution
+  points.** The prior fix only caught a container whose associated text was NESTED as a
+  `text_content` child. Live case: ad 1746884313351902's pink sticky note (`kind==
+  "graphic"`, no `text_content` at all) had its own offer text recorded as a SEPARATE
+  top-level object naming the sticky via `serves_object_id` — a shape the nested-only
+  rule never looked at, which is exactly why the deconstruct-time-only fix didn't bind
+  on this ad. Fixed by combining nested `text_content` children AND `serves_object_id`-
+  linked serving text objects into one set before deciding whether a "keep" container has
+  anything left inside it. `empty_container_dropped` (deconstruct time) and `empty_
+  container_dropped_at_generation` (generation time) stay two DISTINCT warning kinds on
+  purpose.
+- **`src/reference_structure.py`** — a pre-generation gate rejecting a reference with no
+  transferable structure: (1) the union of every `kind=="product"` object's bbox covers
+  more than 60% of the frame (an EXACT rectangle-union area — coordinate compression plus
+  a per-strip interval merge — never a naive sum, which double-counts overlap), or (2)
+  every top-level object is `kind=="product"`, or a `kind=="text"` object whose `serves_
+  object_id`/`part_of` points at one. `unusable_reference_reason(blueprint)` is a pure
+  function (mirrors `content_safety.hard_block_reason`'s own contract, no side effects);
+  `pipeline.process_ad` does the `record_warning("unusable_reference", ...)`/`mark_seen`/
+  skip dance, the same shape as the existing hard-block gate.
+- **Verbatim binding for testimonials.** `_substitute_object_line`'s testimonial branch
+  used to fall back to a generic invented `"a verified customer"` attribution whenever
+  the real source row (`product_reviews`/`angle_language.best_verbatims`, via `pipeline.
+  select_testimonial_review`) carried none — itself a fabrication, just a smaller one,
+  violating "attribution only as it exists in the source row, or none at all." Now
+  renders with an explicit "no name/attribution attached" instruction instead — never a
+  placeholder. `select_testimonial_review` now also records `testimonial_slot_removed_
+  no_source` whenever a testimonial-purposed object genuinely exists on the blueprint and
+  no real source row was found (never when no testimonial was ever wanted — that's not a
+  removal, nothing was ever going to render). `output_critic.has_unauthorised_
+  testimonial_finding` gates `review_status="failed-review"` on an unauthorised
+  testimonial finding UNCONDITIONALLY, regardless of the critic's own reported confidence
+  (wired into both `pipeline.py` review_status computation sites — the regenerate/
+  check-only path and the main retry loop) — the critic's own confidence judgement is
+  exactly the channel a fabrication has repeatedly slipped through on.
+- **Deconstruct reliability.** `_DECONSTRUCT_MAX_TOKENS` 4096 → 16384 (Part B's own
+  added fields plus the objects-model inventory routinely need more than the old
+  ceiling), with `_DECONSTRUCT_MAX_TOKENS_ESCALATED = 32768` on its OWN small retry
+  budget (`_MAX_TRUNCATION_ATTEMPTS`, independent of `_MAX_DECONSTRUCT_ATTEMPTS`'s parse/
+  validation retries and `_MAX_TRANSIENT_ATTEMPTS`'s network-failure retries — three
+  separate counters, never sharing a budget with each other or with one another's
+  failure class). `_DECONSTRUCT_TIMEOUT_SECONDS` 60 → 180, proportional to the 4x max_
+  tokens raise, after live `APITimeoutError` failures on ads of the same density as the
+  ads that hit the old max_tokens ceiling. Neither number is empirically measured against
+  a proven floor — both are reasoned safety margins, stated as such in the code's own
+  comments, not a claim of having solved the underlying reliability question.
+
+### Open, with enough detail to act on
+
+- **`write_creative_description`'s hardcoded one-bottle statement**
+  (`generate_image_prompt_writer.py`, the "Product count (STRICT...)" block,
+  `include_product=True` branch): unconditionally instructs "describe EXACTLY ONE Besque
+  product bottle... never two... collapse any multi-product composition to a single
+  bottle" — completely independent of `resolve_authorised_product_dispositions`. This is
+  the writer path (generate mode only — the writer is skipped entirely in edit mode), so
+  it can currently disagree with the new single-source-of-truth count whenever a `same_
+  product_as`-linked multi-instance reference should legitimately authorise more than
+  one bottle.
+- **Two unguarded composite-path count sites, `_composite_gate`**
+  (`generate_image_prompt.py`): (1) its own `candidates` filter reads `obj.get
+  ("disposition") == "substitute"` straight off the stored `objects[]` field, never
+  through `resolve_authorised_product_dispositions`; (2) when more than one candidate
+  exists, it calls `deconstruct.resolve_product_group_dispositions(objects)` directly —
+  the OLDER, non-defensive mechanism, with none of the part_of exclusion/geometric
+  backstop/ceiling clamp `resolve_authorised_product_dispositions` was built today
+  specifically to add. Route B (Pillow compositing) can therefore still be gated on
+  exactly the tin+lid-shaped miscount the new function exists to prevent, since this
+  path never consults it.
+- **`CRITIC_MAX_TOKENS` still 4096, and every Claude call except `deconstruct.py`'s is
+  still on a 60s timeout.** `deconstruct.py` is the only one raised today (`_DECONSTRUCT_
+  TIMEOUT_SECONDS=180.0`); `output_critic.py`, `generate_copy.py`, and `generate_image_
+  prompt_writer.py` all still construct `anthropic.Anthropic(timeout=60.0, max_
+  retries=1)`. The critic's own multi-violation JSON response is structurally comparable
+  to (arguably larger than) a deconstruct response — the same truncation/timeout
+  reasoning that justified raising deconstruct's numbers hasn't been applied here yet.
+- **Facebook CDN 403 with no retry and no `record_warning`.** `assets.download_image_
+  bytes`/`download_image` (`src/assets.py`) call `r.raise_for_status()` with no retry
+  loop at all — a transient or permanent CDN 403 propagates straight up through `process_
+  ad`'s body to the OUTERMOST catch-all (`except Exception as e: log.error(...); return
+  "failed"`), which records nothing to `pipeline_warnings`. An operator sees this ad
+  simply missing from a batch, with no signal anywhere naming why — the same
+  silent-failure shape the standing invariant this file opens with exists to close.
+- **`social_proof.type` rejects null** (`schema/blueprint.schema.json`) — still
+  `{"type": "string"}`, unlike `social_proof.owner`, which B1 (19 Aug) already loosened
+  to `["string", "null"]` for the identical contradiction reason. `deconstruct.py`'s own
+  prompt (`BLUEPRINT_PROMPT`) only ever documents `owner` as nullable — nothing tells the
+  model `type` may be null — but per this file's own standing lesson, the model doesn't
+  reliably need textual permission to emit a value anyway. Not fixed either direction
+  (schema loosening vs. prompt correction) — not decided which is correct yet.
+- **The unusable-reference gate (`reference_structure.unusable_reference_reason`,
+  landed today) did not fire on the label-photo ad it was written for.** Reported live,
+  not yet root-caused this session. The gate's own unit tests (exact-union bbox coverage,
+  all-product-or-serves-one) all pass in isolation, so the gap is either in how that real
+  blueprint's `objects[]` actually shapes up against the two conditions, or somewhere
+  between `process_ad`'s own call site and the gate itself — needs a real blueprint dump
+  from that specific ad to diagnose, not a guess from the unit-level behaviour alone.
+- **Reference-image reproduction — a competitor's logo, or the Besque bottle's own
+  proportions, redrawn from the attached reference/cutout image bytes rather than from
+  anything the prompt says.** All four assertions in the standing rule above, and `output_
+  critic`'s checklist, work on TEXT — the assembled prompt string, or the critic's own
+  read of the GENERATED output. None of them can reach what Gemini reproduces by LOOKING
+  at an attached image rather than reading an instruction — the same "prompt-only
+  guardrails do not bind on the image path" lesson this file has documented since 4 Aug,
+  restated here specifically so today's four new assertions are never mistaken for having
+  closed it. Route B compositing (paste the real cutout, suppress the geometry/identity
+  clauses) is the only structural lever that has ever actually worked for the bottle half
+  of this; the logo half still has none.
+- **Scene-category fit** — whether a reference's own creative category/format (e.g.
+  `testimonial_review` vs. `product_hero`) genuinely fits what's being asked of a given
+  run is still not checked anywhere. Flagged, not scoped — no fix direction chosen.
