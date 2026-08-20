@@ -266,6 +266,59 @@ TIMESCALE_CLAIM_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Duration-claim gap (2026-08-20, Part D of the text-layer completion task):
+# TIMESCALE_CLAIM_PATTERN only covers days/weeks/hours, and only in an "in N
+# days"/"within N days"/"N-day results" shape - a bare competitor-story duration
+# like "12 years" (e.g. "12 years of hair loss") matches NONE of the existing
+# patterns: no percentage (NUMERIC_CLAIM_PATTERN), no ratio (RATIO_CLAIM_PATTERN),
+# no days/weeks/hours prefix-shape (TIMESCALE_CLAIM_PATTERN). This is a genuinely
+# different shape - a duration describing how long a PROBLEM lasted, not a
+# timescale for a RESULT - but it is exactly as fabrication-prone: Besque has no
+# evidence for a competitor's own customer-story duration, and it should never
+# render unless it traces to a real source row, same as any other number/result.
+DURATION_CLAIM_PATTERN = re.compile(
+    r"\b\d+\s?(?:years?|months?|weeks?|days?)\b",
+    re.IGNORECASE,
+)
+
+# Prohibited claim phrases (2026-08-20, Part A): Besque makes no efficacy,
+# authority, or certification claims - confirmed by the brand owner, not a
+# judgment call. Live evidence: ad 1357229623024367 rendered "Clinically Proven"
+# and "Dermatologist Developed", both product_callout-purposed objects whose own
+# description happened to carry a number ("95% saw results...") and so were
+# already (accidentally) caught by the pre-existing stat-shape check on ONE of
+# the two - "Dermatologist Developed / Created by a board-certified dermatologist"
+# has no number in it at all, so the SAME mechanism that saved the first bullet
+# never even looked at the second. This is a dedicated, always-on vocabulary
+# check, independent of whether a number happens to be present. Matched by SHAPE
+# (a phrase built from these words in this order, tolerant of a hyphen/space
+# between them and of "proven"/"tested"/"validated"/"approved"/"developed"/
+# "recommended" variants), never a single fixed string - "near variants" per the
+# task's own wording, not an exhaustive literal list that a rewrite could dodge.
+PROHIBITED_CLAIM_PATTERNS = (
+    re.compile(r"\bclinically[\s-]*(?:proven|tested|validated)\b", re.IGNORECASE),
+    re.compile(r"\bdermatologist[\s-]*(?:approved|developed|recommended|tested)\b", re.IGNORECASE),
+    re.compile(r"\bdoctor[\s-]*(?:approved|recommended|developed)\b", re.IGNORECASE),
+    re.compile(r"\bmedically[\s-]*proven\b", re.IGNORECASE),
+    re.compile(r"\bscientifically[\s-]*proven\b", re.IGNORECASE),
+    re.compile(r"\bboard[\s-]*certified\b", re.IGNORECASE),
+)
+
+
+def prohibited_claim_match(text):
+    """The first matching prohibited-claim phrase found in `text` (see
+    PROHIBITED_CLAIM_PATTERNS), or None. Case-insensitive, tolerant of a hyphen or
+    extra space between words (compiled into the patterns themselves) - never a
+    plain substring check, which would miss "Dermatologist-Approved" or
+    "dermatologist  approved" (double space) against a literal "dermatologist
+    approved" string."""
+    text = text or ""
+    for pattern in PROHIBITED_CLAIM_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            return match.group(0)
+    return None
+
 
 def check_unauthorized_efficacy_claim(generated_copy, approved_claims=""):
     """Rule C3 mechanical check for ratio/timescale efficacy claims - the class
@@ -278,7 +331,13 @@ def check_unauthorized_efficacy_claim(generated_copy, approved_claims=""):
     issues = []
     gen = " ".join(str(v) for v in generated_copy.values())
     approved_norm = _normalize(approved_claims)
-    for pattern, label in ((RATIO_CLAIM_PATTERN, "Ratio"), (TIMESCALE_CLAIM_PATTERN, "Timescale")):
+    # DURATION_CLAIM_PATTERN (2026-08-20, Part D): a bare competitor-story duration
+    # ("12 years") is exactly as fabrication-prone as a ratio/timescale claim - see
+    # that pattern's own docstring for why it's a distinct shape from TIMESCALE_
+    # CLAIM_PATTERN, checked here rather than a new dedicated function since it is
+    # governed by the identical rule (must appear in APPROVED CLAIMS or be flagged).
+    for pattern, label in ((RATIO_CLAIM_PATTERN, "Ratio"), (TIMESCALE_CLAIM_PATTERN, "Timescale"),
+                           (DURATION_CLAIM_PATTERN, "Duration")):
         for match in pattern.finditer(gen):
             claim = match.group(0)
             if approved_norm and _normalize(claim) in approved_norm:
@@ -405,6 +464,29 @@ def check_borrowed_personal_attribution(generated_copy, authorized_attribution="
     return issues
 
 
+def check_prohibited_claim(generated_copy):
+    """Rule C10 mechanical check (2026-08-20, Part A): Besque makes no efficacy,
+    authority, or certification claim - confirmed by the brand owner, not a
+    judgment call, so this is always on with no approved-claims escape hatch (a
+    prohibited claim is never "approvable" the way an ordinary numeric claim
+    might be with real evidence - see PROHIBITED_CLAIM_PATTERNS' own docstring).
+    Live evidence: ad 1357229623024367 rendered "Clinically Proven" and
+    "Dermatologist Developed" - this is the generated-copy-side backstop for the
+    SAME vocabulary the objects-model side (deconstruct.resolve_disposition)
+    enforces on blueprint text; this one catches Claude's OWN generated copy
+    independently echoing the same phrase."""
+    issues = []
+    gen = " ".join(str(v) for v in generated_copy.values())
+    for pattern in PROHIBITED_CLAIM_PATTERNS:
+        for match in pattern.finditer(gen):
+            issues.append(
+                f"Prohibited claim phrase '{match.group(0)}' found in generated copy - "
+                f"Besque makes no efficacy, authority, or certification claims, so this "
+                f"is never approvable regardless of any supplied approved claims."
+            )
+    return issues
+
+
 def check_compliance(generated_copy, competitor_page_name, competitor_text="",
                       approved_claims="", approved_testimonials="", offer_text=_UNSET,
                       testimonial_attribution=""):
@@ -429,6 +511,8 @@ def check_compliance(generated_copy, competitor_page_name, competitor_text="",
         testimonial_attribution defaults to "" (nothing authorized), so every pre-existing
         caller that doesn't pass it flags ANY name-shaped hit - strictly safer than before
         calling this check existed, never a regression.
+      - a prohibited efficacy/authority/certification claim phrase (rule C10, 2026-08-20) -
+        always on, no approved-claims escape hatch (see check_prohibited_claim).
     """
     issues = []
     gen = " ".join(str(v) for v in generated_copy.values())
@@ -463,6 +547,11 @@ def check_compliance(generated_copy, competitor_page_name, competitor_text="",
     # composition claim should never be allowed through unsubstantiated regardless of
     # any run-level toggle.
     issues.extend(check_unapproved_ingredient_claim(generated_copy, approved_claims))
+
+    # 4d. Prohibited efficacy/authority/certification claim phrases (rule C10,
+    # 2026-08-20, Part A) - always on, no approved-claims escape hatch (see
+    # check_prohibited_claim's own docstring for why this is never approvable).
+    issues.extend(check_prohibited_claim(generated_copy))
 
     # 5. Unauthorized offer/discount/urgency mechanic - opt-in via the _UNSET sentinel,
     # see check_compliance's docstring.

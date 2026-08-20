@@ -5,7 +5,7 @@ import math
 import os
 import re
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageStat
-from src import assets, deconstruct, generate_image_prompt_writer
+from src import assets, compliance, deconstruct, generate_image_prompt_writer
 from src.compliance_rules import COMPLIANCE_RULES
 
 IMAGE_MODEL = os.getenv("IMAGE_MODEL", "placeholder-image-model")
@@ -45,30 +45,396 @@ def resolve_product_count(reference_count, operator_count, default_count=1):
     return default_count, "default"
 
 
-def resolve_authorised_product_count(objects):
-    """The number of Besque bottles this scene authorises, computed in CODE from the
-    objects inventory - never left for a prose instruction to arbitrate (2026-08-18,
-    the OSEA two-bottle failure: rule 7's unconditional "exactly one" and two
-    independently-substituting SCENE OBJECTS product bullets disagreed in the same
-    prompt, and the model resolved the contradiction by substituting neither).
 
-    Defers entirely to deconstruct.resolve_product_group_dispositions for the actual
-    grouping/winner decision (same product differing only in size/format = every
-    instance substitutes; genuinely different products = exactly one substitutes,
-    the rest drop) - this function is just "how many of those survived as
-    substitute." Every clause that mentions bottle count - rule 7
-    (_rule7_product_policy), _edit_mode_instruction, product_clause's >1 branch -
-    must read THIS SAME value, so they can never disagree with each other again.
+def _bbox_area(bbox):
+    return max(0.0, bbox[2]) * max(0.0, bbox[3])
+
+
+def _bbox_overlap_area(bbox_a, bbox_b):
+    ax0, ay0, aw, ah = bbox_a
+    bx0, by0, bw, bh = bbox_b
+    overlap_w = max(0.0, min(ax0 + aw, bx0 + bw) - max(ax0, bx0))
+    overlap_h = max(0.0, min(ay0 + ah, by0 + bh) - max(ay0, by0))
+    return overlap_w * overlap_h
+
+
+def _bbox_gap(bbox_a, bbox_b):
+    """Edge-to-edge gap between two [x, y, w, h] fractional bboxes - 0 (or negative,
+    clamped to 0) when they overlap in a given dimension, positive otherwise. Used
+    only to detect near-adjacency; true overlap (including one bbox fully contained
+    in another) is measured by _bbox_overlap_area instead."""
+    ax0, ay0, aw, ah = bbox_a
+    ax1, ay1 = ax0 + aw, ay0 + ah
+    bx0, by0, bw, bh = bbox_b
+    bx1, by1 = bx0 + bw, by0 + bh
+    dx = max(ax0 - bx1, bx0 - ax1, 0.0)
+    dy = max(ay0 - by1, by0 - ay1, 0.0)
+    return max(dx, dy)
+
+
+# Ratio of overlap-area to the SMALLER bbox's own area, above which two product
+# bboxes are treated as describing the same physical footprint rather than two
+# genuinely separate items standing near each other. Calibrated against two real
+# cases (2026-08-20): the real OSEA "standard vs jumbo" reference (two genuinely
+# separate bottles that legitimately overlap somewhat in a side-by-side product
+# shot) measures ~0.27 here - well under this threshold, so it is NOT flagged.
+# Artifact 1400's tin + its own detached lid measures 1.0 (the lid's bbox is
+# entirely inside the tin's) - well over it. A plain "any positive overlap counts"
+# rule would have wrongly collapsed the real OSEA case, which is exactly the
+# multi-instance rendering this codebase's three-voices fix exists to preserve.
+_PRODUCT_CONTAINMENT_OVERLAP_RATIO = 0.7
+# Fraction of the frame within which two NON-overlapping product bboxes are still
+# treated as too close to be separate free-standing instances (e.g. a lid bbox
+# recorded flush against, but not overlapping, its own tin's bbox).
+_PRODUCT_ADJACENCY_GAP_THRESHOLD = 0.02
+
+
+def _valid_bbox(bbox):
+    return isinstance(bbox, (list, tuple)) and len(bbox) == 4
+
+
+def _products_geometrically_conflict(bbox_a, bbox_b):
+    """True when two product bboxes are too close to plausibly be separate
+    free-standing product instances - one substantially contained within the other,
+    or separated by less than _PRODUCT_ADJACENCY_GAP_THRESHOLD with no overlap at
+    all. This is a BACKSTOP independent of same_product_as/part_of (Part B, item 2
+    of the 2026-08-20 generalised product-count fix) - it exists specifically for the
+    case those fields were never set correctly at deconstruct time, which is exactly
+    what happened on artifact 1400 (a tin and its own detached lid, both marked
+    same_product_as, neither marked part_of)."""
+    if not (_valid_bbox(bbox_a) and _valid_bbox(bbox_b)):
+        return False
+    area_a, area_b = _bbox_area(bbox_a), _bbox_area(bbox_b)
+    smaller = min(area_a, area_b)
+    if smaller <= 0:
+        return False
+    overlap = _bbox_overlap_area(bbox_a, bbox_b)
+    if overlap > 0:
+        return (overlap / smaller) >= _PRODUCT_CONTAINMENT_OVERLAP_RATIO
+    return _bbox_gap(bbox_a, bbox_b) <= _PRODUCT_ADJACENCY_GAP_THRESHOLD
+
+
+def _record_product_count_warning(ad_id, reason, detail):
+    """Every clamp/collapse this module's product-count derivation performs writes a
+    pipeline_warnings row - per this codebase's own silent-failure invariant (see
+    CLAUDE.md), a count CORRECTION must never produce an artifact that looks clean.
+    Lazy-imported so the common case (no correction needed) touches no DB, matching
+    build_image_prompt's own "otherwise a pure function" contract."""
+    from src import dedupe as _dedupe
+    _dedupe.init_pipeline_warnings()
+    _dedupe.record_warning(
+        "product_count_corrected",
+        f"Ad {ad_id}: {detail} (reason={reason})",
+    )
+
+
+def _hero_first_sort_key(candidate_objects, object_id):
+    """(0-or-1 hero rank, list position) - looked up by object_id, never by dict
+    equality/identity, so two objects that happen to be equal-by-value (or the same
+    dict reference reused) never get confused with each other's position."""
+    first_index = len(candidate_objects)
+    has_hero = False
+    for i, obj in enumerate(candidate_objects):
+        if obj.get("object_id") == object_id:
+            first_index = i
+            has_hero = obj.get("role") == "hero"
+            break
+    return (0 if has_hero else 1, first_index)
+
+
+def resolve_authorised_product_dispositions(objects, operator_product_count=None,
+                                             layout_product_count=None, ad_id=None):
+    """The SINGLE place in this codebase that decides how many Besque products a
+    scene authorises, and which specific objects[] entries win that slot - returns
+    {object_id: "substitute"|"drop"} for every kind=="product" object worth reasoning
+    about, or None when there's nothing to reason about at all (see below). Every
+    other function that needs a product count or per-product disposition (rule 7,
+    product_clause, _edit_mode_instruction, _objects_clause) reads THIS function's
+    answer - never deconstruct.resolve_product_group_dispositions directly - so a
+    count/disposition disagreement between them is structurally impossible rather
+    than merely coincidentally absent (2026-08-20, generalising the 18 Aug
+    three-voices fix after the tin+lid double-bottle bug found the same class of
+    defect could recur through a DIFFERENT mechanism than the original fix covered).
+
+    Defensive, not faithful (2026-08-20) - three independent safeguards run in order,
+    each one a backstop for the one before it failing:
+
+    1. part_of exclusion: any product object naming `part_of` (a lid, cap, dropper -
+       see schema/blueprint.schema.json) is a component of another object, never a
+       free-standing second instance - excluded from deconstruct.resolve_product_
+       group_dispositions's OWN INPUT entirely (that function itself is never
+       modified - see its own docstring), then force-set to "drop" in the returned
+       map regardless of what it would otherwise have resolved to.
+    2. Geometric backstop (_products_geometrically_conflict): among objects that
+       resolved to "substitute", any pairwise bbox conflict (containment or
+       near-adjacency) collapses the WHOLE group to its single hero-or-first winner
+       and records a warning. This is the catch-all for exactly the case that
+       shipped: a tin and its own detached lid, BOTH marked same_product_as instead
+       of one being marked part_of - two independent structural fields (same_
+       product_as, part_of) both failed to describe the real relationship, and
+       nothing upstream of this function caught it.
+    3. Ceiling: the derived count may never exceed whatever count was actually
+       SPECIFIED for this run - operator_product_count when given, else
+       layout_product_count (same operator > reference precedence resolve_product_
+       count itself already uses) - never a count the objects model invented beyond
+       what anything else on this run ever claimed. A derived count exceeding this
+       ceiling is clamped down to it (keeping the hero-or-first-ranked winners) and
+       records a warning. This is the GENERAL guard: it holds for any future
+       mechanism that inflates the derived count, not just the two known ones above.
+
+    Every clamp/collapse calls _record_product_count_warning - per this codebase's
+    silent-failure invariant, a count correction must never produce a clean-looking
+    artifact with no trace of what happened.
+
+    Returns None only when there is truly nothing product-shaped to reason about
+    (no kind=="product" objects at all) - preserved exactly from the pre-2026-08-20
+    contract so every existing caller's fallback-to-layout_detail.product_count path
+    is unaffected. A blueprint whose ONLY product objects are part_of components
+    (no free-standing product at all) returns a map of all-"drop" entries rather
+    than None, which is correct: it DOES know something structural about products
+    here, just that none of them stand on their own."""
+    objects = [obj for obj in (objects or []) if isinstance(obj, dict)]
+    product_objects_all = [obj for obj in objects if obj.get("kind") == "product"]
+    if not product_objects_all:
+        return None
+
+    part_of_ids = {
+        obj.get("object_id") for obj in product_objects_all
+        if obj.get("part_of") and obj.get("object_id")
+    }
+    candidate_objects = [obj for obj in objects if obj.get("object_id") not in part_of_ids]
+
+    dispositions = deconstruct.resolve_product_group_dispositions(candidate_objects)
+    if not dispositions and not part_of_ids:
+        return None
+    result = dict(dispositions or {})
+
+    by_id = {obj.get("object_id"): obj for obj in candidate_objects}
+    substitute_ids = [oid for oid, v in result.items() if v == "substitute"]
+
+    # Item 2: geometric backstop.
+    if len(substitute_ids) > 1:
+        conflict = False
+        for i in range(len(substitute_ids)):
+            for j in range(i + 1, len(substitute_ids)):
+                bbox_a = (by_id.get(substitute_ids[i]) or {}).get("bbox")
+                bbox_b = (by_id.get(substitute_ids[j]) or {}).get("bbox")
+                if _products_geometrically_conflict(bbox_a, bbox_b):
+                    conflict = True
+                    break
+            if conflict:
+                break
+        if conflict:
+            winner = min(substitute_ids,
+                         key=lambda oid: _hero_first_sort_key(candidate_objects, oid))
+            _record_product_count_warning(
+                ad_id, "geometric_conflict",
+                f"{len(substitute_ids)} product objects {substitute_ids} resolved to "
+                f"'substitute' but at least two of their bboxes overlap substantially, "
+                f"are adjacent, or one contains the other - they cannot be separate "
+                f"free-standing instances. Collapsed to the single winner {winner!r}.",
+            )
+            for oid in substitute_ids:
+                result[oid] = "substitute" if oid == winner else "drop"
+            substitute_ids = [winner]
+
+    # Item 3: ceiling against whatever count was actually specified for this run.
+    ceiling = operator_product_count if operator_product_count is not None else layout_product_count
+    if ceiling is not None and ceiling > 0 and len(substitute_ids) > ceiling:
+        ordered = sorted(substitute_ids,
+                          key=lambda oid: _hero_first_sort_key(candidate_objects, oid))
+        keepers = set(ordered[:int(ceiling)])
+        _record_product_count_warning(
+            ad_id, "ceiling_exceeded",
+            f"{len(substitute_ids)} product objects resolved to 'substitute' "
+            f"{substitute_ids}, exceeding the specified product count ceiling of "
+            f"{ceiling}. Clamped to {sorted(keepers)}.",
+        )
+        for oid in substitute_ids:
+            result[oid] = "substitute" if oid in keepers else "drop"
+
+    # Item 1 (applied last so it can never be undone by anything above): a part_of
+    # component always resolves to "drop" in the returned map.
+    for object_id in part_of_ids:
+        result[object_id] = "drop"
+
+    return result
+
+
+def resolve_authorised_product_count(objects, operator_product_count=None,
+                                      layout_product_count=None, ad_id=None):
+    """The number of Besque bottles this scene authorises - the count derived from
+    resolve_authorised_product_dispositions's own map (see that function's docstring
+    for the full derivation, including the part_of/geometric/ceiling safeguards).
+    Kept as a thin wrapper, not a second computation, so a caller that only needs the
+    count (build_image_prompt's own rule 7/product_clause wiring) and a caller that
+    needs the full per-object map (_objects_clause) can never derive disagreeing
+    answers from the same inputs.
 
     Returns None when there are no competitor-branded/brand-marked product objects
     to reason about at all (a legacy blueprint predating the objects model, or a
     genuinely productless reference) - callers fall back to the pre-existing
     resolve_product_count(reference_count=layout_detail.product_count, ...) path in
     that case, so nothing regresses for a blueprint this mechanism doesn't cover."""
-    dispositions = deconstruct.resolve_product_group_dispositions(objects)
-    if not dispositions:
+    dispositions = resolve_authorised_product_dispositions(
+        objects, operator_product_count=operator_product_count,
+        layout_product_count=layout_product_count, ad_id=ad_id,
+    )
+    if dispositions is None:
         return None
     return sum(1 for v in dispositions.values() if v == "substitute")
+
+
+class ProductCountConsistencyError(RuntimeError):
+    """Raised by build_image_prompt (2026-08-20, generalised product-count fix, Part D)
+    when rule 7, product_clause, _edit_mode_instruction, or any other site states a
+    "exactly N Besque bottle(s)/item(s)" count that disagrees with the resolved
+    value every one of them was supposed to read - see resolve_authorised_product_
+    dispositions's own docstring for the single-source-of-truth this exists to
+    protect. A mismatch means some site started stating its own, independently-
+    derived count instead of reading the shared value - exactly the shape of the 17
+    Aug three-voices divergence, which shipped a two-bottle draft with no error, no
+    warning, nothing surfaced anywhere. Raised, not merely logged/warned: per this
+    codebase's own silent-failure invariant, a count divergence between what a
+    prompt actually tells Gemini and what the artifact record believes is authorised
+    is not a "log it and continue" case."""
+
+
+_BOTTLE_COUNT_STATEMENT_PATTERN = re.compile(
+    r"exactly (\d+|one) (?:Besque )?(?:item|bottle)s?", re.IGNORECASE
+)
+
+
+def _assert_product_count_consistent(prompt, expected_count, ad_id=None):
+    """Runtime regression lock (2026-08-20, Part D2 of the generalised product-count
+    fix): scans the FULLY ASSEMBLED prompt for every "exactly N Besque bottle(s)/
+    item(s)" statement - rule 7, product_clause, _edit_mode_instruction, and any
+    future site that states one - and raises ProductCountConsistencyError if any of
+    them disagree with each other or with expected_count (rule_authorised_product_
+    count, the SAME value every one of those sites is supposed to have been given).
+    A blueprint with no product-count statement at all (productless mode, a
+    reference with no product) is unaffected - nothing to check.
+
+    Scope, stated explicitly: this asserts NUMERIC consistency only. It does not
+    (and is not intended to) catch a site that states the CORRECT count but the
+    WRONG instruction about it - e.g. asking Gemini to draw a bottle Route B is
+    about to composite - that is a different failure class (an unsuppressed
+    draw-instruction, not a count divergence) and is explicitly out of scope for
+    this check."""
+    found = [
+        (1 if m.group(1).lower() == "one" else int(m.group(1)))
+        for m in _BOTTLE_COUNT_STATEMENT_PATTERN.finditer(prompt)
+    ]
+    if not found:
+        return
+    if any(c != expected_count for c in found):
+        raise ProductCountConsistencyError(
+            f"Ad {ad_id}: product-count statements in the assembled prompt disagree - "
+            f"found {found}, expected every one to equal {expected_count} (the value "
+            f"resolve_authorised_product_dispositions/resolve_product_count resolved "
+            f"for this call). Some clause is stating its own count instead of reading "
+            f"the single shared value."
+        )
+
+
+class TextContentLeakError(RuntimeError):
+    """Raised by build_image_prompt (2026-08-20, text sub-objects fix, Part 3) when a
+    text sub-object's own `content` (the literal on-image string a text_content
+    entry recorded - see schema/blueprint.schema.json's own docstring) appears
+    verbatim in the assembled prompt. content is analysis-only: it exists so a
+    human/mechanical check can see what was detected, never as a source the prompt
+    may quote from - text reaches the prompt by object_id, bbox, and substituted
+    copy only (see _substitute_object_line/_text_content_removal_note), never by
+    the source string itself. Raised, not merely logged/warned, following the same
+    silent-failure-invariant reasoning as ProductCountConsistencyError above - a
+    content leak here is exactly the shape of bug that baked "Norse Organics" and
+    "KilgourMD" into Besque drafts in the first place, just moved one level: the
+    text is now correctly DETECTED, so a leak from here on would be this codebase's
+    own new code forwarding it, not a gap in detection."""
+
+
+_MIN_TEXT_CONTENT_LEAK_CHECK_LENGTH = 4
+
+
+def _assert_no_text_content_leak(prompt, objects, ad_id=None):
+    """Runtime regression lock (2026-08-20, Part 3 of the text sub-objects fix):
+    scans every object's text_content[].content string (see schema/blueprint.
+    schema.json) and raises TextContentLeakError if any one of them appears
+    verbatim, case-sensitive, anywhere in the assembled prompt. Follows the same
+    pattern as _assert_product_count_consistent - a runtime assertion at the end of
+    build_image_prompt, not a test-only check, so it fires on every real call, not
+    only ones a test happens to cover.
+
+    Skips a content string shorter than _MIN_TEXT_CONTENT_LEAK_CHECK_LENGTH chars -
+    too short to be a meaningful leak signal and prone to matching ordinary prompt
+    vocabulary by pure coincidence (a bare "OK", a single word), the same reasoning
+    _assert_product_count_consistent applies via its own narrow regex rather than an
+    unqualified substring scan. A blueprint with no text_content anywhere (the
+    common case today - see the schema field's own note that this is additive) is
+    unaffected - nothing to check."""
+    for obj in objects or []:
+        if not isinstance(obj, dict):
+            continue
+        for sub in obj.get("text_content") or []:
+            if not isinstance(sub, dict):
+                continue
+            content = (sub.get("content") or "").strip()
+            if len(content) < _MIN_TEXT_CONTENT_LEAK_CHECK_LENGTH:
+                continue
+            if content in prompt:
+                raise TextContentLeakError(
+                    f"Ad {ad_id}: text sub-object {sub.get('object_id', '?')!r} (on "
+                    f"object {obj.get('object_id', '?')!r})'s own content {content!r} "
+                    f"appears verbatim in the assembled prompt - content is "
+                    f"analysis-only and must never reach a built prompt."
+                )
+
+
+class ProhibitedClaimLeakError(RuntimeError):
+    """Raised by build_image_prompt (2026-08-20, text layer completion Part A) when
+    a prohibited efficacy/authority/certification claim phrase (compliance.
+    prohibited_claim_match - "Clinically Proven", "Dermatologist Developed", etc.)
+    appears anywhere in the assembled prompt. resolve_disposition forces every
+    matching text object/text_content sub-object to "drop" before this point (see
+    deconstruct.py), so a match here means either a NEW site fed raw object/
+    sub-object text into the prompt without going through that resolution, or a
+    clause elsewhere (operator instruction, product facts, angle language) happens
+    to independently contain one of these phrases - either way, this is the same
+    silent-failure-invariant reasoning as TextContentLeakError above: raised, not
+    merely logged, because a leak here is exactly the class of bug (an unauthorised
+    authority/efficacy claim reaching a generated ad) this whole task exists to
+    close, and the assertion is the last mechanical checkpoint before the prompt is
+    ever handed to Gemini."""
+
+
+def _assert_no_prohibited_claim_leak(prompt, ad_id=None):
+    """Runtime regression lock (2026-08-20, text layer completion Part A): scans the
+    fully assembled prompt for any compliance.PROHIBITED_CLAIM_PATTERNS match and
+    raises ProhibitedClaimLeakError if one is found. Follows the same pattern as
+    _assert_no_text_content_leak - a runtime assertion at the end of
+    build_image_prompt, not a test-only check, so it fires on every real call.
+
+    COMPLIANCE_RULES (imported above, inserted verbatim and unmodified by both
+    brand_rules() and the targeted-edit path) is stripped out before scanning -
+    rule C3 there already legitimately QUOTES several of these exact phrases
+    ("do not use 'clinically proven', 'clinically tested', 'doctor recommended'
+    ...") as examples of what NOT to render, so scanning the full prompt
+    unconditionally would trip this assertion on literally every call, rules text
+    included, real leak or not - confirmed live the first time this assertion ran
+    against a real build_image_prompt call. COMPLIANCE_RULES is a fixed, known
+    constant (never blueprint-derived), so removing its own verbatim text before
+    scanning cannot hide a real leak - only a leak reaching the prompt through
+    blueprint-derived content (objects, product facts, operator instruction, angle
+    language) can still trip this."""
+    scan_target = prompt.replace(COMPLIANCE_RULES, "")
+    match = compliance.prohibited_claim_match(scan_target)
+    if match:
+        raise ProhibitedClaimLeakError(
+            f"Ad {ad_id}: the assembled prompt contains the prohibited claim phrase "
+            f"{match!r} - Besque makes no efficacy/authority/certification claims of "
+            f"this kind, and resolve_disposition should have dropped every object "
+            f"carrying this wording before the prompt was built."
+        )
 
 
 def reference_has_product(blueprint):
@@ -376,7 +742,23 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
     # unchanged) only for a blueprint resolve_authorised_product_count can't reason
     # about at all - a legacy row predating the objects model, or a genuinely
     # productless reference.
-    authorised_from_objects = resolve_authorised_product_count(blueprint.get("objects"))
+    # authorised_product_dispositions (2026-08-20, generalised product-count fix):
+    # computed ONCE here and threaded into _objects_clause below - the single source
+    # of truth for both the COUNT (rule 7/product_clause, via authorised_from_objects)
+    # and the PER-OBJECT map (_objects_clause's own SUBSTITUTE/DROP lines), so the two
+    # can never independently derive disagreeing answers. See resolve_authorised_
+    # product_dispositions's own docstring for the part_of/geometric/ceiling
+    # safeguards this now applies that the old direct resolve_product_group_
+    # dispositions call inside _objects_clause never did.
+    authorised_product_dispositions = resolve_authorised_product_dispositions(
+        blueprint.get("objects"), operator_product_count=product_count,
+        layout_product_count=layout_detail_bp.get("product_count"),
+        ad_id=blueprint.get("ad_id"),
+    )
+    authorised_from_objects = (
+        sum(1 for v in authorised_product_dispositions.values() if v == "substitute")
+        if authorised_product_dispositions is not None else None
+    )
     reference_product_count = (
         authorised_from_objects if authorised_from_objects is not None
         else layout_detail_bp.get("product_count")
@@ -622,7 +1004,8 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
             _operator_instruction_clause(operator_instruction) +
             _critic_feedback_clause(critic_feedback) +
             _objects_clause(blueprint.get("objects"), objects_context, ad_id=blueprint.get("ad_id"),
-                            suppress_bottle_identity=suppress_bottle_identity) +
+                            suppress_bottle_identity=suppress_bottle_identity,
+                            authorised_product_dispositions=authorised_product_dispositions) +
             # Per-zone typography restoration (2026-08-17) - edit-mode only, matching
             # the deleted _typography_zones_clause's own original scope exactly (the
             # reference IS the creative brief in this branch, so typographic
@@ -682,7 +1065,8 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
             _operator_instruction_clause(operator_instruction) +
             _critic_feedback_clause(critic_feedback) +
             _objects_clause(blueprint.get("objects"), objects_context, ad_id=blueprint.get("ad_id"),
-                            suppress_bottle_identity=suppress_bottle_identity) +
+                            suppress_bottle_identity=suppress_bottle_identity,
+                            authorised_product_dispositions=authorised_product_dispositions) +
             _semantic_split_clause(blueprint.get("semantic_split")) +
             creative_description.strip() + " "
             + product_clause
@@ -705,7 +1089,8 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
             _operator_instruction_clause(operator_instruction) +
             _critic_feedback_clause(critic_feedback) +
             _objects_clause(blueprint.get("objects"), objects_context, ad_id=blueprint.get("ad_id"),
-                            suppress_bottle_identity=suppress_bottle_identity) +
+                            suppress_bottle_identity=suppress_bottle_identity,
+                            authorised_product_dispositions=authorised_product_dispositions) +
             _semantic_split_clause(blueprint.get("semantic_split")) +
             f"A premium skincare advertisement image for Besque, a natural body-oil brand for women 40+. "
             f"Composition and setting: {layout}. (If this implies a person, render them per compliance "
@@ -719,6 +1104,9 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
             + _bottle_fixed_clause() + _bottle_register_clause(background, resolved_style) +
             closing
         )
+    _assert_product_count_consistent(prompt, rule_authorised_product_count, ad_id=blueprint.get("ad_id"))
+    _assert_no_text_content_leak(prompt, blueprint.get("objects"), ad_id=blueprint.get("ad_id"))
+    _assert_no_prohibited_claim_leak(prompt, ad_id=blueprint.get("ad_id"))
     return prompt
 
 # ---- Live single-pass image generation (nano banana via Gemini API) ----
@@ -1100,6 +1488,12 @@ def _object_typography_clause(objects, context=None):
     identical output for every blueprint predating this field, same as every other
     additive field this session."""
     context = context or {}
+    # known_text_content (2026-08-20, live leak fix): this function computes its own
+    # `label` independently of _objects_clause's own (separately-scrubbed)
+    # `description` - a SEPARATE site, needing its own scrub, not a shared value
+    # passed in from that other function. See _known_text_content_strings/_scrub_
+    # known_text_content's own docstrings.
+    known_text_content = _known_text_content_strings(objects)
     lines = []
     for obj in objects or []:
         obj = obj or {}
@@ -1127,6 +1521,9 @@ def _object_typography_clause(objects, context=None):
         if deco:
             parts.append("with " + ", ".join(deco))
         label = (obj.get("description") or obj.get("object_id") or "unnamed object").strip()
+        label = _scrub_known_text_content(label, known_text_content) or (
+            obj.get("object_id") or "unnamed object"
+        )
         line_count = typography.get("line_count")
         lines.append(
             f"- {label}: {', '.join(parts)}, "
@@ -1147,7 +1544,7 @@ def _object_typography_clause(objects, context=None):
 
 
 def _substitute_object_line(obj, kind, text_purpose, description, context, product_instance_count=1,
-                             suppress_bottle_identity=False):
+                             suppress_bottle_identity=False, known_text_content=None):
     """The SUBSTITUTE line for one object whose (re-)resolved disposition is
     "substitute" - dispatches on text_purpose (2026-08-17 restoration of the deleted
     _structural_zones_clause's per-zone-type rules) for a kind=="text" object with a
@@ -1206,7 +1603,20 @@ def _substitute_object_line(obj, kind, text_purpose, description, context, produ
     obj.get("appearance") in place of `description` whenever present - see the schema
     field's own docstring for why. Falls back to `description` when appearance is
     absent (a legacy blueprint), reproducing this function's exact prior text for any
-    blueprint predating this field."""
+    blueprint predating this field.
+
+    known_text_content (2026-08-20, live leak fix - see _known_text_content_strings/
+    _scrub_known_text_content): `description` is scrubbed once by the CALLER
+    (_objects_clause) before it ever reaches this function, so every branch below
+    that quotes `description` is already protected. `appearance` is read directly
+    from `obj` here, not pre-scrubbed by the caller, so it gets its own scrub pass in
+    the product branch below - appearance's own docstring already forbids a brand/
+    product name, but this codebase's own standing finding is that a model
+    instruction doesn't reliably bind, so the same mechanical scrub applies
+    regardless of what the field is SUPPOSED to contain. None (a caller that doesn't
+    pass it, e.g. an existing direct test of this function) skips scrubbing
+    entirely - byte-identical to this function's behaviour before this fix, for any
+    caller that hasn't been updated to compute the set."""
     if kind == "product":
         bbox = obj.get("bbox")
         position_fact = (
@@ -1225,7 +1635,10 @@ def _substitute_object_line(obj, kind, text_purpose, description, context, produ
         # field's own docstring) when present, so the ONLY thing ever quoted here is
         # already brand-safe; falls back to `description` for a legacy blueprint with
         # no appearance field, unchanged behaviour.
-        appearance_text = (obj.get("appearance") or "").strip() or description
+        appearance_text = (obj.get("appearance") or "").strip()
+        if known_text_content:
+            appearance_text = _scrub_known_text_content(appearance_text, known_text_content)
+        appearance_text = appearance_text or description
         if suppress_bottle_identity:
             return (
                 f"COMPOSITING: this position held a competitor product (\"{appearance_text}\") - "
@@ -1278,13 +1691,54 @@ def _substitute_object_line(obj, kind, text_purpose, description, context, produ
     if text_purpose == "testimonial":
         testimonial = context.get("testimonial") or {}
         quote = testimonial.get("quote", "")
-        attribution = testimonial.get("attribution") or "a verified customer"
+        # 2026-08-20 (Part D, verbatim binding): attribution is used EXACTLY as the
+        # source row carries it, or not at all - pipeline.select_testimonial_review
+        # returns attribution="" whenever the underlying review/verbatim row has no
+        # real customer_name/nickname (see that function's own return statements),
+        # which is a legitimate, common outcome, not a gap to paper over. The
+        # previous `or "a verified customer"` fallback invented a generic
+        # attribution phrase with no source row behind it whenever that happened -
+        # exactly the "attribution only as it exists in the source row, or none at
+        # all" violation this fix closes. No fallback string, no invented name.
+        attribution = testimonial.get("attribution") or ""
+        # 2026-08-20 (attribution leak fix): NEVER construct this instruction with the
+        # words "attributed to" - that is the exact phrase shape PERSONAL_NAME_
+        # ATTRIBUTION_PATTERN (src/compliance.py) treats as dangerous enough to strip
+        # from OUTPUT-side text, and the same reason generate_copy._redact_personal_
+        # attribution exists to strip it from reference-derived INPUT text. Building a
+        # sentence containing that exact shape and sending it to Gemini as prompt prose
+        # is what caused a live draft to render the literal words "attributed to Leah
+        # E." into the image - Gemini read the instruction's own wording as content to
+        # display, not as meta-language describing how to display it. Fixed
+        # structurally (rephrased to never contain the flagged shape at all), not by
+        # adding a "never render this phrase" caveat next to it - the same "don't hand
+        # the model the exact words you don't want echoed" lesson this codebase already
+        # applies to _testimonial_styling_instruction's account-chrome carve-out.
+        # generate_image_prompt_writer.py already uses the safe convention this now
+        # matches: "em-dash attribution line ('— Name')" - two bare on-image strings,
+        # never a narrated sentence connecting them.
+        if attribution:
+            attribution_clause = (
+                f"with \"{attribution}\" as a separate short name/initial line beside "
+                f"it - styled the way a real testimonial card shows a reviewer's name "
+                f"(e.g. preceded by an em dash), never narrated or introduced by any "
+                f"other wording."
+            )
+        else:
+            # 2026-08-20 (Part D): the source row itself carries no name - render the
+            # quote with NO name/initial attached, never a generic placeholder like "a
+            # verified customer" or any other invented attribution.
+            attribution_clause = (
+                "with NO name, initial, or other attribution attached - the source "
+                "review carries none, so none may be invented or substituted in its "
+                "place."
+            )
         return (
             f"SUBSTITUTE: this reads as a customer testimonial (\"{description}\") - "
             f"replace with this REAL customer review, rendered EXACTLY as given, never "
-            f"reworded, shortened, or invented: \"{quote}\" — attributed to "
-            f"{attribution}. No star rating, age, or timeframe unless the review text "
-            f"itself states one."
+            f"reworded, shortened, or invented: the quote \"{quote}\" as the review "
+            f"text, {attribution_clause} No star rating, age, or timeframe unless the "
+            f"review text itself states one."
             + _testimonial_styling_instruction(obj)
         )
     if text_purpose == "product_callout":
@@ -1330,7 +1784,177 @@ def _substitute_object_line(obj, kind, text_purpose, description, context, produ
     )
 
 
-def _objects_clause(objects=None, context=None, ad_id=None, suppress_bottle_identity=False):
+def _known_text_content_strings(objects):
+    """Every text_content[].content string across the WHOLE objects list (2026-08-20,
+    live leak fix - see this module's own end-of-build assertion,
+    _assert_no_text_content_leak). Global, not per-object: a badge's or a product's
+    own `description`/`appearance` can just as easily restate a DIFFERENT object's
+    baked-in text as its own (a competitor product's name detected as text_content
+    on the product object itself commonly ALSO shows up, verbatim, in that same
+    object's own `description`, since deconstruct's prompt asks the model to
+    describe "what it plainly is" - text_content and description are two
+    independent model-authored fields with no guarantee of staying in sync). Used
+    by every site that quotes an object's description/appearance/label into a
+    built prompt - see _scrub_known_text_content, the function that actually
+    applies this set."""
+    return {
+        content
+        for obj in (objects or []) if isinstance(obj, dict)
+        for sub in (obj.get("text_content") or []) if isinstance(sub, dict)
+        for content in [(sub.get("content") or "").strip()]
+        if content
+    }
+
+
+def _scrub_known_text_content(text, known_strings):
+    """Strip every string in `known_strings` (see _known_text_content_strings) out of
+    `text` before it is quoted into a built prompt. text_content[].content is
+    analysis-only (schema/blueprint.schema.json) and must never reach a built prompt
+    by ANY path - not just the specific paths already found and closed
+    (_text_content_removal_note never quotes it directly), but every OTHER site that
+    quotes a free-text field (description, appearance, a typography label) which the
+    model may have used to independently restate the same visible words. Same
+    pattern as generate_copy._redact_personal_attribution: strip a known-dangerous
+    substring before use, never trust a free-text field not to restate it. Longest
+    strings first, so a short detected string that happens to be a substring of a
+    longer one doesn't leave a mangled fragment of the longer one behind. Collapses
+    any resulting double-space left by a removed substring - a scrubbed description
+    should still read as a normal (if shorter) sentence, not one with a visible gap."""
+    if not text:
+        return text
+    for known in sorted(known_strings, key=len, reverse=True):
+        if known and known in text:
+            text = text.replace(known, "")
+    return " ".join(text.split())
+
+
+def _scrub_prohibited_claim_phrases(text):
+    """Strip any compliance.PROHIBITED_CLAIM_PATTERNS match out of `text` before it
+    is quoted into a built prompt (2026-08-20, Part A leak fix, found live by
+    _assert_no_prohibited_claim_leak's own first real run). An object carrying a
+    prohibited claim phrase in its own `description` ALWAYS resolves to "drop" (see
+    deconstruct.resolve_disposition, checked first) - but the ABSENT line that
+    disposition produces QUOTES the object's own description verbatim ("ABSENT:
+    the {description} that appeared here is REMOVED"), by design, so Gemini knows
+    exactly what must not appear - the same reason a KEEP/SUBSTITUTE line quotes a
+    description too. For an ordinary description that design is correct and
+    necessary; for a description that IS the prohibited phrase itself, it puts the
+    exact banned wording into the prompt text, right next to an instruction not to
+    render it - precisely the shape CLAUDE.md's guardrails note already warns
+    against (naming the exact words you don't want echoed can itself increase the
+    risk of them being echoed, see the testimonial-attribution fix elsewhere in
+    this same session). Scrubbed to a neutral placeholder here, the same
+    "strip a known-dangerous substring before use" discipline as
+    _scrub_known_text_content immediately above, rather than raising - the object
+    is already correctly dropped; this only prevents its own wording from being
+    the thing that names it in the prompt."""
+    if not text:
+        return text
+    for pattern in compliance.PROHIBITED_CLAIM_PATTERNS:
+        text = pattern.sub("[claim removed]", text)
+    return " ".join(text.split())
+
+
+def _record_empty_container_warning(ad_id, detail):
+    """pipeline_warnings row for the empty-container fix, AT THIS (generation
+    time) RESOLUTION POINT specifically - deconstruct._resolve_object_
+    dispositions applies the same rule at deconstruct time and records the
+    DISTINCT "empty_container_dropped" kind, never this one, so a failure in one
+    resolution point is diagnosable without auditing the other (per this
+    session's own "independently attributable" requirement). See _objects_
+    clause's own inline comment for the live cases this closes: a five-item
+    numbered list where four items rendered as empty numerals (nested text_
+    content), and an empty pink sticky note whose offer text was a SEPARATE
+    object linked via serves_object_id rather than nested (Part C, ad
+    1746884313351902). Lazy-imported so the common case (no override needed)
+    touches no DB, matching this module's other rare-path-only warning helpers."""
+    from src import dedupe as _dedupe
+    _dedupe.init_pipeline_warnings()
+    _dedupe.record_warning("empty_container_dropped_at_generation", f"Ad {ad_id}: {detail}")
+
+
+def _record_prohibited_claim_warning(ad_id, object_id, kind_label, parent_id=None):
+    """pipeline_warnings row for Part A (prohibited claim phrases) - independently
+    attributable from an ordinary drop or the empty-container/linked-text
+    warnings above. kind_label distinguishes a top-level object from a
+    text_content sub-object in the message; parent_id (sub-objects only) names
+    which object the sub-object sits on."""
+    from src import dedupe as _dedupe
+    _dedupe.init_pipeline_warnings()
+    parent_note = f" (on object {parent_id!r})" if parent_id else ""
+    _dedupe.record_warning(
+        "prohibited_claim_dropped",
+        f"Ad {ad_id}: {kind_label} {object_id!r}{parent_note} force-dropped - its "
+        f"own wording matches a prohibited efficacy/authority/certification claim "
+        f"phrase, never approvable regardless of context.",
+    )
+
+
+def _record_linked_text_alignment_warning(ad_id, group_ids, resolved_value):
+    """pipeline_warnings row for Part B (linked label/evidence text objects
+    disagreeing on disposition) - only ever called when deconstruct.align_
+    linked_text_dispositions actually found a real disagreement to resolve."""
+    from src import dedupe as _dedupe
+    _dedupe.init_pipeline_warnings()
+    _dedupe.record_warning(
+        "linked_text_disposition_aligned",
+        f"Ad {ad_id}: objects {list(group_ids)} disagreed on disposition; aligned "
+        f"to the stricter value {resolved_value!r}.",
+    )
+
+
+def _text_content_removal_note(obj, context):
+    """2026-08-20 (text sub-objects, DETECTION ONLY): appended to whatever KEEP/
+    SUBSTITUTE/DROP line _objects_clause already built for `obj` - a sub-object in
+    obj["text_content"] (legible text baked into THIS object's own pixels, regardless
+    of the object's own kind - see schema/blueprint.schema.json's own docstring for
+    the live leak this closes: "Norse Organics" on a kept gradient-panel graphic,
+    "KilgourMD" on both bottle labels of a substituted product) whose resolved
+    disposition is anything other than "keep" must not survive on this object's own
+    surface, independent of what the object AS A WHOLE is doing.
+
+    Re-resolves fresh via deconstruct._resolve_text_content_dispositions(text_content,
+    context) - the SAME dual-resolution reasoning as every other context-gated field
+    this function already re-resolves (product_group_dispositions, testimonial_
+    dispositions above): a context-gated purpose stored at deconstruct time (no
+    context existed yet) may resolve differently once this run's real offer/
+    certification/testimonial context is applied.
+
+    NEVER quotes a sub-object's own `content` - that string is analysis-only (see
+    build_image_prompt's own end-of-build assertion, which raises if any text_
+    content[].content string appears verbatim in the assembled prompt). Names only
+    the sub-object's own bbox and count, generic enough that Gemini cannot mistake
+    this instruction for renderable text itself - the same "don't hand the model the
+    exact words you don't want echoed" lesson behind the testimonial attribution-leak
+    fix elsewhere in this file. Detection only, no message-level/claim analysis: a
+    non-"keep" sub-object (substitute OR drop alike) gets the SAME generic removal
+    instruction - this function does not attempt to generate or place replacement
+    copy for a sub-object, only to ensure its current wording never survives.
+
+    Returns "" when obj has no text_content, or when every sub-object resolves to
+    "keep" - the common case, unaffected."""
+    text_content = obj.get("text_content") or []
+    if not text_content:
+        return ""
+    resolved = deconstruct._resolve_text_content_dispositions(text_content, context)
+    to_remove = [s for s in resolved if isinstance(s, dict) and s.get("disposition") != "keep"]
+    if not to_remove:
+        return ""
+    bboxes = [s.get("bbox") for s in to_remove if isinstance(s.get("bbox"), (list, tuple))]
+    bbox_note = f" at {bboxes}" if bboxes else ""
+    plural = "s" if len(to_remove) > 1 else ""
+    return (
+        f" This object's own surface also carries {len(to_remove)} baked-in text/brand "
+        f"mark{plural}{bbox_note} that must NEVER survive in any form, whatever happens "
+        f"to the rest of this object - do not reproduce, quote, approximate, or "
+        f"translate its wording; either remove it entirely or replace it only with "
+        f"content already authorised elsewhere in this prompt, never inventing new "
+        f"text for it."
+    )
+
+
+def _objects_clause(objects=None, context=None, ad_id=None, suppress_bottle_identity=False,
+                     authorised_product_dispositions=None):
     """2026-08-17: REPLACES _scene_elements_clause/_illustrated_elements_clause -
     deconstruct.py no longer produces scene_elements at all (schema/blueprint.schema.json),
     every visually distinct thing in the reference is now one entry in blueprint.objects,
@@ -1389,6 +2013,27 @@ def _objects_clause(objects=None, context=None, ad_id=None, suppress_bottle_iden
     function's own docstring. False (the default) reproduces this function's prior
     output byte-for-byte.
 
+    authorised_product_dispositions (2026-08-20, generalised product-count fix):
+    the SAME {object_id: "substitute"|"drop"} map build_image_prompt already computed
+    via resolve_authorised_product_dispositions for rule 7/product_clause - passed in
+    so this function's own per-object SUBSTITUTE/DROP lines can NEVER derive a
+    disagreeing count from a second, independent call to deconstruct.resolve_
+    product_group_dispositions (that was the actual gap: this function used to call
+    it directly, with none of resolve_authorised_product_dispositions's part_of/
+    geometric/ceiling safeguards). None (the default - every existing direct test of
+    this function) falls back to computing it here via resolve_authorised_product_
+    dispositions(objects) with no ceiling info, which still gets the part_of/
+    geometric protections, just not the ceiling one (no operator/layout count is
+    available to a caller that only ever passes the bare objects array).
+
+    part_of (2026-08-20) gets the SAME two-pass treatment as serves_object_id, for
+    the same reason: a component's fate depends on its parent's resolved
+    disposition, computed here at generation time (which may differ from what
+    deconstruct time already stored, e.g. a context-gated parent). A kind=="product"
+    part_of object is already forced to "drop" inside authorised_product_
+    dispositions itself, so this only matters for a non-product component (a prop or
+    text object naming part_of).
+
     Returns "" when objects is empty/absent (a legacy blueprint predating this schema,
     or a blueprint with a genuinely empty list, which schema validation should never
     actually allow through in practice) - never a fabricated object list.
@@ -1422,7 +2067,10 @@ def _objects_clause(objects=None, context=None, ad_id=None, suppress_bottle_iden
     # first_pass's answer for exactly the kind=="product" objects it covers; every other
     # object (including a product not competitor-branded/brand-marked, the rare case
     # this doesn't cover) keeps its existing resolution path, unchanged.
-    product_group_dispositions = deconstruct.resolve_product_group_dispositions(objects)
+    product_group_dispositions = (
+        authorised_product_dispositions if authorised_product_dispositions is not None
+        else (resolve_authorised_product_dispositions(objects) or {})
+    )
     product_instance_count = sum(1 for v in product_group_dispositions.values() if v == "substitute")
     # testimonial_dispositions (2026-08-19, duplicate-testimonial guard restoration):
     # same reasoning as product_group_dispositions immediately above - resolved FRESH
@@ -1431,38 +2079,169 @@ def _objects_clause(objects=None, context=None, ad_id=None, suppress_bottle_iden
     # resolve_testimonial_dispositions's own docstring for the live bug this fixes
     # (the identical review rendering in two boxes).
     testimonial_dispositions = deconstruct.resolve_testimonial_dispositions(objects, context)
+    # known_text_content (2026-08-20, live leak fix): computed ONCE per call, reused
+    # for every object's `description` below and forwarded into _substitute_object_
+    # line for `appearance` - see _known_text_content_strings/_scrub_known_text_
+    # content's own docstrings for why a free-text field can independently restate
+    # detected baked-in text with no guarantee of staying in sync with it.
+    known_text_content = _known_text_content_strings(objects)
     first_pass = {}
     for obj in objects:
         obj = obj or {}
         kind = obj.get("kind")
         object_id = obj.get("object_id")
         text_purpose = obj.get("text_purpose") if kind == "text" else None
+        part_of_id = obj.get("part_of")
+        part_of_disposition = first_pass.get(part_of_id) if part_of_id else None
         if kind == "product" and object_id in product_group_dispositions:
             first_pass[object_id] = product_group_dispositions[object_id]
         elif text_purpose == "testimonial" and object_id in testimonial_dispositions:
             first_pass[object_id] = testimonial_dispositions[object_id]
         elif text_purpose:
-            first_pass[object_id] = deconstruct.resolve_disposition(obj, context)
+            first_pass[object_id] = deconstruct.resolve_disposition(
+                obj, context, part_of_parent_disposition=part_of_disposition)
+        elif part_of_id:
+            first_pass[object_id] = deconstruct.resolve_disposition(
+                obj, part_of_parent_disposition=part_of_disposition)
         else:
             first_pass[object_id] = obj.get("disposition")
-    lines = []
+
+    # Reverse index for Part C (2026-08-20, empty-container fix extended to the
+    # generation-time resolution point): object_id -> [kind=="text" objects whose
+    # serves_object_id names it] - a container's own associated text may be
+    # linked this way instead of nested as a text_content child. Live case: ad
+    # 1746884313351902's pink sticky note (a kind=="graphic" object with NO
+    # text_content at all) had its offer text recorded as a SEPARATE object
+    # naming the sticky via serves_object_id - the text_content-only version of
+    # this rule never looked at this shape, which is why it survived as an empty
+    # container even after the deconstruct-time fix landed.
+    served_by = {}
+    for obj in objects:
+        obj = obj or {}
+        if obj.get("kind") != "text":
+            continue
+        served_id = obj.get("serves_object_id")
+        if served_id:
+            served_by.setdefault(served_id, []).append(obj)
+
+    # SECOND PASS: resolve every object's FINAL disposition (with the empty-
+    # container override and prohibited-claim warning), into a plain dict -
+    # lines are built in a THIRD pass below, only after Part B's linked-text
+    # alignment has run on the COMPLETE map, so a label/evidence pair's final
+    # line always reflects the aligned (not the pre-alignment) value.
+    dispositions = {}
     for obj in objects:
         obj = obj or {}
         kind = obj.get("kind")
         text_purpose = obj.get("text_purpose") if kind == "text" else None
         served_id = obj.get("serves_object_id")
+        part_of_id = obj.get("part_of")
         object_id = obj.get("object_id")
         if kind == "product" and object_id in product_group_dispositions:
             disposition = product_group_dispositions[object_id]
         elif text_purpose == "testimonial" and object_id in testimonial_dispositions:
             disposition = testimonial_dispositions[object_id]
-        elif served_id:
+        elif served_id or part_of_id:
             disposition = deconstruct.resolve_disposition(
-                obj, context, served_object_disposition=first_pass.get(served_id))
+                obj, context,
+                served_object_disposition=first_pass.get(served_id) if served_id else None,
+                part_of_parent_disposition=first_pass.get(part_of_id) if part_of_id else None,
+            )
         else:
             disposition = first_pass.get(object_id)
+
+        # Part A (2026-08-20): independently-attributable warning for a
+        # prohibited-claim-driven drop - resolve_disposition itself already
+        # forces "drop" (checked first, before every other rule); this only
+        # decides whether THIS specific reason applies, so the drop is
+        # diagnosable without auditing every other rule that can also drop.
+        if compliance.prohibited_claim_match(deconstruct._prohibited_claim_text(obj)):
+            _record_prohibited_claim_warning(ad_id, object_id, "object")
+
+        # Empty-container fix (2026-08-20, second resolution point - deconstruct.
+        # _resolve_object_dispositions applies the SAME rule at deconstruct time,
+        # under the DISTINCT "empty_container_dropped" kind): a "keep" object
+        # whose combined text_content children AND/OR serves_object_id-linked
+        # text objects (Part C) have ALL resolved to "drop" would render as an
+        # empty container. Re-resolved fresh with THIS run's real context (dual-
+        # resolution, same reasoning as product_group_dispositions/testimonial_
+        # dispositions above) - a context-gated purpose stored "drop" at
+        # deconstruct time can resolve "substitute" here once a real value
+        # exists, un-emptying the container. Never fires when there is no
+        # combined child content, or when ANY child resolves to "keep"/
+        # "substitute" (the container has real content in at least one slot).
+        resolved_sub_content = None
+        if obj.get("text_content"):
+            resolved_sub_content = deconstruct._resolve_text_content_dispositions(
+                obj["text_content"], context)
+            for sub in resolved_sub_content:
+                if isinstance(sub, dict) and compliance.prohibited_claim_match(
+                        deconstruct._prohibited_claim_text(sub)):
+                    _record_prohibited_claim_warning(
+                        ad_id, sub.get("object_id"), "text_content sub-object",
+                        parent_id=object_id,
+                    )
+        combined_child_dispositions = []
+        if resolved_sub_content:
+            combined_child_dispositions.extend(
+                s.get("disposition") for s in resolved_sub_content if isinstance(s, dict)
+            )
+        serving_texts = served_by.get(object_id) or []
+        if serving_texts:
+            # first_pass values only (context-free relations already resolved
+            # once, single-hop) - same documented scoping limit as the served_
+            # object_disposition/part_of_parent_disposition lookups above.
+            combined_child_dispositions.extend(
+                first_pass.get(o.get("object_id")) for o in serving_texts
+            )
+        if disposition == "keep" and combined_child_dispositions and all(
+            d == "drop" for d in combined_child_dispositions
+        ):
+            disposition = "drop"
+            _record_empty_container_warning(
+                ad_id,
+                f"object {object_id!r} force-dropped - all "
+                f"{len(combined_child_dispositions)} of its own text_content "
+                f"sub-object(s) and/or serves_object_id-linked text object(s) "
+                f"resolved to 'drop'; rendering it as 'keep' would have produced "
+                f"an empty container.",
+            )
+        dispositions[object_id] = disposition
+
+    # Part B (2026-08-20): align linked text-object groups (a claim's label and
+    # its evidence, split into two objects) to their strictest shared
+    # disposition - see deconstruct.align_linked_text_dispositions's own
+    # docstring for the live case (ad 1357229623024367-shaped).
+    dispositions, changed_groups = deconstruct.align_linked_text_dispositions(objects, dispositions)
+    for group_ids, resolved_value in changed_groups:
+        _record_linked_text_alignment_warning(ad_id, group_ids, resolved_value)
+
+    lines = []
+    for obj in objects:
+        obj = obj or {}
+        kind = obj.get("kind")
+        text_purpose = obj.get("text_purpose") if kind == "text" else None
+        object_id = obj.get("object_id")
+        disposition = dispositions.get(object_id)
         description = (obj.get("description") or obj.get("object_id") or "object").strip()
+        # 2026-08-20, live leak fix: description is model-authored free text and
+        # commonly restates an object's own baked-in visible text verbatim (that's
+        # exactly what text_content now separately, correctly, detects) - scrubbed
+        # here, ONCE, so every consumer below (KEEP/OBSERVED/ABSENT lines directly,
+        # and _substitute_object_line's every branch via this same value) inherits
+        # the same protection with no separate call needed at each site.
+        description = _scrub_known_text_content(description, known_text_content) or (
+            obj.get("object_id") or "object"
+        )
+        # 2026-08-20, Part A leak fix: scrubbed AFTER the known-text-content scrub
+        # above, same reasoning - see _scrub_prohibited_claim_phrases's own
+        # docstring for the live case this closes (an ABSENT line quoting a
+        # dropped object's own prohibited-claim description verbatim).
+        description = _scrub_prohibited_claim_phrases(description) or (
+            obj.get("object_id") or "object"
+        )
         role = obj.get("role") or ""
+        _pre_line_count = len(lines)
         if disposition == "keep":
             # required_in_output (2026-08-19): presence in the reference is evidence
             # this object exists in the SOURCE, never by itself an instruction to
@@ -1491,6 +2270,7 @@ def _objects_clause(objects=None, context=None, ad_id=None, suppress_bottle_iden
                 obj, kind, text_purpose, description, context,
                 product_instance_count=product_instance_count if kind == "product" else 1,
                 suppress_bottle_identity=suppress_bottle_identity if kind == "product" else False,
+                known_text_content=known_text_content,
             ))
         elif disposition == "drop":
             lines.append(
@@ -1498,6 +2278,15 @@ def _objects_clause(objects=None, context=None, ad_id=None, suppress_bottle_iden
                 f"appear anywhere in the output; close the space naturally with the "
                 f"surrounding surface and lighting."
             )
+        # text_content sub-objects (2026-08-20, DETECTION ONLY): appended to WHATEVER
+        # line this object just got, regardless of the object's own disposition - a
+        # baked-in brand mark must not survive even when the object it sits on is kept
+        # (the live "Norse Organics on a gradient panel" leak) or substituted (the live
+        # "KilgourMD on both bottle labels" leak, where a generic substitute
+        # instruction alone was not enough). See _text_content_removal_note's own
+        # docstring for why this never quotes a sub-object's own `content`.
+        if len(lines) > _pre_line_count:
+            lines[-1] = lines[-1] + _text_content_removal_note(obj, context)
     if not lines:
         log.error(
             "Ad %s: SCENE OBJECTS clause skipped - blueprint has a non-empty 'objects' "
@@ -4554,12 +5343,30 @@ def build_targeted_edit_instruction(descriptor, operation, new_value, blueprint=
     via _TARGET_EXCLUDED_PRESERVATION_TERMS (2026-08-14) - never a fixed string - so the
     edit target's own term is never told to change and stay unchanged in the same
     instruction. The wordmark protection clause stays unconditional regardless of
-    target - it is never part of this filtering."""
+    target - it is never part of this filtering.
+
+    known_text_content scrub (2026-08-20, live leak fix): for a target=="object"
+    descriptor, `label`/`current_value` ARE the object's own raw `description` (see
+    edit_capability._object_remove_controls) - the same free-text field that can
+    restate an object's own baked-in text_content verbatim (schema/blueprint.
+    schema.json). Scrubbed here via the SAME _known_text_content_strings/_scrub_
+    known_text_content this module's own batch-generation path already uses,
+    computed from `blueprint.get("objects")` when blueprint is given - None (a
+    caller that predates this fix, or genuinely has no blueprint) skips this
+    specific scrub, same fail-open-on-missing-input convention already documented
+    for the wordmark clause above."""
     label = descriptor.get("label") or descriptor.get("attribute") or descriptor.get("target")
+    current_value = descriptor.get("current_value")
+    if blueprint:
+        known_text_content = _known_text_content_strings(blueprint.get("objects"))
+        if known_text_content:
+            label = _scrub_known_text_content(label, known_text_content) or label
+            if isinstance(current_value, str):
+                current_value = _scrub_known_text_content(current_value, known_text_content) or current_value
     if operation == "remove":
         change = f"REMOVE {label} entirely - it must not appear anywhere in the image afterward."
     else:
-        change = f"Change {label} (currently: {descriptor.get('current_value')!r}) to: {new_value}"
+        change = f"Change {label} (currently: {current_value!r}) to: {new_value}"
     excluded_terms = _TARGET_EXCLUDED_PRESERVATION_TERMS.get(descriptor.get("target") or "", frozenset())
     preservation_list = ", ".join(t for t in _PRESERVATION_TERMS if t not in excluded_terms)
     return (
@@ -4571,7 +5378,7 @@ def build_targeted_edit_instruction(descriptor, operation, new_value, blueprint=
     )
 
 
-def build_object_removal_instruction(description):
+def build_object_removal_instruction(description, blueprint=None):
     """Stage 4 (2026-08-17): the fixed delta every per-object remove control sends -
     a standalone template, NOT built from build_targeted_edit_instruction's generic
     change-list machinery (_PRESERVATION_TERMS/_TARGET_EXCLUDED_PRESERVATION_TERMS,
@@ -4580,20 +5387,41 @@ def build_object_removal_instruction(description):
     field-text construction" discipline src/realism_deltas.py already established for
     the bottle-realism edit control, applied here to object removal. `description` is
     edit_capability._object_remove_controls' own current_value (the object's plain-
-    English description), the only thing this template ever substitutes."""
+    English description), the only thing this template ever substitutes.
+
+    blueprint (optional, 2026-08-20, live leak fix): when given, `description` is
+    scrubbed of any text_content[].content string found anywhere in
+    blueprint.get("objects") before being quoted - same reasoning and same shared
+    helpers (_known_text_content_strings/_scrub_known_text_content) as build_
+    targeted_edit_instruction's own identical fix above. None (a caller that
+    predates this fix) skips the scrub, unchanged prior behaviour."""
+    if blueprint:
+        known_text_content = _known_text_content_strings(blueprint.get("objects"))
+        if known_text_content:
+            description = _scrub_known_text_content(description, known_text_content) or description
     return (
         f"Remove the {description} entirely and close the space naturally with the "
         f"surrounding surface and lighting. Everything else in the image is unchanged."
     )
 
 
-def build_drift_retry_instruction(base_instruction, descriptor):
+def build_drift_retry_instruction(base_instruction, descriptor, blueprint=None):
     """Dynamic Edit System, Step 4: the ONE automatic retry after a drift-check
     failure (src.drift_check) - appends a tightening note to the SAME base
     instruction, never a fresh prompt, so every other constraint (wordmark
     protection, the single-change framing) still applies unchanged. Called at most
-    once per edit request - the caller enforces the one-retry cap, not this function."""
+    once per edit request - the caller enforces the one-retry cap, not this function.
+
+    blueprint (optional, 2026-08-20, live leak fix): same scrub as build_targeted_
+    edit_instruction/build_object_removal_instruction above - for a target=="object"
+    descriptor, `label` is the object's own raw `description`, which can restate its
+    own baked-in text_content verbatim. None (a caller that predates this fix) skips
+    the scrub, unchanged prior behaviour."""
     label = descriptor.get("label") or descriptor.get("attribute") or descriptor.get("target")
+    if blueprint:
+        known_text_content = _known_text_content_strings(blueprint.get("objects"))
+        if known_text_content:
+            label = _scrub_known_text_content(label, known_text_content) or label
     return (
         base_instruction
         + f" NOTE: your previous attempt changed pixels outside the {label} region - "

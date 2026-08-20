@@ -103,12 +103,19 @@ def test_duplicate_testimonial_guard_no_context_both_drop():
 
 def test_duplicate_testimonial_guard_missing_attribution_falls_back():
     """Restores test_structural_zones_clause_social_proof_missing_attribution_falls_
-    back - the winning object still gets the "a verified customer" fallback wording
-    when the real testimonial has no attribution, same as the single-object case."""
+    back, superseded 2026-08-20 (Part D, verbatim binding): the winning object used
+    to get a generic "a verified customer" fallback wording when the real
+    testimonial has no attribution - that fallback was itself the violation Part D
+    closes ("attribution only as it exists in the source row, or none at all"). A
+    real source row with attribution="" now renders with explicitly NO name/
+    initial attached, never an invented placeholder - the duplicate-testimonial
+    guard itself (at most one winner) is unaffected and still the thing this test
+    exercises."""
     objects = [_testimonial_obj("obj_09")]
     context = {"testimonial": {"quote": "Great oil.", "attribution": ""}}
     clause = gip._objects_clause(objects, context, ad_id="FIXTURE_no_attribution")
-    assert "a verified customer" in clause
+    assert "a verified customer" not in clause
+    assert "no name" in clause.lower() or "no attribution" in clause.lower()
 
 
 # ---- Item 3: aggregate review bar vs single quote ----

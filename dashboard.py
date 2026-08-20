@@ -736,7 +736,7 @@ async def api_apply_edit(artifact_id: int, request: Request):
             _log_rejected_after_pending(reason)
             return JSONResponse({"ok": False, "error": reason}, status_code=400)
         instruction = generate_image_prompt.build_object_removal_instruction(
-            descriptor.get("current_value"))
+            descriptor.get("current_value"), blueprint=blueprint)
         from src import pipeline as _pipeline
         stored_copy = source.get("generated_copy") or {}
         stored_product_id = source.get("product_id")
@@ -786,7 +786,8 @@ async def api_apply_edit(artifact_id: int, request: Request):
     # sees drift_flag via the version strip and chooses keep/retry/revert themselves.
     drift_result = drift_check.check_drift(source_bytes, new_image_bytes, descriptor, blueprint)
     if drift_result["checked"] and drift_result["drift_flag"]:
-        retry_instruction = generate_image_prompt.build_drift_retry_instruction(instruction, descriptor)
+        retry_instruction = generate_image_prompt.build_drift_retry_instruction(
+            instruction, descriptor, blueprint=blueprint)
         if target == "object":
             retry_bytes = generate_image_prompt._regenerate_image_bytes(
                 source_bytes, object_removal_prompt, retry_instruction)

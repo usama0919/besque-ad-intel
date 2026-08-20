@@ -421,6 +421,75 @@ def test_process_ad_does_not_hard_block_ordinary_skincare_reference(monkeypatch)
     assert pipeline.process_ad(ad) == "processed"
 
 
+# ---- Unusable-reference gate (2026-08-20): a reference with no transferable
+# structure (essentially wall-to-wall product, or nothing existing independently
+# of the product itself) is rejected BEFORE any paid Gemini call, same shape as
+# the hard-block gate immediately above. ----
+
+def test_process_ad_rejects_reference_with_no_transferable_structure(monkeypatch):
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    dedupe.init_pipeline_warnings()
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+          "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    monkeypatch.setattr(pipeline.assets, "download_image", lambda url, aid: "fake.jpg")
+    monkeypatch.setattr(pipeline.assets, "download_image_bytes", lambda url: b"fake-bytes")
+    monkeypatch.setattr(pipeline.deconstruct, "deconstruct_image", lambda **k: {
+        "format": "product_hero",
+        "product_category": {"category": "body_oil", "signals": ["a bottle fills the frame"]},
+        "visual": {"subject": "a single product bottle filling the frame"},
+        "objects": [
+            {"object_id": "obj_01", "kind": "product", "bbox": [0.05, 0.05, 0.9, 0.9],
+             "description": "competitor bottle", "ownership": "competitor_branded",
+             "carries_brand_mark": True, "disposition": "substitute"},
+        ],
+    })
+    copy_calls = []
+    image_calls = []
+    monkeypatch.setattr(pipeline.generate_copy, "generate_copy_live", lambda *a, **k: copy_calls.append(1))
+    monkeypatch.setattr(pipeline.generate_image_prompt, "generate_image", lambda *a, **k: image_calls.append(1))
+    warnings = []
+    monkeypatch.setattr(pipeline.dedupe, "record_warning", lambda kind, detail: warnings.append((kind, detail)))
+
+    assert pipeline.process_ad(ad) == "skipped"
+    assert copy_calls == []  # never reaches copy generation
+    assert image_calls == []  # never reaches image generation (no Gemini call)
+    assert any(kind == "unusable_reference" for kind, detail in warnings)
+    assert any(ad_id in detail for kind, detail in warnings if kind == "unusable_reference")
+    assert dedupe.is_new(ad_id) is False  # marked seen - never re-analysed on a future run
+
+
+def test_process_ad_does_not_reject_ordinary_reference_with_real_structure(monkeypatch):
+    """Regression guard: the gate must not become a blanket product-object filter -
+    an ordinary reference with a modest product bbox and other structure (a
+    headline, a prop) must proceed normally."""
+    dedupe.init_db()
+    dedupe.init_artifacts()
+    ad_id = f"PIPE_{uuid.uuid4().hex[:8]}"
+    ad = {"ad_id": ad_id, "page_name": "brand", "image_url": "http://x/img.jpg",
+          "start_date": "", "destination_url": "", "text": "", "cta": "", "media_type": "IMAGE"}
+    _mock_all_stages(monkeypatch)
+    monkeypatch.setattr(pipeline.deconstruct, "deconstruct_image", lambda **k: {
+        "format": "product_hero",
+        "product_category": {"category": "body_oil", "signals": ["ordinary product shot"]},
+        "visual": {"subject": "a product bottle beside a headline"},
+        "objects": [
+            {"object_id": "obj_01", "kind": "text", "text_purpose": "headline",
+             "bbox": [0.05, 0.05, 0.9, 0.15], "description": "headline text",
+             "ownership": "competitor_branded", "carries_brand_mark": False,
+             "disposition": "substitute"},
+            {"object_id": "obj_02", "kind": "product", "bbox": [0.2, 0.3, 0.3, 0.4],
+             "description": "competitor bottle", "ownership": "competitor_branded",
+             "carries_brand_mark": True, "disposition": "substitute"},
+            {"object_id": "obj_03", "kind": "prop", "description": "a wooden tray",
+             "ownership": "generic", "carries_brand_mark": False, "disposition": "keep"},
+        ],
+    })
+
+    assert pipeline.process_ad(ad) == "processed"
+
+
 # ---- No-product-object placement (2026-08-19): include_product=True but the
 # reference has zero kind=="product" objects - confirmed live, ad 1567146038752995,
 # an invented side table and a cropped subject; a separate pool ad the same day, two
@@ -500,6 +569,16 @@ def test_process_ad_no_product_placement_bbox_none_when_a_product_object_exists(
         "objects": [
             {"object_id": "obj_01", "kind": "product", "disposition": "substitute",
              "bbox": [0.3, 0.4, 0.2, 0.35], "description": "a competitor bottle"},
+            # 2026-08-20 (unusable-reference gate): a blueprint consisting of ONLY a
+            # product object trips the new gate's "nothing exists independently of
+            # the product" condition - added here so this fixture represents an
+            # ordinary ad (a product WITH other structure), not the gate's own
+            # trigger case, which this test was never about. See
+            # tests/test_reference_structure.py / test_process_ad_rejects_
+            # reference_with_no_transferable_structure for that gate's own coverage.
+            {"object_id": "obj_02", "kind": "prop", "disposition": "keep",
+             "description": "a wooden tray", "ownership": "generic",
+             "carries_brand_mark": False},
         ],
         "background": {"light": "soft window light"},
     })

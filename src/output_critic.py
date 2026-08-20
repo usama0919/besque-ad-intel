@@ -74,6 +74,7 @@ HIGH_CONFIDENCE_BY_DEFAULT = (
     "product category mismatch", "regulatory text carried over from the reference",
     "product register mismatch", "nudity or sexualised content", "subject age violation",
     "subject identity", "competitor brand mark or product", "weight or treatment text in-image",
+    "prohibited efficacy/authority/certification claim",
 )
 
 CRITIC_SYSTEM = (
@@ -197,6 +198,20 @@ CRITIC_SYSTEM = (
     "UGC-style social-post card), the CHROME LAYOUT may be reproduced, but its CONTENT "
     "(whose avatar, whose handle, whose name) must be Besque's own account identity or "
     "absent - flag any chrome still showing the reference's own identity\n"
+    "- PROHIBITED EFFICACY/AUTHORITY/CERTIFICATION CLAIM (C10): any of these phrases, or a "
+    "close variant, rendered anywhere as in-image text - \"Clinically Proven\", "
+    "\"Dermatologist Approved\"/\"Dermatologist Developed\"/\"Dermatologist Recommended\", "
+    "\"Doctor Approved\"/\"Doctor Recommended\", \"Medically Proven\", \"Scientifically "
+    "Proven\", \"Board-Certified\", or any other wording claiming clinical testing, medical/ "
+    "dermatological endorsement, or scientific proof. Besque makes NO efficacy, authority, "
+    "or certification claims of this kind, on any ad, regardless of what the reference ad "
+    "itself claimed - this is the only enforcement for a phrase Gemini reproduces directly "
+    "from the attached reference image rather than one the text prompt itself introduced, "
+    "since the prompt-level fix (resolve_disposition forcing every matching object to "
+    "drop) has no reach over what the model chooses to paint from a photographed reference "
+    "on its own. Confirmed live: \"Clinically Proven\" and \"Dermatologist Developed\" both "
+    "rendered on the same draft, on a supplement/skincare reference the model was never "
+    "told to keep either phrase from\n"
     "- SUBJECT AGE VIOLATION (rule 10): any human subject in the GENERATED image reading "
     "younger than 45, or reading as youthful/smooth-skinned rather than visibly midlife "
     "(45-60) - this is its OWN dedicated category, checked explicitly, not something to "
@@ -275,8 +290,8 @@ CRITIC_SYSTEM = (
     "claim, testimonial, product category mismatch, regulatory text carried over from the "
     "reference, product register mismatch, nudity or sexualised content, subject age "
     "violation, subject identity, competitor brand mark or product, weight or treatment "
-    "text in-image. These are the exact categories that have shipped in real drafts "
-    "before this check existed."
+    "text in-image, prohibited efficacy/authority/certification claim. These are the exact "
+    "categories that have shipped in real drafts before this check existed."
 )
 
 # CRITIC_SYSTEM is an INDEPENDENTLY hand-written checklist, not generated from
@@ -406,6 +421,34 @@ def drop_findings_contradicted_by_authorised(findings, testimonial=None):
             continue
         kept.append(finding)
     return kept
+
+
+def has_unauthorised_testimonial_finding(findings):
+    """Part D, item 4 of the text-layer completion task (2026-08-20, verbatim binding):
+    True when ANY finding still in `findings` reads as testimonial-shaped (see
+    _is_testimonial_shaped_category) - meant to be called AFTER drop_findings_
+    contradicted_by_authorised has already removed findings that merely re-flag the
+    one authorised, real testimonial. A testimonial-shaped finding that SURVIVES that
+    filter is, by construction, one that does NOT string-match the authorised
+    quote - i.e. an unauthorised/fabricated testimonial actually rendered in the
+    image.
+
+    This gates review_status UNCONDITIONALLY, regardless of the finding's own
+    reported `confidence` - deliberately NOT folded into has_high_confidence/
+    HIGH_CONFIDENCE_BY_DEFAULT, because the critic's own confidence judgement is
+    exactly the channel a fabricated testimonial has repeatedly slipped through on
+    (medium/low readings of what is, mechanically, never an approvable outcome: any
+    testimonial text not string-matching a real review row). Confirmed live:
+    fabricated testimonials (e.g. "Leah E.") have shipped despite the prompt-side
+    fix already forcing a no-source testimonial slot to drop structurally - this is
+    the critic-side backstop for whatever the model renders anyway, independent of
+    how confidently the critic itself judged it.
+
+    Caller contract: pass `findings` AFTER drop_findings_contradicted_by_authorised,
+    never before - calling this on the raw, unfiltered findings would treat a
+    correctly-authorised testimonial's own re-flagged mention as itself a gate
+    trigger, which is exactly the false positive that filter exists to prevent."""
+    return any(_is_testimonial_shaped_category(f.get("category")) for f in (findings or []))
 
 
 def _sniff_mime_type(data):

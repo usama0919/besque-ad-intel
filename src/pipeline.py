@@ -6,7 +6,7 @@ ad or failed stage is skipped cleanly without stopping the run.
 import os
 import logging
 from dataclasses import dataclass
-from src import dedupe, scrape, assets, deconstruct, generate_copy, generate_image_prompt, generate_image_prompt_writer, slack_review, compliance, output_critic, content_safety, reference_format
+from src import dedupe, scrape, assets, deconstruct, generate_copy, generate_image_prompt, generate_image_prompt_writer, slack_review, compliance, output_critic, content_safety, reference_format, reference_structure
 from src.retry import with_retry
 
 FORCE_REPROCESS = os.getenv("FORCE_REPROCESS") == "1"
@@ -96,6 +96,24 @@ def _select_angle_verbatim(angle_slug, ad_id, max_chars):
     return candidates_sorted[_stable_index(ad_id, len(candidates_sorted))]
 
 
+def _record_testimonial_slot_removed_warning(ad_id, reason):
+    """2026-08-20 (Part D, item 5 - verbatim binding): a testimonial-purposed
+    object EXISTS on this blueprint (select_testimonial_review's own wants_quote
+    gate already confirmed that - this is never called otherwise) but no real
+    source row was found to fill it, so the object structurally drops rather than
+    rendering with an invented quote. Independently attributable from every other
+    warning kind this task adds - a reviewer asking "why did this ad's
+    testimonial disappear" gets a direct answer here, not just the generic
+    log.info lines this codebase already had at each of these call sites."""
+    dedupe.init_pipeline_warnings()
+    dedupe.record_warning(
+        "testimonial_slot_removed_no_source",
+        f"Ad {ad_id}: testimonial-purposed object structurally removed - {reason}. "
+        f"Never left empty with a 'do not invent' instruction; the slot itself is "
+        f"dropped.",
+    )
+
+
 def select_testimonial_review(blueprint, product, ad_id, max_chars=140, angle_slug=None):
     """Pick a REAL, approved customer review to substitute into a testimonial-purposed
     text object - real review or nothing, never fabricated (2026-08-06: Gemini was
@@ -166,6 +184,10 @@ def select_testimonial_review(blueprint, product, ad_id, max_chars=140, angle_sl
                 "(short enough, %s chars) - testimonial object(s) will drop",
                 ad_id, angle_slug, max_chars,
             )
+            _record_testimonial_slot_removed_warning(
+                ad_id, f"no angle-matched verbatim found for angle={angle_slug!r} "
+                       f"(max_chars={max_chars})",
+            )
             return None
         log.info(
             "Ad %s: testimonial verbatim selected for angle=%r: customer=%r",
@@ -175,6 +197,9 @@ def select_testimonial_review(blueprint, product, ad_id, max_chars=140, angle_sl
 
     product_id = (product or {}).get("id")
     if product_id is None:
+        _record_testimonial_slot_removed_warning(
+            ad_id, "no product_id available to look up product_reviews candidates",
+        )
         return None
     reviews = dedupe.get_reviews_for_product(product_id)
     candidates = [
@@ -186,6 +211,10 @@ def select_testimonial_review(blueprint, product, ad_id, max_chars=140, angle_sl
     if not candidates:
         log.info("Ad %s: no product_reviews testimonial candidate found (no angle set) "
                   "- testimonial object(s) will drop", ad_id)
+        _record_testimonial_slot_removed_warning(
+            ad_id, "no product_reviews candidate found (short enough, non-complaint) - "
+                   "no angle was set for this run",
+        )
         return None
     candidates.sort(key=lambda r: r["id"])
     chosen = candidates[_stable_index(ad_id, len(candidates))]
@@ -994,7 +1023,19 @@ def _regenerate_existing_draft(ad, angle_id, angle_slug, delta_instruction, shou
         findings = existing.get("critic_findings") or []
         review_status = existing.get("review_status") or "ok"
     else:
-        review_status = "failed-review" if output_critic.has_high_confidence(findings) else "ok"
+        # 2026-08-20 (Part D, item 4 - verbatim binding): an unauthorised testimonial
+        # finding (one that survived drop_findings_contradicted_by_authorised, i.e.
+        # does NOT string-match the real review row select_testimonial_review
+        # picked) gates failed-review UNCONDITIONALLY, regardless of the critic's
+        # own reported confidence - see output_critic.has_unauthorised_testimonial_
+        # finding's own docstring for why this can't be folded into has_high_
+        # confidence alone.
+        review_status = (
+            "failed-review"
+            if output_critic.has_high_confidence(findings)
+            or output_critic.has_unauthorised_testimonial_finding(findings)
+            else "ok"
+        )
 
     dedupe.save_artifact(
         ad_id=ad_id, page_name=ad.get("page_name", ""),
@@ -1346,6 +1387,26 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
             dedupe.record_warning(
                 "hard_blocked_medical",
                 f"Ad {ad_id} ({ad.get('page_name', '?')}): {block_reason}",
+            )
+            dedupe.mark_seen(ad_id, ad.get("page_name", ""), angle_id)
+            return "skipped"
+
+        # Unusable-reference gate (2026-08-20): a reference with no transferable
+        # structure (essentially wall-to-wall product, or nothing existing
+        # independently of the product itself) has nothing worth cloning -
+        # rejected before any paid Gemini call, same "skip before generation, no
+        # artifact saved" shape as the hard-block check immediately above.
+        # mark_seen for the same reason as that check: this structural fact about
+        # the reference never changes, so a future run re-scraping the same ad
+        # would otherwise burn a fresh (paid) deconstruct call on it every time.
+        unusable_reason, product_coverage = reference_structure.unusable_reference_reason(blueprint)
+        if unusable_reason:
+            log.warning("Ad %s rejected before generation (no transferable structure, "
+                        "product coverage=%.1f%%): %s", ad_id, product_coverage * 100, unusable_reason)
+            dedupe.init_pipeline_warnings()
+            dedupe.record_warning(
+                "unusable_reference",
+                f"Ad {ad_id} ({ad.get('page_name', '?')}): {unusable_reason}",
             )
             dedupe.mark_seen(ad_id, ad.get("page_name", ""), angle_id)
             return "skipped"
@@ -1830,7 +1891,19 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
                     "Ad %s: %s critic finding(s) dropped as contradicted by authorised "
                     "content, %s remain", ad_id, dropped_count - len(findings), len(findings),
                 )
-            if not output_critic.has_high_confidence(findings):
+            # 2026-08-20 (Part D, item 4 - verbatim binding): an unauthorised
+            # testimonial finding gates this attempt exactly like a HIGH-confidence
+            # finding would, regardless of what confidence the critic itself
+            # reported - see output_critic.has_unauthorised_testimonial_finding's
+            # own docstring. Checked here, on the SAME already-filtered `findings`
+            # (drop_findings_contradicted_by_authorised already ran above), so a
+            # correctly-authorised testimonial's own re-flagged mention can never
+            # trigger this.
+            attempt_has_gating_finding = (
+                output_critic.has_high_confidence(findings)
+                or output_critic.has_unauthorised_testimonial_finding(findings)
+            )
+            if not attempt_has_gating_finding:
                 # This attempt genuinely completed and its own real critic verdict is
                 # clean (or medium/low only) - this is the ONE place ever_high_confidence
                 # is reset (2026-08-19, corrected same day): the invariant is that a HIGH

@@ -127,9 +127,15 @@ def test_real_osea_fixture_both_instances_substitute():
 # ---- generate_image_prompt.resolve_authorised_product_count ----
 
 def test_authorised_count_matches_group_disposition_survivor_count():
+    # Distinct, non-overlapping bboxes (2026-08-20) - the default _product_obj bbox is
+    # a placeholder unrelated to this test's own point (same_product_as grouping), but
+    # two genuinely separate product instances sharing the identical bbox is exactly
+    # the geometric-conflict shape resolve_authorised_product_count now collapses to 1
+    # (see _products_geometrically_conflict) - a real same_product_as pair needs two
+    # real, non-conflicting positions to prove the grouping logic in isolation.
     objects = [
-        _product_obj("obj_01"),
-        _product_obj("obj_02", same_product_as="obj_01"),
+        _product_obj("obj_01", bbox=[0.05, 0.1, 0.3, 0.6]),
+        _product_obj("obj_02", same_product_as="obj_01", bbox=[0.55, 0.1, 0.3, 0.6]),
     ]
     assert gip.resolve_authorised_product_count(objects) == 2
 

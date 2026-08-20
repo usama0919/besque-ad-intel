@@ -22,7 +22,7 @@ The JSON must have exactly these fields:
 - ad_id (string): use the value "{ad_id}"
 - source_page (string): use the value "{source_page}"
 - captured_at (string): use the value "{captured_at}"
-- objects (array): REQUIRED - this key must ALWAYS be present, and must NEVER be empty - every ad has at least one object (at minimum, the product or the headline). ONE ENTRY PER VISUALLY DISTINCT THING in the reference ad - every product, every person, every discrete text block (headline, sub-line, body copy, CTA button, badge, price, disclaimer, testimonial quote - each is its OWN entry, never bundled), every logo/wordmark, every prop, every surface the product or a person interacts with directly (not the general background - see `background` below for the environment itself), and every other graphic element (an icon, a badge shape, a decorative flourish). MULTIPLE INSTANCES OF THE SAME PRODUCT ARE SEPARATE ROWS, each with its own object_id - two bottles in frame is two entries, not one entry noting a count. Anything with an identity - anything a viewer could point at and name - is an object row; it is NEVER acceptable to fold an identifiable thing into `background` prose instead of listing it here. An incomplete inventory here means that object gets silently reproduced unchanged (if omitted) or invented from nothing (if the model believes the scene is otherwise empty) when this reference is cloned - list everything visible, not just the obviously important pieces. Each entry:
+- objects (array): REQUIRED - this key must ALWAYS be present, and must NEVER be empty - every ad has at least one object (at minimum, the product or the headline). ONE ENTRY PER VISUALLY DISTINCT THING in the reference ad - every product, every person, every discrete text block (headline, sub-line, body copy, CTA button, badge, price, disclaimer, testimonial quote - each is its OWN entry, never bundled), every logo/wordmark, every prop, every surface the product or a person interacts with directly (not the general background - see `background` below for the environment itself), and every other graphic element (an icon, a badge shape, a decorative flourish). MULTIPLE INSTANCES OF THE SAME PRODUCT ARE SEPARATE ROWS, each with its own object_id - two bottles in frame is two entries, not one entry noting a count. Anything with an identity - anything a viewer could point at and name - is an object row; it is NEVER acceptable to fold an identifiable thing into `background` prose instead of listing it here. An incomplete inventory here means that object gets silently reproduced unchanged (if omitted) or invented from nothing (if the model believes the scene is otherwise empty) when this reference is cloned - list everything visible, not just the obviously important pieces. Legible text printed ON a non-text object's own surface (a brand name on a product label, a logo on packaging, a caption baked into a graphic) is NOT folded into that object's `description` prose either - record it via that object's own `text_content` field below, so it can be judged for disposition exactly like any other text. Each entry:
     {{
       "object_id": stable string identifier, "obj_01", "obj_02", ... "obj_NN", assigned in the order you list them, never reused within this blueprint,
       "kind": one of product/person/text/logo/prop/surface/graphic - product = a sellable item in its packaging; person = a human figure (the whole figure, not per-body-part); text = one discrete text block; logo = a brand mark/wordmark distinct from a product's own printed label; prop = a physical object that isn't the product, a surface, or a person; surface = a distinct physical surface the product/a person rests on or touches (a tray, a towel, a countertop the bottle sits on specifically - not the general environment); graphic = a non-text graphic element (an icon, a badge shape, a decorative flourish),
@@ -50,10 +50,12 @@ The JSON must have exactly these fields:
         product_callout = a short benefit or property label pointing at the product, distinct from the headline (e.g. an icon + "Fast-Absorbing").
         other = any other discrete text block that genuinely fits none of the above - use sparingly, only when no other value honestly applies.
       "serves_object_id": OPTIONAL, applies only when `kind` is "text" or "prop" - the object_id of a DIFFERENT object THIS one exists only to support, e.g. a hand whose entire visible role is holding a specific product bottle records that product's object_id here; a caption or arrow pointing specifically at one product records that product's object_id. null (or omit) for every object that stands on its own, which is the common case - most props and text blocks serve no other single object and must NOT be forced to name one. Never point at yourself, and only ever name an object_id you have already assigned earlier in this SAME list - assign object_ids in an order that makes this possible (the product/person before anything that serves it).
-      "same_product_as": OPTIONAL, applies only when `kind` is "product" - when this ad shows MORE THAN ONE product object, decide whether they are the SAME product differing only in size or format (e.g. a standard-size and a jumbo-size bottle of the identical product line) or GENUINELY DIFFERENT products. If this product is the SAME product as an EARLIER product object_id in this list, record that earlier object's id here. null (or omit) when this product is visually distinct from every other product object in the scene (the common single-product case), or when this IS the first/earliest instance of a repeated product - never name yourself, and only ever name an object_id you have already assigned earlier in this SAME list. Get this right: instances sharing a same_product_as chain all get replaced with Besque's product; products left unlinked (each genuinely distinct) result in only ONE surviving in the output, with the others removed entirely - so mislabelling two different products as "the same" wrongly keeps a second one, and mislabelling two sizes of one product as "different" wrongly deletes one that should have survived.
+      "same_product_as": OPTIONAL, applies only when `kind` is "product" - when this ad shows MORE THAN ONE product object, decide whether they are the SAME product differing only in size or format (e.g. a standard-size and a jumbo-size bottle of the identical product line) or GENUINELY DIFFERENT products. If this product is the SAME product as an EARLIER product object_id in this list, record that earlier object's id here. null (or omit) when this product is visually distinct from every other product object in the scene (the common single-product case), or when this IS the first/earliest instance of a repeated product - never name yourself, and only ever name an object_id you have already assigned earlier in this SAME list. Get this right: instances sharing a same_product_as chain all get replaced with Besque's product; products left unlinked (each genuinely distinct) result in only ONE surviving in the output, with the others removed entirely - so mislabelling two different products as "the same" wrongly keeps a second one, and mislabelling two sizes of one product as "different" wrongly deletes one that should have survived. NEVER use this field for a component, attachment, detached piece, container, or accessory of another object (a lid, cap, box, carton, dropper, applicator, spoon, refill pouch, sleeve) - that is a DIFFERENT relationship, see `part_of` below. A detached lid leaning against its own tin is NOT "the same product, different size" - it is a PART of the tin, and recording it as same_product_as wrongly authorises a second full product instance where the ad shows only one.
+      "part_of": OPTIONAL, applies to any kind but most commonly "product" or "prop" - the object_id of an EARLIER object in this SAME list that THIS object is a physical component, attachment, detached piece, container, or accessory OF: a lid, cap, box, carton, dropper, applicator, spoon, refill pouch, or sleeve belonging to a product elsewhere in this list. This object has no independent existence in the composition apart from the object it belongs to - it is never a second free-standing instance (that is same_product_as's job, above, and the two must never be confused). null (or omit) when this object is not a component of anything else, which is the common case - never name yourself, and only ever name an object_id you have already assigned earlier in this SAME list.
       "social_proof_kind": REQUIRED when text_purpose is "testimonial", omit entirely otherwise - one of "single_quote" (one customer's own words, with or without a name/rating attached) or "aggregate" (a review-count/star-average summary with no single customer's words, e.g. "Rated 4.8 by 12,000 customers", "Trustpilot - Over 30,000 - 5 stars"). An aggregate figure is NEVER Besque's to show (no approved aggregate exists) and is always removed downstream regardless of what you record here - this field exists so that removal is judged by what the zone actually IS, never guessed from its text_purpose alone.
       "typography": REQUIRED when `kind` is "text", omit entirely for every other kind. Also omit it for text that is the competitor's own on-pack branding (a brand wordmark, a product name, an on-pack descriptor line) and for any award or disclaimer text - these are never reproduced, so their typographic treatment is not needed. Otherwise: {{ "typeface_class": serif/sans/script, "weight": e.g. bold/light/regular, "case": upper/title/sentence, "letter_spacing": tight/normal/wide, "colour": this text's OWN colour - distinct from the scene's overall palette_mood, e.g. "gold" or "white", "size_relative": e.g. large/medium/small relative to the frame, "decorative_elements": array of short phrases for anything attached (a pipe divider, a rule, an underline, a bullet mark) or [] if none, "line_count": number of lines this text actually occupies }}. A reference commonly has THREE OR FOUR distinct typographic levels across its several text objects (e.g. a large serif headline, a small-caps accent line with wide letter-spacing, small body copy, a button label) - give each its own accurate treatment, never the same values copied across every text object just because one was easy to read.
       "styling": REQUIRED when text_purpose is "testimonial", omit entirely otherwise - how the testimonial is visually PRESENTED, e.g. "quote marks, no card", "5-star rating above the quote inside a white rounded card", "speech-bubble shape with a small avatar circle". This is CONTAINER presentation only, never content - the actual quote/attribution rendered downstream never comes from here.
+      "text_content": OPTIONAL, applies to ANY object regardless of `kind` - if this object's OWN rendered pixels contain legible text (a brand wordmark printed on a product's label, a logo on packaging, a caption baked into a background graphic, a slogan printed on a prop), record ONE ENTRY HERE PER DISTINCT LEGIBLE TEXT BLOCK on that object - never fold it into `description` prose instead. This is separate from and in addition to a genuine standalone kind=="text" object elsewhere in this list: use `text_content` specifically for text that is physically PART OF this non-text (or text) object's own surface, not a separate discrete text block floating in the scene. Getting this right matters - text baked into a product photo, a prop, or a graphic that never becomes its own object here is text no downstream check ever looks at again; it renders into the Besque draft completely unchanged, brand name and all. Array of: {{ "object_id": stable id, e.g. "obj_04_txt_01" (never reuse an id already used elsewhere in this blueprint), "content": the literal text AS IT LITERALLY APPEARS, verbatim - this exists so a human/mechanical check can see what was detected, it must NEVER be treated as content to render, "bbox": [x, y, w, h] of just this text within the full image, same convention as every other bbox in this schema, "text_purpose": same enum as a top-level text object's text_purpose (headline/subtext/cta/offer/certification/testimonial/price_anchor/award/disclaimer/product_callout/other) - a baked-in brand wordmark or logo is almost always "other" unless it genuinely fits a more specific purpose, "ownership": same enum as a top-level object's ownership (competitor_branded/generic/besque/person), "carries_brand_mark": true/false, same meaning as the top-level field, "disposition": your best-judgement starting point (substitute/keep/drop), same caveat as the top-level field - a separate mechanical check overrides this for anything competitor-owned or brand-marked regardless of what you choose here }}. Omit entirely (or an empty array) when this object has no legible baked-in text of its own, which is the common case.
     }}
 - format (string): one of testimonial_card, product_hero, editorial, offer_led, or another short descriptor
 - hook (object): {{ "type": one of question/bold_claim/problem_agitate/social_proof/other, "headline_structure": short description }}
@@ -286,6 +288,9 @@ _TEXT_PURPOSE_CONTEXT_GATED = {
 # principle _TEXT_PURPOSE_ALWAYS_DROP already uses for award names via keyword match.
 STAT_CLAIM_PATTERNS = (
     compliance.NUMERIC_CLAIM_PATTERN, compliance.RATIO_CLAIM_PATTERN, compliance.TIMESCALE_CLAIM_PATTERN,
+    # DURATION_CLAIM_PATTERN (2026-08-20, Part D): a bare competitor-story duration
+    # ("12 years") - see that pattern's own docstring in compliance.py.
+    compliance.DURATION_CLAIM_PATTERN,
 )
 
 # Only these two purposes are checked - deliberately NOT headline/subtext/cta/offer/
@@ -300,15 +305,24 @@ _STAT_SHAPE_CHECKED_PURPOSES = ("product_callout", "other", None)
 
 
 def _is_stat_shaped_text(obj):
-    """True when this text object's own description/persuasive_function reads as a
-    numeric/percentage/ratio/timescale efficacy claim - Besque did not run whatever
-    study produced THAT number, so a container shaped for someone else's statistic
-    has no Besque counterpart to substitute with; putting our product name or a
-    generated benefit line in it isn't a substitution, it's noise wearing the shape
-    of one. Checked against BOTH fields (not description alone) since the vision
-    model may record the actual figure in either, depending on phrasing."""
-    text = f"{obj.get('description') or ''} {obj.get('persuasive_function') or ''}"
-    return any(p.search(text) for p in STAT_CLAIM_PATTERNS)
+    """True when this text object's own wording reads as a numeric/percentage/
+    ratio/timescale/duration efficacy claim - Besque did not run whatever study
+    produced THAT number, has no evidence for a competitor's own customer-story
+    duration, and has no Besque counterpart to substitute with; putting our
+    product name or a generated benefit line in it isn't a substitution, it's
+    noise wearing the shape of one.
+
+    2026-08-20 fix (Part D of the text-layer completion task): reads via
+    _prohibited_claim_text (description + persuasive_function for a top-level
+    object, `content` for a text_content sub-object), not description/
+    persuasive_function alone - a sub-object has no description/persuasive_
+    function at all, so this was silently checking two always-empty fields for
+    every sub-object before this fix, exactly the same dispatch mistake
+    resolve_disposition's own kind=="text" check already made once (see that
+    function's own 2026-08-20 note). Confirmed live: a sub-object's own `content`
+    can legitimately carry a competitor duration claim (e.g. "12 years") that
+    this check must catch on sub-objects, not only top-level objects."""
+    return any(p.search(_prohibited_claim_text(obj)) for p in STAT_CLAIM_PATTERNS)
 
 
 def _served_object_needs_drop(obj, served_object_disposition):
@@ -362,6 +376,22 @@ def _resolve_text_disposition(obj, context, is_branded, served_object_dispositio
     return obj.get("disposition")
 
 
+def _prohibited_claim_text(obj):
+    """The text of `obj` worth checking against compliance.PROHIBITED_CLAIM_PATTERNS -
+    `content` for a text_content sub-object (the literal on-image string it records,
+    schema/blueprint.schema.json), else `description` + `persuasive_function` for a
+    top-level object (same two-field convention _is_stat_shaped_text already uses
+    for the identical "which field carries a top-level object's own wording" question).
+    A sub-object always has `content`; a top-level object never does - checking for
+    its presence is exactly as reliable a discriminator as kind=="text" is for a
+    top-level object, and avoids the same dispatch mistake resolve_disposition's own
+    kind=="text" check already made once (see this function's own 2026-08-20 fix
+    note below) - never checked twice or missed by relying on `kind` alone."""
+    if "content" in obj:
+        return obj.get("content") or ""
+    return f"{obj.get('description') or ''} {obj.get('persuasive_function') or ''}"
+
+
 # OBJECT DISPOSITION ENFORCEMENT (2026-08-17): mechanical, not prompt-only. The vision
 # prompt above already asks the model to judge substitute/keep/drop for itself ("a
 # STARTING POINT only - a separate mechanical check overrides this... judge honestly
@@ -372,12 +402,33 @@ def _resolve_text_disposition(obj, context, is_branded, served_object_dispositio
 # than any other prompt-only rule. resolve_disposition is the function that actually
 # decides, run over every object AFTER the vision call, unconditionally overriding
 # whatever the model wrote.
-def resolve_disposition(obj, context=None, served_object_disposition=None):
+def resolve_disposition(obj, context=None, served_object_disposition=None,
+                         part_of_parent_disposition=None):
     """Mechanical override of one object's `disposition` - never trusts the model's own
     guess for a competitor-owned or brand-marked object, or for a text object whose
     text_purpose mechanically determines the answer (2026-08-17, restoring the
     per-zone-type rules the deleted structural_zones/_structural_zones_clause used to
     encode - see the objects-array refactor commit for what replaced them).
+
+    part_of_parent_disposition (2026-08-20, tin+lid product-count generalisation):
+    the ALREADY-RESOLVED disposition of the object THIS object's own `part_of` names,
+    if any - passed in by the caller (never looked up here, same pure-function
+    discipline as served_object_disposition). An object naming `part_of` is a
+    component/attachment/detached piece of another object (a lid, a cap, a dropper)
+    with no independent existence in the composition - it can NEVER independently
+    resolve to "substitute" (that would render it as its own second product instance,
+    exactly the artifact-1400 tin+lid bug this field exists to prevent) or "keep" once
+    its parent is being substituted (a Besque bottle has no separate lid to keep
+    alongside it). Checked FIRST, before every other rule in this function including
+    kind=="person"/is_branded, since a component's fate is never independently decided
+    by its own kind or branding once a parent relationship is recorded - only by what
+    happens to the parent. When the parent resolves to "substitute", the component
+    always resolves to "drop". When the parent's disposition is "keep" or "drop", the
+    component inherits that same value. When the caller doesn't know the parent's
+    disposition yet (None, the default), the component conservatively resolves to
+    "drop" - never substitute, never a "keep" independent of a parent whose own fate
+    isn't known. An object with no `part_of` at all is entirely unaffected, regardless
+    of what this parameter is passed as.
 
     context (2026-08-17) carries the Besque-side facts this run actually has available
     to substitute WITH - {"offer_text": str|None, "certifications": list|None,
@@ -466,7 +517,38 @@ def resolve_disposition(obj, context=None, served_object_disposition=None):
     carries_brand_mark = bool(obj.get("carries_brand_mark"))
     is_branded = ownership == "competitor_branded" or carries_brand_mark
 
-    if obj.get("kind") == "text":
+    # Prohibited claim phrases (2026-08-20, Part A) - checked FIRST, before every
+    # other rule including part_of, exactly the same structural position as the
+    # part_of check immediately below: Besque makes no efficacy, authority, or
+    # certification claim, so an object carrying one of these phrases can never
+    # resolve to "keep" or "substitute" for ANY reason - not because it's a
+    # component of something being substituted, not because it's otherwise
+    # generic/unbranded. See compliance.PROHIBITED_CLAIM_PATTERNS' own docstring
+    # for the live case (ad 1357229623024367, "Clinically Proven"/"Dermatologist
+    # Developed") and _prohibited_claim_text for which field is checked.
+    if compliance.prohibited_claim_match(_prohibited_claim_text(obj)):
+        return "drop"
+
+    if obj.get("part_of"):
+        if part_of_parent_disposition == "substitute":
+            return "drop"
+        return part_of_parent_disposition or "drop"
+
+    # kind=="text" OR text_purpose present (2026-08-20, empty-container fix
+    # follow-on): a text_content sub-object (schema/blueprint.schema.json) has no
+    # `kind` field at all - it doesn't need one, its own text_purpose already says
+    # what it is - but this dispatch previously checked kind=="text" only, so every
+    # sub-object silently fell through to the generic (non-text) branches below
+    # regardless of its own text_purpose. Branded sub-objects still resolved
+    # correctly by accident (both paths agree "drop" for anything branded), which
+    # is why this went unnoticed until a context-gated purpose (offer/
+    # certification/testimonial) on a sub-object needed its own gate actually
+    # checked - the empty-container fix's own dual-resolution claim (a sub-object
+    # re-resolving "substitute" once real context exists) depends on this dispatch
+    # being correct. text_purpose is required on every text_content entry (schema),
+    # so checking for its presence is exactly as reliable as kind=="text" is for a
+    # top-level object, never a guess.
+    if obj.get("kind") == "text" or obj.get("text_purpose") is not None:
         return _resolve_text_disposition(obj, context, is_branded, served_object_disposition)
 
     if obj.get("kind") == "person":
@@ -502,14 +584,77 @@ def _resolve_object_dispositions(blueprint):
     correctly, but A is re-resolved against B's PASS-1 value (which does not yet know
     about C) - a chain longer than one hop is not handled generically here, since
     nothing in this schema or any observed failure has needed one; recorded as a known
-    scoping limit, not a silent gap."""
+    scoping limit, not a silent gap.
+
+    part_of (2026-08-20, tin+lid product-count generalisation) gets the SAME two-pass
+    treatment as serves_object_id, for the same reason: a component's fate depends on
+    its parent's resolved disposition, which pass 1 doesn't know about the component
+    relationship at all. Pass 1's own value for a component (called with no part_of_
+    parent_disposition) is a safe placeholder ("drop", resolve_disposition's own
+    conservative default) - pass 2 overrides it with the parent's real pass-1 value.
+    Single-hop, same documented scoping limit as serves_object_id above.
+
+    text_content sub-objects (2026-08-20, DETECTION ONLY): every object's own
+    `text_content` array (legible text baked into that object's own pixels,
+    regardless of `kind` - see schema/blueprint.schema.json) is run through
+    resolve_disposition here too, via _resolve_text_content_dispositions, with the
+    SAME no-context (None) call resolve_disposition already gets for every top-level
+    object at this stage - no run-specific offer/certification/testimonial exists
+    yet at deconstruct time, exactly the same reason top-level context-gated
+    purposes resolve provisionally here and get RE-resolved at generation time (see
+    generate_image_prompt._objects_clause). This is the fix for a live, confirmed
+    leak: competitor copy baked into a non-text object never became its own
+    kind=='text' object, so resolve_disposition was never consulted on it at all.
+
+    Empty-container override (2026-08-20): a "keep" object whose text_content is
+    non-empty and resolves ENTIRELY to "drop" is force-dropped too, rather than
+    surviving as a container with nothing left inside it - see this function's
+    own inline comment for the live numbered-list case this closes. EXTENDED
+    (2026-08-20, Part C) to also count top-level kind=="text" objects that serve
+    THIS object via serves_object_id (rather than nesting as a text_content
+    child) - the live "empty pink sticky note" case, ad 1746884313351902: the
+    sticky (a kind=="graphic" object with NO text_content at all) had its own
+    offer text recorded as a SEPARATE object naming the sticky via
+    serves_object_id, a shape the text_content-only version of this rule never
+    looked at. Every occurrence records a pipeline_warnings row
+    ("empty_container_dropped" at THIS resolution point specifically - generate_
+    image_prompt._objects_clause uses the distinct "empty_container_dropped_at_
+    generation" kind, so a failure in one resolution point is diagnosable
+    without auditing the other).
+
+    Prohibited claim phrases (2026-08-20, Part A): resolve_disposition itself
+    already forces "drop" for a matching object or text_content sub-object (see
+    compliance.PROHIBITED_CLAIM_PATTERNS) - this function additionally records a
+    "prohibited_claim_dropped" warning, independently attributable from an
+    ordinary drop.
+
+    Linked-text disposition alignment (2026-08-20, Part B): after every object's
+    OWN disposition is resolved, a final pass (align_linked_text_dispositions)
+    realigns any linked text-object group (serves_object_id links, or objects
+    sharing a part_of/serves_object_id parent) to their strictest shared
+    disposition - a label and its evidence must always share the same fate.
+    Records "linked_text_disposition_aligned" only when a group genuinely
+    disagreed and needed realignment."""
     objects = blueprint.get("objects")
     if not isinstance(objects, list):
         return blueprint
+    dict_objects = [o for o in objects if isinstance(o, dict)]
+    ad_id = blueprint.get("ad_id")
     pass1 = {
         obj.get("object_id"): resolve_disposition(obj)
-        for obj in objects if isinstance(obj, dict)
+        for obj in dict_objects
     }
+    # Reverse index for Part C: object_id -> [kind=="text" objects whose
+    # serves_object_id names it] - a container's own associated text may be
+    # linked this way instead of nested as a text_content child.
+    served_by = {}
+    for obj in dict_objects:
+        if obj.get("kind") != "text":
+            continue
+        served_id = obj.get("serves_object_id")
+        if served_id:
+            served_by.setdefault(served_id, []).append(obj)
+
     blueprint = dict(blueprint)
     resolved_objects = []
     for obj in objects:
@@ -518,10 +663,111 @@ def _resolve_object_dispositions(blueprint):
             continue
         served_id = obj.get("serves_object_id")
         served_disposition = pass1.get(served_id) if served_id else None
-        disposition = resolve_disposition(obj, served_object_disposition=served_disposition)
-        resolved_objects.append({**obj, "disposition": disposition})
+        part_of_id = obj.get("part_of")
+        part_of_disposition = pass1.get(part_of_id) if part_of_id else None
+        disposition = resolve_disposition(
+            obj, served_object_disposition=served_disposition,
+            part_of_parent_disposition=part_of_disposition,
+        )
+        resolved_obj = {**obj, "disposition": disposition}
+
+        if compliance.prohibited_claim_match(_prohibited_claim_text(obj)):
+            _record_deconstruct_warning(
+                ad_id, "prohibited_claim_dropped",
+                f"object {obj.get('object_id', '?')!r} force-dropped - its own "
+                f"wording matches a prohibited efficacy/authority/certification "
+                f"claim phrase, never approvable regardless of context.",
+            )
+
+        resolved_sub_content = None
+        if obj.get("text_content"):
+            resolved_sub_content = _resolve_text_content_dispositions(obj["text_content"])
+            resolved_obj["text_content"] = resolved_sub_content
+            for sub in resolved_sub_content:
+                if isinstance(sub, dict) and compliance.prohibited_claim_match(_prohibited_claim_text(sub)):
+                    _record_deconstruct_warning(
+                        ad_id, "prohibited_claim_dropped",
+                        f"text_content sub-object {sub.get('object_id', '?')!r} (on "
+                        f"object {obj.get('object_id', '?')!r}) force-dropped - its "
+                        f"own wording matches a prohibited efficacy/authority/"
+                        f"certification claim phrase.",
+                    )
+
+        # Empty-container override: nested text_content children AND/OR
+        # serves_object_id-linked text objects (Part C) form ONE combined set of
+        # "this container's own textual content" - see this function's own
+        # docstring for the exact live case each shape closes.
+        combined_child_dispositions = []
+        if resolved_sub_content:
+            combined_child_dispositions.extend(
+                s.get("disposition") for s in resolved_sub_content if isinstance(s, dict)
+            )
+        serving_texts = served_by.get(obj.get("object_id")) or []
+        if serving_texts:
+            # pass1 values only (context-free, single-hop) - same documented
+            # scoping limit as served_disposition/part_of_disposition above: a
+            # serving text object's OWN further relations are not chased here.
+            combined_child_dispositions.extend(
+                pass1.get(o.get("object_id")) for o in serving_texts
+            )
+        if resolved_obj["disposition"] == "keep" and combined_child_dispositions and all(
+            d == "drop" for d in combined_child_dispositions
+        ):
+            resolved_obj["disposition"] = "drop"
+            _record_deconstruct_warning(
+                ad_id, "empty_container_dropped",
+                f"object {obj.get('object_id', '?')!r} force-dropped - all "
+                f"{len(combined_child_dispositions)} of its own text_content "
+                f"sub-object(s) and/or serves_object_id-linked text object(s) "
+                f"resolved to 'drop'; rendering it as 'keep' would have produced "
+                f"an empty container.",
+            )
+        resolved_objects.append(resolved_obj)
+
+    # Part B: align linked text-object groups to their strictest shared value.
+    disposition_map = {
+        o.get("object_id"): o.get("disposition")
+        for o in resolved_objects if isinstance(o, dict) and o.get("object_id")
+    }
+    aligned_map, changed_groups = align_linked_text_dispositions(dict_objects, disposition_map)
+    for group_ids, resolved_value in changed_groups:
+        _record_deconstruct_warning(
+            ad_id, "linked_text_disposition_aligned",
+            f"objects {list(group_ids)} disagreed on disposition; aligned to the "
+            f"stricter value {resolved_value!r}.",
+        )
+    if aligned_map:
+        resolved_objects = [
+            {**o, "disposition": aligned_map[o.get("object_id")]}
+            if isinstance(o, dict) and o.get("object_id") in aligned_map and
+            aligned_map[o.get("object_id")] != o.get("disposition")
+            else o
+            for o in resolved_objects
+        ]
+
     blueprint["objects"] = resolved_objects
     return blueprint
+
+
+def _resolve_text_content_dispositions(text_content, context=None):
+    """Runs resolve_disposition over every entry in one object's `text_content` array
+    (legible text baked into that object's own rendered pixels - see schema/
+    blueprint.schema.json's own docstring for the live leak this closes), returning a
+    NEW list - never mutates the caller's own list or its dict entries. Each
+    sub-object is treated exactly like a top-level kind=='text' object:
+    resolve_disposition dispatches on its own text_purpose/ownership/
+    carries_brand_mark fields via the SAME _resolve_text_disposition path, so a
+    sub-object with carries_brand_mark true or ownership 'competitor_branded' can
+    never resolve to 'keep' - identical enforcement to the top-level case, not a
+    weaker or parallel mechanism. context (None at deconstruct time, the real run
+    context at generation time - see generate_image_prompt._objects_clause) is
+    forwarded unchanged; sub-objects have no serves_object_id/part_of relational
+    fields of their own (out of scope - DETECTION ONLY, see the schema field's own
+    docstring), so no two-pass handling is needed here."""
+    return [
+        {**sub, "disposition": resolve_disposition(sub, context)} if isinstance(sub, dict) else sub
+        for sub in (text_content or [])
+    ]
 
 
 def resolve_product_group_dispositions(objects):
@@ -697,6 +943,111 @@ def resolve_testimonial_dispositions(objects, context=None):
     return result
 
 
+# LINKED-TEXT DISPOSITION ALIGNMENT (2026-08-20, Part B of the text-layer
+# completion task): live evidence, ad 1357229623024367-shaped - a competitor
+# bullet split into a LABEL ("Clinically Proven") and its EVIDENCE ("95% saw
+# results by week 6") as two separate objects. The evidence's own number tripped
+# the stat-shape check and dropped; the label had no number in it at all and
+# independently resolved to substitute (or, after Part A, drop only if it itself
+# matches a prohibited phrase - a label that happens to say something else
+# entirely would still survive alone). Per-object resolution is correct on each
+# object's OWN terms - the bug is that a label and its evidence are not
+# independent claims, they are ONE claim split across two objects, and
+# resolve_disposition has no way to see that from either object alone (same
+# "needs the whole list" structural gap resolve_product_group_dispositions/
+# resolve_testimonial_dispositions already exist to close for their own cases).
+_DISPOSITION_STRICTNESS = {"drop": 0, "substitute": 1, "keep": 2}
+
+
+def _text_object_link_groups(objects):
+    """Union-find grouping of kind=="text" objects that are linked - directly via
+    serves_object_id/part_of naming ANOTHER text object, or indirectly by sharing
+    the same non-null part_of value or the same non-null serves_object_id value
+    (siblings under one bullet/row/icon, e.g. a label and its evidence both
+    serving the same icon object). Only kind=="text" objects are ever grouped -
+    a prop or icon that a text object serves is the thing being LABELLED, not a
+    second claim needing disposition alignment; grouping it in would conflate
+    this mechanism with the unrelated part_of/serves_object_id inheritance rules
+    resolve_disposition already has. Returns a list of groups (each a list of
+    object_ids), one entry per group with 2 or more members - a lone, unlinked
+    text object is never included."""
+    text_ids = {
+        obj.get("object_id") for obj in objects
+        if isinstance(obj, dict) and obj.get("kind") == "text" and obj.get("object_id")
+    }
+    by_id = {obj.get("object_id"): obj for obj in objects if isinstance(obj, dict)}
+    parent = {oid: oid for oid in text_ids}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        if a not in parent or b not in parent:
+            return
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    for oid in text_ids:
+        obj = by_id[oid]
+        served = obj.get("serves_object_id")
+        if served in text_ids:
+            union(oid, served)
+        part_of_id = obj.get("part_of")
+        if part_of_id in text_ids:
+            union(oid, part_of_id)
+
+    by_shared_target = {}
+    for oid in text_ids:
+        obj = by_id[oid]
+        for key in ("part_of", "serves_object_id"):
+            target = obj.get(key)
+            if target:
+                by_shared_target.setdefault(target, []).append(oid)
+    for siblings in by_shared_target.values():
+        for other in siblings[1:]:
+            union(siblings[0], other)
+
+    groups = {}
+    for oid in text_ids:
+        groups.setdefault(find(oid), []).append(oid)
+    return [members for members in groups.values() if len(members) > 1]
+
+
+def align_linked_text_dispositions(objects, dispositions):
+    """Realigns linked text-object groups (see _text_object_link_groups) to their
+    STRICTEST shared disposition (drop > substitute > keep) whenever they
+    disagree - a label and its evidence must always share the same fate; a
+    competitor claim does not survive just because only its proof was replaced.
+
+    dispositions: {object_id: disposition}, the ALREADY per-object-resolved map
+    (from either resolution point - deconstruct time or generate_image_prompt.
+    _objects_clause) - this function only re-groups and re-strictens, it never
+    computes an object's OWN disposition from scratch.
+
+    Returns (updated_dispositions, changed_groups) - updated_dispositions is a
+    NEW dict (the input is never mutated), changed_groups is a list of
+    (member_object_ids, resolved_disposition) for exactly the groups that
+    actually disagreed and needed realignment - already-unanimous groups are
+    left untouched and never appear here, so a caller using this to decide
+    whether to record_warning only ever warns on a REAL disagreement."""
+    updated = dict(dispositions)
+    changed = []
+    for group in _text_object_link_groups(objects):
+        values = {updated.get(oid) for oid in group}
+        values.discard(None)
+        if len(values) <= 1:
+            continue
+        strictest = min(values, key=lambda v: _DISPOSITION_STRICTNESS.get(v, 99))
+        for oid in group:
+            updated[oid] = strictest
+        changed.append((tuple(group), strictest))
+    return updated, changed
+
+
 # HALLUCINATED TEXT OBJECT FILTER (2026-08-19): deconstruct_image (below) attaches the
 # ad's scraped Facebook caption to the SAME API call as the image (see the "Scraped ad
 # copy" paragraph in BLUEPRINT_PROMPT above), stated as the source of truth for headline
@@ -838,6 +1189,20 @@ def _assert_no_competitor_branded_object_kept(blueprint):
                 f"has a bug.",
                 "competitor_branded object resolved to keep",
             )
+        # text_content sub-objects (2026-08-20, DETECTION ONLY): the SAME check,
+        # extended to the new leak vector this task closes - a brand mark baked into
+        # a non-text object's own pixels must never survive as 'keep' either.
+        for sub in obj.get("text_content") or []:
+            if not isinstance(sub, dict):
+                continue
+            sub_branded = sub.get("ownership") == "competitor_branded" or bool(sub.get("carries_brand_mark"))
+            if sub_branded and sub.get("disposition") == "keep":
+                raise BlueprintValidationError(
+                    f"Text sub-object {sub.get('object_id', '?')!r} on object "
+                    f"{obj.get('object_id', '?')!r} is competitor-branded but resolved to "
+                    f"disposition='keep' - this must never happen; resolve_disposition has a bug.",
+                    "competitor_branded text sub-object resolved to keep",
+                )
 
 
 def deconstruct_from_response(raw_text: str) -> dict:
@@ -896,6 +1261,61 @@ import anthropic
 _MAX_TRANSIENT_ATTEMPTS = 4
 _TRANSIENT_BACKOFF_BASE_SECONDS = 2.0
 
+# TRUNCATION RETRY (2026-08-20): a THIRD independent failure class, distinct from both
+# budgets above - four of five ads failed deconstruct in one day, all deterministic
+# (the same two ad_ids failed identically at 10:32/10:34 and again at 11:27/11:29, not
+# transient), traced to stop_reason=='max_tokens' at output_tokens=4096, dying mid-JSON
+# around obj_20/obj_21 (char ~12,300-12,900). A truncated response is NOT malformed JSON
+# - it is genuinely incomplete - so JSON_ESCAPE_SYSTEM's retry (which only nudges quote
+# escaping) can never fix it; routing a truncation through that retry burns the ONE
+# parse/validation attempt on a fix that cannot possibly work. Detected explicitly via
+# message.stop_reason, BEFORE deconstruct_image's own parse/validation try/except ever
+# runs, and given its OWN small retry budget (escalate max_tokens once, never touch
+# `system` or _MAX_DECONSTRUCT_ATTEMPTS' counter) - same reasoning as
+# _call_claude_with_transient_retry's own separate budget for a different failure class.
+_MAX_TRUNCATION_ATTEMPTS = 2
+# Base ceiling raised 4096 -> 16384 (Part B added ~200-350 tokens of extra fields on top
+# of an already-migrated per-object schema; a dense ad's objects[] array - see the
+# KilgourMD field-count/token-cost report in this fix's commit message - is what's
+# actually driving length, not any single top-level field). Escalated ceiling is used
+# ONLY on a stop_reason=='max_tokens' retry, doubled again. Neither number is empirically
+# measured against Anthropic's own hard output-token ceiling for this model - a stopgap,
+# per this same fix's own report on why bounding the OUTPUT (fewer fields per non-hero
+# object) is the durable direction, not a bigger number.
+_DECONSTRUCT_MAX_TOKENS = 16384
+_DECONSTRUCT_MAX_TOKENS_ESCALATED = 32768
+# 60s -> 180s: proportional to the 4x max_tokens raise above (4096 -> 16384) - the two
+# live APITimeoutError failures were on ads of the same density as the two max_tokens
+# truncations, so the same underlying "this response takes longer to generate than a
+# smaller one" cause is the likely explanation for both symptoms, not two unrelated
+# bugs. Not empirically measured against a real dense-ad generation time either -
+# raised proportionally to the token increase as the same reasoned-not-measured margin
+# the existing max_tokens comment already admits to.
+_DECONSTRUCT_TIMEOUT_SECONDS = 180.0
+
+
+class DeconstructTruncatedError(RuntimeError):
+    """Raised by _fetch_deconstruct_message when Claude's deconstruct response is cut
+    off by max_tokens on every truncation-retry attempt, up to and including
+    _DECONSTRUCT_MAX_TOKENS_ESCALATED - the objects inventory for this ad does not fit
+    even the escalated ceiling. Never raised for a malformed-but-complete response
+    (that's BlueprintValidationError or a plain JSON parse error, handled by
+    deconstruct_image's own retry loop) - this is specifically "the response never
+    finished," which no JSON-escaping or schema-correction nudge can fix."""
+
+
+def _record_deconstruct_warning(ad_id, kind, detail):
+    """pipeline_warnings row for a deconstruct failure that would otherwise be an
+    ERROR-only log line - process_ad's own outer except (src/pipeline.py) catches
+    every deconstruct_image exception and returns "failed" with nothing else recorded,
+    so an ad silently vanishes from a batch with no signal anywhere the dashboard
+    reads from. Lazy-imported so the common case (deconstruct never fails) never
+    touches the DB, matching this codebase's established pattern for a rare-path-only
+    DB write (see generate_image_prompt.py's own hallucinated-text-object warning)."""
+    from src import dedupe as _dedupe
+    _dedupe.init_pipeline_warnings()
+    _dedupe.record_warning(kind, f"Ad {ad_id}: {detail}")
+
 # 429 (RateLimitError) and every 5xx (InternalServerError/ServiceUnavailableError/
 # OverloadedError/DeadlineExceededError, or any other 5xx the SDK doesn't name
 # specifically) mean "the request itself was fine, try again" - never a reason to
@@ -939,6 +1359,64 @@ def _call_claude_with_transient_retry(client, kwargs, ad_id):
                 raise
             time.sleep(wait)
             wait *= 2
+
+
+def _fetch_deconstruct_message(client, base_kwargs, ad_id):
+    """Get one Claude response for deconstruct, retrying ONLY on stop_reason==
+    'max_tokens' (a truncated response), with its own small budget
+    (_MAX_TRUNCATION_ATTEMPTS) independent of _MAX_TRANSIENT_ATTEMPTS (network
+    failures) and _MAX_DECONSTRUCT_ATTEMPTS (parse/validation failures) - three
+    separate failure classes, three separate budgets, never sharing a counter or a
+    `system` prompt mutation with each other (see this module's own truncation-retry
+    comment above for why routing a truncation through either of the other two
+    cannot succeed).
+
+    base_kwargs must NOT include "max_tokens" - this function sets it, starting at
+    _DECONSTRUCT_MAX_TOKENS and escalating to _DECONSTRUCT_MAX_TOKENS_ESCALATED on a
+    truncation retry. Every attempt still goes through
+    _call_claude_with_transient_retry, so a network failure on the SAME call is still
+    handled by that separate mechanism.
+
+    Raises DeconstructTruncatedError (after recording a pipeline_warnings row) if
+    every attempt truncates. Returns the message unchanged (whatever its stop_reason)
+    the first time one attempt does NOT truncate - a non-'max_tokens' stop_reason is
+    deconstruct_image's own problem to parse/validate, not this function's."""
+    max_tokens = _DECONSTRUCT_MAX_TOKENS
+    for attempt in range(1, _MAX_TRUNCATION_ATTEMPTS + 1):
+        kwargs = dict(base_kwargs, max_tokens=max_tokens)
+        message = _call_claude_with_transient_retry(client, kwargs, ad_id)
+        if getattr(message, "stop_reason", None) != "max_tokens":
+            return message
+        raw_text = message.content[0].text if message.content else ""
+        usage = getattr(message, "usage", None)
+        log.error(
+            "deconstruct truncated for ad %s (attempt %s/%s): stop_reason='max_tokens' "
+            "max_tokens=%s output_tokens=%s input_tokens=%s raw_text len=%s chars, "
+            "tail: %r",
+            ad_id, attempt, _MAX_TRUNCATION_ATTEMPTS, max_tokens,
+            getattr(usage, "output_tokens", "?"), getattr(usage, "input_tokens", "?"),
+            len(raw_text), raw_text[-300:],
+        )
+        if attempt == _MAX_TRUNCATION_ATTEMPTS:
+            _record_deconstruct_warning(
+                ad_id, "deconstruct_truncated",
+                f"response truncated (stop_reason='max_tokens') on every attempt up to "
+                f"max_tokens={max_tokens} - the objects inventory did not fit even the "
+                f"escalated ceiling. output_tokens={getattr(usage, 'output_tokens', '?')}, "
+                f"raw_text len={len(raw_text)} chars. Not retried further - the response "
+                f"is genuinely incomplete, not malformed, so no further retry of this "
+                f"shape can succeed.",
+            )
+            raise DeconstructTruncatedError(
+                f"Ad {ad_id}: deconstruct response truncated (stop_reason='max_tokens') "
+                f"on every attempt up to max_tokens={max_tokens}"
+            )
+        log.warning(
+            "deconstruct ad %s: retrying with escalated max_tokens=%s after truncation "
+            "at max_tokens=%s",
+            ad_id, _DECONSTRUCT_MAX_TOKENS_ESCALATED, max_tokens,
+        )
+        max_tokens = _DECONSTRUCT_MAX_TOKENS_ESCALATED
 
 
 def _load_image_b64_v2(image_path):
@@ -1026,16 +1504,22 @@ def deconstruct_image(image_bytes, ad_id, source_page, captured_at, destination_
     attempt so an unfixable ad stays diagnosable from the run log. One retry, never a
     loop.
 
-    The raw API call itself (client.messages.create) goes through
-    _call_claude_with_transient_retry on every one of the attempts above - a SEPARATE,
-    independently-capped retry for a network timeout/connection error or a 429/5xx from
-    Anthropic's own infrastructure (see that function's own docstring). That budget
-    never interacts with the parse/validation one above: a transient failure is retried
-    silently within that helper and never reaches the except blocks below at all unless
-    its own budget is exhausted, at which point it propagates straight out of this
-    function exactly as an unretried transient error did before this existed - it is
-    never treated as a parse/validation failure, and never consumes one of THOSE two
-    attempts."""
+    The raw API call itself goes through _fetch_deconstruct_message on every one of the
+    attempts above, which in turn goes through _call_claude_with_transient_retry - TWO
+    further separate, independently-capped retries beneath the parse/validation one
+    here: a truncation retry (stop_reason=='max_tokens', escalates max_tokens, see
+    _fetch_deconstruct_message's own docstring) and a network-failure retry (timeout/
+    connection error, or a 429/5xx from Anthropic's own infrastructure, see
+    _call_claude_with_transient_retry's own docstring). Neither budget interacts with
+    the parse/validation one here or with each other: each failure is retried silently
+    within its own layer and never reaches a caller's except block at all unless its
+    own budget is exhausted, at which point it propagates out of that layer exactly as
+    an unretried failure of that kind did before it existed - never treated as one of
+    the OTHER two failure classes, and never consuming one of their attempts. On
+    exhaustion of ANY of the three budgets, a pipeline_warnings row is recorded naming
+    the ad and the specific failure mode (deconstruct_truncated or deconstruct_failed)
+    before the exception propagates - an ad that fails deconstruct no longer vanishes
+    from a batch with only an ERROR-level log line."""
     b64, media_type = _b64_from_bytes(image_bytes)
     prompt = build_prompt(ad_id, source_page, captured_at, destination_url)
 
@@ -1054,23 +1538,24 @@ def deconstruct_image(image_bytes, ad_id, source_page, captured_at, destination_
     # active would silently compound (the SDK retrying inside every one of OUR retries,
     # invisible to our own logging and to _MAX_TRANSIENT_ATTEMPTS' own cap). Exactly one
     # mechanism now owns transient retry, and it's the one that logs and is tested.
-    client = anthropic.Anthropic(timeout=60.0, max_retries=0)  # reads ANTHROPIC_API_KEY from env
+    # timeout=_DECONSTRUCT_TIMEOUT_SECONDS (2026-08-20, was 60.0 - see that constant's
+    # own comment for why raised proportionally to the max_tokens increase below).
+    client = anthropic.Anthropic(timeout=_DECONSTRUCT_TIMEOUT_SECONDS, max_retries=0)  # reads ANTHROPIC_API_KEY from env
     total = _MAX_DECONSTRUCT_ATTEMPTS
     system = None
     for attempt in range(1, total + 1):
         kwargs = {
             "model": CLAUDE_MODEL,
-            # Part B added creative_objective/target_audience/typography (4 sub-fields) and
-            # expanded layout_detail (4 more sub-fields, one an array) on top of the existing
-            # ~15-field blueprint - estimated +200-350 tokens for the fuller JSON response.
-            # 3072 -> 4096 is a reasoned safety margin, NOT an empirically measured fix.
-            "max_tokens": 4096,
             "temperature": DECONSTRUCT_TEMPERATURE,
             "messages": [{"role": "user", "content": content}],
         }
         if system:
             kwargs["system"] = system
-        message = _call_claude_with_transient_retry(client, kwargs, ad_id)
+        # max_tokens is set INSIDE _fetch_deconstruct_message (starting at
+        # _DECONSTRUCT_MAX_TOKENS, escalating only on its own truncation-specific
+        # retry) - never passed here, so this loop's parse/validation retry can never
+        # accidentally reset it back down after an escalation.
+        message = _fetch_deconstruct_message(client, kwargs, ad_id)
         raw_text = ""
         try:
             raw_text = message.content[0].text if message.content else ""
@@ -1079,6 +1564,11 @@ def deconstruct_image(image_bytes, ad_id, source_page, captured_at, destination_
             log.error("deconstruct schema validation failed for ad %s (attempt %s/%s): %s",
                       ad_id, attempt, total, e.validation_error)
             if attempt == total:
+                _record_deconstruct_warning(
+                    ad_id, "deconstruct_failed",
+                    f"schema validation failed on every attempt ({total}): "
+                    f"{e.validation_error}",
+                )
                 raise
             log.warning("retrying deconstruct for ad %s with the validation error appended "
                         "as a correction instruction", ad_id)
@@ -1086,6 +1576,11 @@ def deconstruct_image(image_bytes, ad_id, source_page, captured_at, destination_
         except Exception as e:
             _log_parse_failure(attempt, total, message, raw_text, e)
             if attempt == total:
+                _record_deconstruct_warning(
+                    ad_id, "deconstruct_failed",
+                    f"response could not be parsed as JSON on every attempt ({total}): "
+                    f"{type(e).__name__}: {e}",
+                )
                 raise
             log.warning("retrying deconstruct for ad %s with a JSON-escaping system prompt nudge", ad_id)
             system = JSON_ESCAPE_SYSTEM

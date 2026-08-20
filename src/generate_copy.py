@@ -256,13 +256,28 @@ def _blueprint_without_bbox(blueprint):
     by asking Claude not to quote them: this codebase's own standing finding is that
     prompt-only rules do not reliably bind (see CLAUDE.md's guardrails note). Never
     mutates the caller's own blueprint dict. A blueprint with no `objects` list (or a
-    non-list value) is returned unchanged."""
+    non-list value) is returned unchanged.
+
+    text_content (2026-08-20, same fix, extended to a field that didn't exist when
+    this function was first written): also strips objects[].text_content entirely,
+    same reasoning as bbox above - it is analysis-only (schema/blueprint.schema.json),
+    exists so a human/mechanical check can see what baked-in text was detected on an
+    object, and Claude writing NEW marketing copy has no legitimate use for a raw
+    inventory of literal on-image strings sitting right next to the description/
+    persuasive_function prose it IS meant to draw from. Audited as a real, not
+    theoretical, path: generate_image_prompt.build_image_prompt's own object_copy
+    substitution mechanism (_substitute_object_line's fallback branch) would happily
+    quote whatever Claude's generated copy contains verbatim - if copy generation
+    echoes a detected string back (plausible when it's sitting unlabelled in a raw
+    JSON dump, indistinguishable from ordinary descriptive content at a glance), that
+    string reaches the IMAGE prompt through a route this fix's own bbox precedent
+    never had to consider."""
     objects = blueprint.get("objects")
     if not isinstance(objects, list):
         return blueprint
     blueprint = dict(blueprint)
     blueprint["objects"] = [
-        {k: v for k, v in obj.items() if k != "bbox"} if isinstance(obj, dict) else obj
+        {k: v for k, v in obj.items() if k not in ("bbox", "text_content")} if isinstance(obj, dict) else obj
         for obj in objects
     ]
     return blueprint
@@ -344,7 +359,40 @@ def _reading_order_key(obj):
     return (y, x)
 
 
-def _object_copy_clause(objects):
+def _known_text_content_strings(all_objects):
+    """Every text_content[].content string across the WHOLE blueprint objects list
+    (2026-08-20, live leak fix) - duplicated from generate_image_prompt.py's own
+    identically-named/-documented function rather than imported, matching this
+    codebase's existing convention for small, single-purpose helpers shared between
+    deconstruct.py and generate_image_prompt.py (see e.g. _b64_from_bytes) - avoids
+    a new cross-module dependency between generate_copy.py and generate_image_
+    prompt.py, neither of which imports the other today. See that function's own
+    docstring for why this must be GLOBAL (any object's text_content), not scoped to
+    one object."""
+    return {
+        content
+        for obj in (all_objects or []) if isinstance(obj, dict)
+        for sub in (obj.get("text_content") or []) if isinstance(sub, dict)
+        for content in [(sub.get("content") or "").strip()]
+        if content
+    }
+
+
+def _scrub_known_text_content(text, known_strings):
+    """Strip every string in `known_strings` out of `text` before it is quoted into
+    the COPY prompt - duplicated from generate_image_prompt.py's own identically-
+    named/-documented function, same reasoning as _known_text_content_strings above.
+    text_content[].content is analysis-only (schema/blueprint.schema.json) and must
+    never reach ANY built prompt, copy or image."""
+    if not text:
+        return text
+    for known in sorted(known_strings, key=len, reverse=True):
+        if known and known in text:
+            text = text.replace(known, "")
+    return " ".join(text.split())
+
+
+def _object_copy_clause(objects, all_objects=None):
     """Per-object copy generation for text_objects_needing_copy's candidates - restores
     text_zone_targets/_text_zone_copy_clause (deleted a9b1e9f, recovered from git
     history rather than reinvented), re-keyed to object_id instead of a free-text
@@ -379,17 +427,29 @@ def _object_copy_clause(objects):
     shaped construct straight from the reference, the same risk _text_zone_copy_clause's
     `detail` field already had.
 
+    all_objects (2026-08-20, live leak fix): the FULL blueprint objects list (not
+    just this function's own `objects` - the filtered subset text_objects_needing_
+    copy selected), used to build the known-text-content scrub set - description/
+    persuasive_function are model-authored free text and commonly restate an
+    object's OWN (or even a DIFFERENT object's) baked-in visible text verbatim, the
+    same risk _redact_personal_attribution already guards against for personal
+    names. None (a caller that doesn't pass it, e.g. an existing direct test of this
+    function) skips this specific scrub - byte-identical to this function's
+    behaviour before this fix.
+
     Returns "" when objects is empty - callers get byte-identical prompt output for any
     blueprint with no text_purpose=="other"/unset substitute-marked object, exactly as
     before this existed."""
     if not objects:
         return ""
+    known_text_content = _known_text_content_strings(all_objects) if all_objects else set()
     ordered = sorted(objects, key=_reading_order_key)
     lines = "\n".join(
         f'  - object_id "{obj.get("object_id", "")}" (role: {obj.get("role") or "unspecified"}): '
-        f'the reference shows - {_redact_personal_attribution(obj.get("description") or "")} '
+        f'the reference shows - '
+        f'{_scrub_known_text_content(_redact_personal_attribution(obj.get("description") or ""), known_text_content)} '
         f'- its JOB in the reference\'s argument: '
-        f'{_redact_personal_attribution(obj.get("persuasive_function") or "unspecified")}'
+        f'{_scrub_known_text_content(_redact_personal_attribution(obj.get("persuasive_function") or "unspecified"), known_text_content)}'
         for obj in ordered
     )
     repeat_rule = (
@@ -652,7 +712,7 @@ def build_copy_prompt(blueprint, brand_voice="", approved_claims="", product=Non
     )
     if used_headlines:
         prompt += _used_copy_clause(used_headlines)
-    prompt += _object_copy_clause(text_objects_needing_copy(blueprint))
+    prompt += _object_copy_clause(text_objects_needing_copy(blueprint), all_objects=blueprint.get("objects"))
     prompt += _communicative_purpose_clause(blueprint)
     if compliance_feedback:
         issues_text = "\n".join(f"- {issue}" for issue in compliance_feedback)
