@@ -1103,6 +1103,14 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
         "cta_text": cta_text,
         "product_name": (product or {}).get("name"),
         "object_copy_by_id": object_copy_by_id,
+        # substance_colour (2026-08-21, substance-material fix): the SAME
+        # products.substance_colour _substance_recolour_clause already uses for a
+        # drip/pour/pool that visibly left the product's own bottle - reused here
+        # for a DIFFERENT case, a kept prop whose own material is a styled visual
+        # stand-in for the competitor's product substance (a cream swirl, a gel
+        # smear used as flat-lay set-dressing) rather than something that left the
+        # SAME bottle shown in frame. See _objects_clause's own KEEP branch.
+        "substance_colour": (product or {}).get("substance_colour"),
     }
 
     if text_in_image:
@@ -2427,7 +2435,29 @@ def _objects_clause(objects=None, context=None, ad_id=None, suppress_bottle_iden
             # tests/test_no_product_placement.py-adjacent coverage proving this by
             # construction: a product object with required_in_output=False explicitly
             # forced still renders as KEEP, never as the not-required line below.
-            if kind != "product" and obj.get("required_in_output") is False:
+            # represents_product_substance (2026-08-21, substance-material fix):
+            # checked FIRST, ahead of required_in_output - a prop styled as a
+            # visual stand-in for the competitor's product substance (a cream
+            # swirl, a gel smear used as flat-lay set-dressing) is load-bearing to
+            # the ad's own argument, never "incidental clutter." Live case: a
+            # competitor flat-lay styled a white cream swirl beside the bottle: a
+            # plain KEEP line reproduced it verbatim under Besque's own
+            # golden-amber oil bottle, cloning the WRONG product's own substance
+            # colour into the scene. Data-driven from products.substance_colour
+            # (objects_context's own "substance_colour" key) - never a hardcoded
+            # cream/oil/Besque literal; generalises to any analogous
+            # material-stand-in prop for any product.
+            if obj.get("represents_product_substance"):
+                substance_colour = (context.get("substance_colour") or "").strip()
+                target = substance_colour or "our product's actual colour and texture"
+                lines.append(
+                    f"KEEP, RECOLOURED: {description} ({role}) - this prop's own material "
+                    f"is a visual stand-in for the competitor's product substance, not "
+                    f"neutral scene decoration. Preserve its position, shape, and volume "
+                    f"exactly, but recolour and re-texture it to {target} - never the "
+                    f"reference's own product's colour or texture."
+                )
+            elif kind != "product" and obj.get("required_in_output") is False:
                 lines.append(
                     f"OBSERVED, NOT REQUIRED: {description} ({role}) - present in the "
                     f"source photo, but NOT required to appear in the output. Omit it "
