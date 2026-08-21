@@ -1,21 +1,195 @@
 """Besque Ad Intelligence - Web Dashboard.
 Read-only view + approve/reject + run trigger. Uses existing pipeline/db.
 """
+import logging
 import os
+import secrets
+import sys
 import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import parse_qsl, quote
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 load_dotenv()
 from src import dedupe, assets, validator
 
+log = logging.getLogger("dashboard")
+
 app = FastAPI(title="Besque Ad Intelligence")
+
+# ---- Shared-password gate ----
+# One password for the whole tool, shared by every operator - not per-user auth.
+# The cookie's VALUE is the password itself (compared via secrets.compare_digest,
+# constant-time so a timing attack can't narrow it down character by character);
+# there is no session store, no token, nothing to invalidate server-side. Simple by
+# design: this is a single-team internal tool sitting behind a Cloud Run URL, not a
+# multi-tenant product.
+AUTH_COOKIE_NAME = "besque_access"
+SHARED_ACCESS_PASSWORD = os.getenv("SHARED_ACCESS_PASSWORD")
+# /health is exempt so Cloud Run's own probe (which never carries a browser cookie)
+# doesn't get redirected to a login page and reported unhealthy. /login is
+# necessarily exempt too, even though it isn't a path an operator asks for by name -
+# without it nobody could ever reach the form that sets the cookie in the first
+# place, so it has to be reachable pre-auth.
+_AUTH_EXEMPT_PATHS = {"/health", "/login"}
+
+
+@app.middleware("http")
+async def _shared_password_gate(request: Request, call_next):
+    path = request.url.path
+    if path in _AUTH_EXEMPT_PATHS:
+        return await call_next(request)
+    cookie_value = request.cookies.get(AUTH_COOKIE_NAME, "")
+    # SHARED_ACCESS_PASSWORD unset means the gate has nothing to check against - fail
+    # CLOSED (reject everything) rather than silently letting every request through,
+    # which is what an unguarded `compare_digest(cookie_value, None)` would do (it
+    # would raise, not pass, but better to make the "unset" case an explicit, named
+    # denial than rely on that side effect).
+    authorised = bool(SHARED_ACCESS_PASSWORD) and secrets.compare_digest(
+        cookie_value, SHARED_ACCESS_PASSWORD
+    )
+    if not authorised:
+        if path.startswith("/api/"):
+            return JSONResponse({"error": "not authenticated"}, status_code=401)
+        return RedirectResponse(url=f"/login?next={quote(path)}")
+    return await call_next(request)
+
+
+_LOGIN_PAGE_HTML = """<!doctype html>
+<html><head><title>Besque Ad Intelligence &mdash; Sign in</title>
+<style>
+  body {{ font-family: system-ui, sans-serif; background: #1a1a1a; color: #eee;
+          display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }}
+  form {{ background: #262626; padding: 2.5rem; border-radius: 8px; width: 320px; }}
+  h1 {{ font-size: 1.1rem; margin: 0 0 1.25rem; }}
+  input {{ width: 100%; padding: 0.6rem; margin-bottom: 1rem; border-radius: 4px;
+           border: 1px solid #444; background: #111; color: #eee; box-sizing: border-box; }}
+  button {{ width: 100%; padding: 0.6rem; border-radius: 4px; border: none;
+            background: #8a3324; color: #fff; cursor: pointer; }}
+  .error {{ color: #e57373; font-size: 0.9rem; margin: -0.5rem 0 1rem; }}
+</style></head>
+<body>
+<form method="post" action="/login">
+  <h1>Besque Ad Intelligence</h1>
+  {error}
+  <input type="hidden" name="next" value="{next}">
+  <input type="password" name="password" placeholder="Access password" autofocus required>
+  <button type="submit">Sign in</button>
+</form>
+</body></html>"""
+
+
+def _safe_next_path(raw: str) -> str:
+    """Only ever redirect somewhere on THIS site - a bare "/..." path, never a
+    protocol-relative "//host/..." or absolute URL, which an open-redirect-shaped
+    `next` value could otherwise point off-site."""
+    if not raw or not raw.startswith("/") or raw.startswith("//"):
+        return "/"
+    return raw
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_page(request: Request, next: str = "/"):
+    return _LOGIN_PAGE_HTML.format(next=_safe_next_path(next), error="")
+
+
+@app.post("/login")
+async def login_submit(request: Request):
+    # Parsed by hand from the raw urlencoded body rather than request.form() -
+    # request.form() needs the python-multipart package installed (it isn't, see
+    # requirements.txt), and the login form is plain application/x-www-form-urlencoded
+    # (no file upload, default browser <form> encoding) - this avoids adding a new
+    # dependency for two text fields.
+    body = (await request.body()).decode("utf-8", "replace")
+    fields = dict(parse_qsl(body))
+    password = fields.get("password", "")
+    next_path = _safe_next_path(fields.get("next", "/"))
+    if not SHARED_ACCESS_PASSWORD or not secrets.compare_digest(password, SHARED_ACCESS_PASSWORD):
+        return HTMLResponse(
+            _LOGIN_PAGE_HTML.format(next=next_path, error='<p class="error">Incorrect password.</p>'),
+            status_code=401,
+        )
+    response = RedirectResponse(url=next_path, status_code=302)
+    response.set_cookie(
+        AUTH_COOKIE_NAME, SHARED_ACCESS_PASSWORD,
+        httponly=True, secure=True, samesite="lax",
+        max_age=60 * 60 * 24 * 30,
+    )
+    return response
+
+
+@app.get("/health")
+def health():
+    """Cloud Run's own startup/liveness probe target. Deliberately touches nothing -
+    no DB call, no GCS call - so a Postgres blip never reports this container
+    unhealthy and gets it killed/recycled over something the probe was never meant to
+    depend on. The real dependency checks (GCS, Vertex, Postgres) run once at process
+    startup instead - see _startup_preflight below."""
+    return {"status": "ok"}
+
+
+def _preflight_gcs():
+    """Fetch the real product cutout asset from GCS - not a bucket.exists() check,
+    an actual download, so a service account that can list the bucket but can't read
+    THIS object's ACL still fails loudly here instead of surfacing as a silent
+    missing-reference during the first real generation."""
+    from google.cloud import storage
+    from src.generate_image_prompt import PRODUCT_CUTOUT_GCS_KEY
+    bucket_name = assets.asset_bucket_name()
+    blob = storage.Client().bucket(bucket_name).blob(PRODUCT_CUTOUT_GCS_KEY)
+    blob.download_as_bytes()
+
+
+def _preflight_vertex():
+    """One trivial, free Vertex AI call (list models, one page) - proves the service
+    account can actually reach Vertex under this project/location before any real,
+    paid generation call ever runs. Never the same call as a real generation - this
+    must stay cheap and side-effect-free."""
+    from google import genai
+    client = genai.Client(vertexai=True, project="besque-martech", location="global")
+    pager = client.models.list(config={"page_size": 1})
+    next(iter(pager), None)
+
+
+def _preflight_db():
+    """Open and close one Postgres connection - proves DATABASE_URL/credentials are
+    valid before the first real request needs one. Deliberately NOT the same thing
+    as dedupe.init_artifacts() etc. below (table creation) - this only needs a
+    connection to succeed, not any particular schema to exist yet."""
+    with dedupe.get_conn():
+        pass
+
+
+@app.on_event("startup")
+def _startup_preflight():
+    """Runs BEFORE _init_tables below (registration order - Starlette runs startup
+    handlers in the order they were added), and before the app ever accepts traffic.
+    Each check is independent and named explicitly in its own log line, so a failure
+    here reads as "GCS is broken," not a bare traceback the operator has to trace
+    back to a cause themselves - the exact silent-failure shape this whole codebase's
+    standing rule (CLAUDE.md) exists to close, applied to deploy-time instead of
+    generation-time. A service-account permission gap that would otherwise present as
+    a silent stall on the first real ad (a hung GCS call, a 403 buried in a retry
+    loop) instead fails the container's startup outright, with sys.exit(1) making the
+    failure visible in Cloud Run's own deploy/revision status rather than a container
+    that "started" but can never actually serve anything."""
+    for name, check in (
+        ("GCS product cutout fetch", _preflight_gcs),
+        ("Vertex AI connectivity", _preflight_vertex),
+        ("Postgres connectivity", _preflight_db),
+    ):
+        try:
+            check()
+        except Exception as e:
+            log.error("STARTUP PREFLIGHT FAILED (%s): %s", name, e, exc_info=True)
+            sys.exit(1)
+    log.info("Startup preflight passed: GCS, Vertex AI, and Postgres are all reachable.")
 
 
 @app.on_event("startup")
