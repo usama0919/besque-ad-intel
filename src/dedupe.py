@@ -1,4 +1,5 @@
 """Persistent dedupe store. Tracks which competitor ad IDs we've already seen."""
+import contextlib
 import logging
 import os
 import threading
@@ -13,12 +14,16 @@ log = logging.getLogger("dedupe")
 DB_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/besque")
 FORCE_REPROCESS = os.getenv("FORCE_REPROCESS") == "1"
 
-# Cloud SQL max_connections=25; 7 are held by background workers, and the Cloud Run Job
-# (job_runner.py, imports this same module for the pipeline) needs its own headroom
-# alongside the dashboard - 10 leaves margin on both sides, not a number chosen to fill
-# whatever's left of the ceiling.
+# Cloud SQL max_connections=25 (confirmed live via `SHOW max_connections`, 2026-08-21 -
+# not assumed). besque-dashboard's own ship.ps1 deploy caps at --max-instances=3, each
+# running this exact pool; besque-pipeline (job_runner.py, imports this same module)
+# opens its OWN separate pool of the same size when it runs, on top of the dashboard's.
+# 5 was chosen so 3 x 5 = 15 (the dashboard's own worst case) leaves real headroom under
+# 25 for besque-pipeline's pool AND a local dev session hitting the same live DB - the
+# old value (10) gave 3 x 10 = 30, which already exceeded the limit on its own, before
+# the pipeline job or a dev session ever added a single connection.
 POOL_MINCONN = 1
-POOL_MAXCONN = 10
+POOL_MAXCONN = 5
 
 _pool = None
 _pool_lock = threading.Lock()
@@ -117,6 +122,121 @@ def get_conn():
         )
         raise
     return _PooledConnection(pool, conn, key)
+
+
+# ---- Generation single-flight guard (2026-08-21) - a Postgres advisory lock, not an
+# in-process flag, so exactly one generation batch (pipeline.generate_from_selection or
+# pipeline.run_once, from EITHER the dashboard process, a separate besque-pipeline Cloud
+# Run Job execution, or a local run) may be in flight at any moment ACROSS THE WHOLE
+# SERVICE - every one of those connects to the same Postgres instance, so the lock is
+# visible to all of them; an in-process bool would only ever see the ONE process holding
+# it, not a sibling Cloud Run instance or the separately-triggered Job. ----
+
+# Arbitrary but FIXED - must never collide with another pg_advisory_lock key anywhere
+# else in this codebase (grepped for advisory_lock at the time this was added: zero
+# other uses, so this is a free choice, not a coordinated one).
+GENERATION_LOCK_KEY = 881100210
+
+
+class GenerationAlreadyRunningError(RuntimeError):
+    """Raised by generation_single_flight_guard when another generation batch already
+    holds the lock. str(e) is the full human-readable message (who started it, and
+    when) - callers surface it directly, never re-derive their own wording from a
+    structured field."""
+
+
+def init_generation_lock():
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS generation_lock (
+                id          INTEGER PRIMARY KEY DEFAULT 1,
+                running     BOOLEAN DEFAULT false,
+                started_by  TEXT DEFAULT '',
+                started_at  TIMESTAMPTZ
+            )
+        """)
+        cur.execute("INSERT INTO generation_lock (id) VALUES (1) ON CONFLICT (id) DO NOTHING")
+        conn.commit()
+
+
+def get_generation_lock_status():
+    """Purely informational read of who (if anyone) currently holds the single-flight
+    lock and since when - the ADVISORY LOCK ITSELF is what actually enforces
+    single-flight (see generation_single_flight_guard), this table only supplies the
+    human-readable detail for a rejected caller's error message.
+
+    Can go STALE if a process holding the lock is killed hard enough to skip its own
+    `finally` (a SIGKILL, an OOM kill) - Postgres itself still releases the real
+    advisory lock the instant that process's connection closes, so a NEW batch is
+    never actually blocked by a dead one; only this row's `running` flag can lag
+    behind, cosmetic only, corrected the next time anyone successfully acquires the
+    lock (which overwrites started_by/started_at/running fresh - see
+    generation_single_flight_guard)."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT running, started_by, started_at FROM generation_lock WHERE id = 1")
+        row = cur.fetchone()
+        if row is None:
+            return {"running": False, "started_by": "", "started_at": None}
+        return {"running": row[0], "started_by": row[1] or "", "started_at": row[2]}
+
+
+@contextlib.contextmanager
+def generation_single_flight_guard(started_by: str):
+    """Only one caller anywhere may be inside this context at a time, enforced by a
+    Postgres SESSION-level advisory lock (pg_try_advisory_lock/pg_advisory_unlock on
+    GENERATION_LOCK_KEY) - never blocks/queues: a second caller gets
+    GenerationAlreadyRunningError immediately, naming who holds the lock and since
+    when (from generation_lock's own row), for the caller to surface verbatim.
+
+    Deliberately does NOT use `with get_conn() as conn:` per statement the way every
+    other function in this module does - pg_try_advisory_lock is SESSION-scoped, held
+    by the exact physical connection that acquired it until THAT connection calls
+    pg_advisory_unlock or is closed. Returning a pooled connection to the pool after
+    acquiring the lock (the normal per-statement pattern) would leak the lock onto
+    whichever unrelated caller borrows that same physical connection next, since the
+    pool reuses connections across unrelated get_conn() calls. Instead, ONE connection
+    is checked out and held for this context manager's ENTIRE lifetime (the whole
+    generation batch, however long it runs) via a single `with get_conn() as conn:`
+    wrapping everything below, including the caller's own `yield`-ed work.
+
+    On failure to acquire: the lock was never held by this connection, so it's
+    returned to the pool immediately with nothing to unlock - the raise happens
+    inside the `with get_conn()` block, which still commits/rolls back and returns
+    the connection normally on an exception, same as any other caller.
+
+    On success: `running`/`started_by`/`started_at` are written immediately (so a
+    concurrent second caller's rejection message is accurate), the guarded body runs,
+    and the `finally` unconditionally clears `running` and releases the advisory lock
+    on the SAME connection - regardless of whether the body returned normally, raised,
+    or the caller's own `with` block exited early."""
+    init_generation_lock()
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_try_advisory_lock(%s)", (GENERATION_LOCK_KEY,))
+            got_lock = cur.fetchone()[0]
+        if not got_lock:
+            status = get_generation_lock_status()
+            who = status["started_by"] or "an unnamed run"
+            when = status["started_at"].isoformat() if status["started_at"] else "an unknown time"
+            raise GenerationAlreadyRunningError(
+                f"A generation batch is already running - started by {who} at {when}. "
+                f"Only one generation batch may run at a time across the whole service; "
+                f"wait for it to finish (or confirm it isn't stuck) before starting another."
+            )
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE generation_lock SET running = true, started_by = %s, started_at = now() "
+                    "WHERE id = 1",
+                    (started_by,),
+                )
+            conn.commit()
+            yield
+        finally:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE generation_lock SET running = false WHERE id = 1")
+                cur.execute("SELECT pg_advisory_unlock(%s)", (GENERATION_LOCK_KEY,))
+            conn.commit()
 
 
 def init_db():

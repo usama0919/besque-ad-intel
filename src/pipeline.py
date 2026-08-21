@@ -5,6 +5,7 @@ ad or failed stage is skipped cleanly without stopping the run.
 """
 import os
 import logging
+from contextlib import ExitStack
 from dataclasses import dataclass
 from src import dedupe, scrape, assets, deconstruct, generate_copy, generate_image_prompt, generate_image_prompt_writer, slack_review, compliance, output_critic, content_safety, reference_format, reference_structure
 from src.retry import with_retry
@@ -402,6 +403,58 @@ class BatchAdConfig:
 
 
 def generate_from_selection(ad_ids, angle_id=None, body_area=None, offer_text=None,
+                             instruction=None, product_id=None, should_stop=None,
+                             regenerate=False, on_ad_done=None,
+                             text_in_image=False, include_product=None, edit_mode=None,
+                             check_output=False, retheme_colours=None, realism=None,
+                             per_ad_overrides=None, clone_mode=False):
+    """Thin single-flight wrapper around _generate_from_selection_locked (see that
+    function for everything about what a generation batch actually does - this
+    docstring only covers the guard).
+
+    Acquires dedupe.generation_single_flight_guard (a Postgres advisory lock, held
+    across the WHOLE batch, across every process talking to this DB - see that
+    function's own docstring) before any paid call. If another batch already holds
+    it, returns immediately - same shape as the existing product-scope-refused
+    guard below (failed=len(ad_ids), by_ad marks every ad_id "failed", on_ad_done
+    fires for each one so a caller polling per-ad progress sees a real, named
+    outcome rather than nothing) - never queues, never fails silently. The lock is
+    always released (running=false, pg_advisory_unlock) in a finally, however the
+    locked call ends."""
+    started_by = f"pool send: {len(ad_ids)} ad(s)" + (f", angle_id={angle_id}" if angle_id else "")
+    with ExitStack() as stack:
+        try:
+            stack.enter_context(dedupe.generation_single_flight_guard(started_by))
+        except dedupe.GenerationAlreadyRunningError as e:
+            log.warning("generate_from_selection refused: %s", e)
+            summary = {"processed": 0, "skipped": 0, "failed": len(ad_ids), "already_generated": 0,
+                       "by_ad": {}, "error": str(e)}
+            for ad_id in ad_ids:
+                summary["by_ad"][ad_id] = "failed"
+                if on_ad_done is not None:
+                    try:
+                        on_ad_done(ad_id, "failed")
+                    except Exception as cb_err:
+                        log.warning("generate_from_selection: on_ad_done callback raised for %s "
+                                    "(%s: %s), ignored", ad_id, type(cb_err).__name__, cb_err)
+            return summary
+        # Inside the `with ExitStack()` block, so its own __exit__ (which releases the
+        # guard via the REAL exception info if the call below raises - unlike a manual
+        # guard.__exit__(None, None, None), ExitStack's own context-manager protocol
+        # propagates the actual exc_type/exc_val/exc_tb) always runs before this
+        # function returns, whether _generate_from_selection_locked returns normally
+        # or raises.
+        return _generate_from_selection_locked(
+            ad_ids, angle_id=angle_id, body_area=body_area, offer_text=offer_text,
+            instruction=instruction, product_id=product_id, should_stop=should_stop,
+            regenerate=regenerate, on_ad_done=on_ad_done,
+            text_in_image=text_in_image, include_product=include_product, edit_mode=edit_mode,
+            check_output=check_output, retheme_colours=retheme_colours, realism=realism,
+            per_ad_overrides=per_ad_overrides, clone_mode=clone_mode,
+        )
+
+
+def _generate_from_selection_locked(ad_ids, angle_id=None, body_area=None, offer_text=None,
                              instruction=None, product_id=None, should_stop=None,
                              regenerate=False, on_ad_done=None,
                              text_in_image=False, include_product=None, edit_mode=None,
@@ -2097,6 +2150,45 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
 
 
 def run_once(max_per_competitor=5, competitor_id=None, should_stop=None, product_id=None, category=None,
+             angle_id=None, realism=None, text_in_image=False, include_product=True,
+             body_area=None, offer_text=None, edit_mode=False, operator_instruction=None,
+             check_output=False, retheme_colours=True):
+    """Thin single-flight wrapper around _run_once_locked (see that function for
+    everything about what a run actually does - this docstring only covers the
+    guard).
+
+    Acquires dedupe.generation_single_flight_guard (the SAME lock
+    generate_from_selection's own wrapper uses - one lock, shared across BOTH
+    generation entry points, so a pool send and a scheduled/category sweep can
+    never run at the same time either, not just two of the same kind) before doing
+    anything else. If another batch already holds it, returns immediately in the
+    SAME shape as the existing reference-photo-fetch-failure guard below
+    (processed=skipped=failed=0, by_competitor={}, error=<message>) - no
+    competitor has been touched yet at this point, same as that guard's own
+    reasoning for why there's no per-ad/per-competitor detail to report. Never
+    queues, never fails silently. The lock is always released in a finally,
+    however the locked call ends."""
+    started_by = (
+        f"pipeline run_once (competitor_id={competitor_id}, category={category!r}, "
+        f"max_per_competitor={max_per_competitor})"
+    )
+    with ExitStack() as stack:
+        try:
+            stack.enter_context(dedupe.generation_single_flight_guard(started_by))
+        except dedupe.GenerationAlreadyRunningError as e:
+            log.warning("run_once refused: %s", e)
+            return {"processed": 0, "skipped": 0, "failed": 0, "reference_photo_warning": None,
+                    "by_competitor": {}, "error": str(e)}
+        return _run_once_locked(
+            max_per_competitor=max_per_competitor, competitor_id=competitor_id, should_stop=should_stop,
+            product_id=product_id, category=category, angle_id=angle_id, realism=realism,
+            text_in_image=text_in_image, include_product=include_product, body_area=body_area,
+            offer_text=offer_text, edit_mode=edit_mode, operator_instruction=operator_instruction,
+            check_output=check_output, retheme_colours=retheme_colours,
+        )
+
+
+def _run_once_locked(max_per_competitor=5, competitor_id=None, should_stop=None, product_id=None, category=None,
              angle_id=None, realism=None, text_in_image=False, include_product=True,
              body_area=None, offer_text=None, edit_mode=False, operator_instruction=None,
              check_output=False, retheme_colours=True):

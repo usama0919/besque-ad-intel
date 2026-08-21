@@ -1,0 +1,54 @@
+-- Schema audit, 2026-08-21. Read-only comparison of the LIVE Cloud SQL database
+-- (DATABASE_URL=postgresql://postgres:***@34.105.137.192:5432/besque - confirmed
+-- via src.dedupe.get_conn(), not localhost/5433) against what src/dedupe.py's own
+-- CREATE TABLE / ALTER TABLE ADD COLUMN IF NOT EXISTS statements declare.
+--
+-- METHOD: dumped information_schema.columns for every public table (17 tables, 164
+-- columns) and pg_indexes, via a read-only script using dedupe.get_conn() inside a
+-- `with` block (no writes issued). Parsed every CREATE TABLE IF NOT EXISTS and ALTER
+-- TABLE ... ADD COLUMN IF NOT EXISTS statement out of src/dedupe.py's own source text
+-- (confirmed to be the ONLY file in src/ that touches the DB - grepped every other
+-- src/*.py file for get_conn()/cur.execute/psycopg2, zero hits) and diffed both
+-- directions: columns the code expects but the live DB lacks (none), and type-category
+-- mismatches (int/bool/jsonb/timestamp/timestamptz/text - none). Also confirmed every
+-- CREATE UNIQUE INDEX IF NOT EXISTS the code declares (seen_ads_ad_angle_uq,
+-- angles_slug_uq, review_angle_matches_uq, scraped_ads_ad_competitor_uq) already
+-- exists live via pg_indexes.
+--
+-- RESULT: no column the code reads or writes is missing live, and no column's type
+-- has diverged. src/dedupe.py's self-migrating ALTER statements (which already run on
+-- every app startup via dashboard.py's _init_tables() hook) have already fully caught
+-- the live database up - there is nothing for THIS migration to add to the running
+-- production schema. No NOT-NULL-without-a-default backfill case exists either, for
+-- the same reason: nothing is missing.
+--
+-- SEPARATE FINDING (not a live-DB gap, but the same class of bug CLAUDE.md already
+-- tracks for competitors.category / seen_ads.angle_id / products.category etc. -
+-- "exists in prod but isn't reproducible from code against a fresh database"): two
+-- columns are read/written by dedupe.py but have NO corresponding CREATE TABLE or
+-- ALTER TABLE ADD COLUMN IF NOT EXISTS anywhere in that file - they only exist live
+-- because of a historical manual migration that source code never captured:
+--   - competitors.suggested_name (read at dedupe.py:590-591, written by
+--     set_suggested_name at dedupe.py:1655-1657) - init_competitors()'s CREATE TABLE
+--     (dedupe.py:564) has no suggested_name column and no ALTER adds one.
+--   - review_decisions.reason (read/written by record_decision/get_decisions at
+--     dedupe.py:190-215) - init_decisions()'s CREATE TABLE (dedupe.py:179) has no
+--     reason column and no ALTER adds one.
+-- Both already exist live with the exact shape the two ADD COLUMN statements below
+-- state (TEXT, nullable, default '') - confirmed via information_schema.columns - so
+-- both statements below are no-ops against the live database today. They're included
+-- so this file is the complete, reproducible picture in one place (a fresh database
+-- built from this code alone would otherwise be missing both), matching this
+-- repo's own migrate_angles.sql precedent for the same gap-class. The actual fix for
+-- "not reproducible from a fresh DB" is adding these two ALTER statements to
+-- src/dedupe.py's init_competitors()/init_decisions() themselves (self-migrating,
+-- like every other column added since 2026-08-04) - not proposed as part of this file,
+-- since that's a code change, not a database migration; flagged for a separate
+-- decision.
+
+ALTER TABLE competitors ADD COLUMN IF NOT EXISTS suggested_name TEXT DEFAULT '';
+ALTER TABLE review_decisions ADD COLUMN IF NOT EXISTS reason TEXT DEFAULT '';
+
+-- No other statements are needed. No column requires NOT NULL without a default (no
+-- backfill case exists) - every column this audit found reading/writing is already
+-- present live with a compatible type and a default that doesn't break existing rows.
