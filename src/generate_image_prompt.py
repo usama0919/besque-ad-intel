@@ -1144,7 +1144,14 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
             # stays, since scene composition around the product still applies either way.
             ((("" if suppress_bottle_identity else _bottle_identity_clause(product) + _bottle_geometry_clause())
               + _bottle_integration_clause(suppress_bottle_identity)
-              + ("" if suppress_bottle_identity else _bottle_geometry_source_clause()))
+              + ("" if suppress_bottle_identity else _bottle_geometry_source_clause())
+              # Bug 1 fix (2026-08-21): data-grounded product-to-application-area
+              # direction, when the reference's own objects support one - see
+              # _dispensing_orientation_fact's own docstring. Suppressed alongside
+              # geometry/identity: Route B compositing already forbids drawing any
+              # liquid/pump in this space at all, so a direction fact about how the
+              # (never-drawn) dispensing opening relates to a target is moot there.
+              + ("" if suppress_bottle_identity else _dispensing_orientation_fact(blueprint.get("objects"))))
              if effective_include_product else "") +
             (_no_product_placement_clause(no_product_placement_bbox) if no_product_placement_bbox else "") +
             _operator_instruction_clause(operator_instruction) +
@@ -1205,7 +1212,10 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
             # B compositing will paste the real cutout in after generation - integration
             # stays, scene composition around the product still applies either way.
             ((("" if suppress_bottle_identity else _bottle_identity_clause(product) + _bottle_geometry_clause())
-              + _bottle_integration_clause(suppress_bottle_identity))
+              + _bottle_integration_clause(suppress_bottle_identity)
+              # Bug 1 fix (2026-08-21): same data-grounded direction fact as the
+              # edit-mode branch above - see _dispensing_orientation_fact.
+              + ("" if suppress_bottle_identity else _dispensing_orientation_fact(blueprint.get("objects"))))
              if effective_include_product else "") +
             (_no_product_placement_clause(no_product_placement_bbox) if no_product_placement_bbox else "") +
             _operator_instruction_clause(operator_instruction) +
@@ -1229,7 +1239,10 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
             # B compositing will paste the real cutout in after generation - integration
             # stays, scene composition around the product still applies either way.
             ((("" if suppress_bottle_identity else _bottle_identity_clause(product) + _bottle_geometry_clause())
-              + _bottle_integration_clause(suppress_bottle_identity))
+              + _bottle_integration_clause(suppress_bottle_identity)
+              # Bug 1 fix (2026-08-21): same data-grounded direction fact as the
+              # edit-mode branch above - see _dispensing_orientation_fact.
+              + ("" if suppress_bottle_identity else _dispensing_orientation_fact(blueprint.get("objects"))))
              if effective_include_product else "") +
             (_no_product_placement_clause(no_product_placement_bbox) if no_product_placement_bbox else "") +
             _operator_instruction_clause(operator_instruction) +
@@ -3646,7 +3659,14 @@ def _bottle_integration_clause(suppress_bottle_identity=False):
         "correctly to the hand holding it - never a hand posed around a bottle-shaped "
         "gap, and never a hand too large or small for the bottle it holds. WHEN THE "
         "PRODUCT IS BEING APPLIED: show the oil visibly on the skin, not only the "
-        "bottle in frame. The bottle must NEVER overlap a text block or caption - if "
+        "bottle in frame. DISPENSING DIRECTION MUST STAY INTERNALLY CONSISTENT (Bug 1 "
+        "fix, 2026-08-21): wherever a pump, nozzle, dropper, or other dispensing "
+        "opening appears together with a visible stream, drip, pour, or pooled "
+        "substance from it, the opening's own facing direction, the path that "
+        "substance travels, and the point where it actually lands must all agree "
+        "with each other - never render a nozzle facing one way while the oil "
+        "stream falls or lands in a materially different, disconnected direction. "
+        "The bottle must NEVER overlap a text block or caption - if "
         "the composition would otherwise place one over the other, move or resize the "
         "bottle within the scene's own logic (per its stated scale) rather than let it "
         "cross behind or in front of rendered text. PUMP/CAP ORIENTATION follows THIS "
@@ -3745,6 +3765,97 @@ def _scene_composition_facts(layout_detail=None, visual=None, background=None):
         return ""
     return ("OBSERVED SCENE COMPOSITION (facts about THIS reference's existing layout, "
             "never a fixed position): " + "; ".join(facts) + ". ")
+
+
+_DISPENSING_DIRECTION_THRESHOLD = 0.06  # fraction of frame - below this on an axis,
+# the two centres are treated as aligned on that axis rather than forcing a direction
+# word that a small, meaningless offset doesn't actually support.
+
+
+def _valid_bbox(bbox):
+    return isinstance(bbox, (list, tuple)) and len(bbox) == 4 and all(
+        isinstance(v, (int, float)) for v in bbox
+    )
+
+
+def _bbox_center(bbox):
+    x, y, w, h = bbox
+    return x + w / 2.0, y + h / 2.0
+
+
+def _relative_direction_phrase(from_bbox, to_bbox):
+    """Plain-English direction from one bbox's centre to another's, e.g. "below and
+    to the right of" - pure geometry, no kind/brand/product assumption baked in, so
+    the SAME function can relate a product to a person, a hand to a face, or any
+    other pair of objects a future ad might need related this way."""
+    fx, fy = _bbox_center(from_bbox)
+    tx, ty = _bbox_center(to_bbox)
+    dx, dy = tx - fx, ty - fy
+    vert = ("below" if dy > _DISPENSING_DIRECTION_THRESHOLD
+            else "above" if dy < -_DISPENSING_DIRECTION_THRESHOLD else None)
+    horiz = ("to the right of" if dx > _DISPENSING_DIRECTION_THRESHOLD
+             else "to the left of" if dx < -_DISPENSING_DIRECTION_THRESHOLD else None)
+    if vert and horiz:
+        return f"{vert} and {horiz}"
+    if vert:
+        return f"directly {vert}"
+    if horiz:
+        return f"directly {horiz}"
+    return "at essentially the same position as"
+
+
+def _dispensing_orientation_fact(objects):
+    """Bug 1 fix (2026-08-21): an OBSERVED FACT about a reference's own product-to-
+    application-target spatial relationship, derived ENTIRELY from objects[]
+    bbox/kind data already produced by deconstruct.py today - no new schema field,
+    no keyword match on "pump"/"bottle"/"Besque" anywhere in this function. This is
+    deliberately generic geometry (see _relative_direction_phrase) so it generalises
+    to any dispensing/application relationship a reference might show - a spray
+    bottle held toward a face, a tube over a hand, not only Besque's own pumped
+    bottle - never hardcoded to a specific product shape.
+
+    Triggers only when a kind=="product" object resolved to substitute (the one
+    whose bbox therefore matters for the OUTPUT composition) AND a kind=="person"
+    object both exist with a usable bbox. Returns "" otherwise - a pure product-hero
+    shot with no person in frame, or a legacy/malformed blueprint - never guessing a
+    relationship the blueprint doesn't support. A close-up hand-only application
+    shot with no whole-figure kind=="person" object (schema: person = "the whole
+    figure, not per-body-part") is a KNOWN, documented gap this fact does not cover -
+    the universal consistency sentence in _bottle_integration_clause's own
+    "WHEN THE PRODUCT IS BEING APPLIED" text is what covers that case instead, with
+    no reference-grounded direction to add to it.
+
+    Picks the LARGEST product/person object when more than one of a kind exists (the
+    hero instance) - simple and deterministic; this does not duplicate resolve_
+    authorised_product_dispositions's own part_of/geometric/ceiling machinery
+    because it only needs A bbox to reason about, never the mechanically-correct
+    substitute/drop split that function exists for."""
+    objects = objects or []
+    products = [o for o in objects if isinstance(o, dict) and o.get("kind") == "product"
+                and o.get("disposition") == "substitute" and _valid_bbox(o.get("bbox"))]
+    people = [o for o in objects if isinstance(o, dict) and o.get("kind") == "person"
+              and _valid_bbox(o.get("bbox"))]
+    if not products or not people:
+        return ""
+
+    def _area(o):
+        _, _, w, h = o["bbox"]
+        return (w or 0) * (h or 0)
+
+    product = max(products, key=_area)
+    person = max(people, key=_area)
+    direction = _relative_direction_phrase(product["bbox"], person["bbox"])
+    return (
+        f"OBSERVED PRODUCT-TO-APPLICATION-AREA RELATIONSHIP (a fact about THIS "
+        f"reference, not a fixed rule): the product sits {direction} the person/"
+        f"application area it relates to. Wherever the generated scene shows the "
+        f"product being held, poured, sprayed, or dispensed toward a body area or "
+        f"surface, the dispensing opening's own facing direction, the visible "
+        f"stream/drip/pour it produces, and the point where that substance actually "
+        f"lands must all agree with EACH OTHER and with this same relative "
+        f"direction - never let the dispensing opening face one way while the "
+        f"rendered substance travels or lands somewhere inconsistent with it. "
+    )
 
 
 def _bottle_register_clause(background, style=None):
