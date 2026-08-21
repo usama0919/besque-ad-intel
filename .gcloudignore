@@ -6,3 +6,9 @@ __pycache__/
 .pytest_cache/
 assets/
 .env
+
+# Untracked scratch files sitting in the working tree (earlier session's throwaway
+# diagnostics) - not deployable code, must not ride into the --source . upload.
+blueprint_*.json
+dump_blueprint.py
+src/bottle_geometry_check.py
