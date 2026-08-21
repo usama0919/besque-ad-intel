@@ -1586,7 +1586,11 @@ _OBJECT_CLOSURE_SENTENCE = (
     "The scene contains these objects and no others. Do not add any object, "
     "body part, hair, hand, garment or prop that is not listed above. Where an object "
     "above is marked OBSERVED, NOT REQUIRED, its omission is never licence to add a "
-    "different object, or more than one instance, in its place."
+    "different object, or more than one instance, in its place. Each KEEP or SUBSTITUTE "
+    "object above appears EXACTLY ONCE, matching how many times the reference itself "
+    "showed it (Bug 2 fix, 2026-08-21) - never render a second, duplicate instance of a "
+    "prop, surface, or person that was only present once, and never split one listed "
+    "object into two partial renderings."
 )
 
 

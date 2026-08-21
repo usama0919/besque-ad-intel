@@ -284,7 +284,39 @@ CRITIC_SYSTEM = (
     "of field, AND the physical realism of its liquid/glass/hardware/label - must match "
     "the scene around it and read as a real object, not just photographic-vs-illustrated "
     "(the bottle-rendering-matches-scene instruction and the bottle material realism "
-    "instruction)\n\n"
+    "instruction)\n"
+    "- DISPENSING/APPLICATION DIRECTIONAL CONSISTENCY (Bug 1, 2026-08-21): wherever the "
+    "GENERATED image shows a pump, nozzle, spout, dropper, or other dispensing opening "
+    "together with a visible stream, drip, pour, or pooled substance from it and/or a "
+    "body area or surface it is being applied to, all of these must read as ONE "
+    "CONSISTENT DIRECTIONAL RELATIONSHIP: the opening's own facing direction, the path "
+    "the visible substance travels, and where it actually lands must all agree with each "
+    "other. Flag this when the dispensing opening visibly faces one way while the "
+    "rendered stream, drip, or pooling substance travels or lands in a materially "
+    "different, disconnected direction - e.g. a nozzle pointing left while the visible "
+    "drip falls straight down and to the right, or a pump angled toward one shoulder "
+    "while the oil is shown pooling on the opposite leg. This applies ONLY when the "
+    "generated image actually depicts a dispensing/application gesture with a visible "
+    "directional cue (a stream, drip, or pour) - a bottle simply held or resting with no "
+    "visible application gesture is not a case this category covers\n"
+    "- REFERENCE OBJECT INVENTORY (Bug 2, 2026-08-21 - preserve non-product scene "
+    "objects): the reference ad's own meaningful non-product objects, supplied below "
+    "when available, must all still be present in the GENERATED image, and the "
+    "generated image must not introduce a meaningful object that was never in the "
+    "reference, nor render a duplicate instance of one the reference showed only once. "
+    "Distinguish FOUR shapes, and name which one in your `category`: (1) MISSING - a "
+    "listed reference object is not present anywhere in the generated image; (2) "
+    "UNEXPECTED - a meaningful foreground/midground object appears in the generated "
+    "image with no counterpart in the reference list; (3) DUPLICATE - an object from the "
+    "list appears more than once when the reference showed only one; (4) ALLOWED PRODUCT "
+    "SUBSTITUTION - the competitor's product being replaced by the Besque product is "
+    "NEVER a violation of any of the above, no matter how different the two products "
+    "look - this is the one intentional, required exception. Do NOT report background "
+    "texture, lighting or colour differences, shadows, reflections, grain, or other "
+    "natural photographic variation as an extra or missing object - this category is for "
+    "semantically meaningful, nameable objects only (something a viewer could point at "
+    "and identify), never texture or ambience. If no reference object inventory is "
+    "supplied below, skip this category entirely - there is nothing to compare against\n\n"
     "Treat a hit in these categories as HIGH confidence by default unless you are quite "
     "sure it's a false read: unauthorised offer, scarcity claim, promo code, efficacy "
     "claim, testimonial, product category mismatch, regulatory text carried over from the "
@@ -451,6 +483,48 @@ def has_unauthorised_testimonial_finding(findings):
     return any(_is_testimonial_shaped_category(f.get("category")) for f in (findings or []))
 
 
+_INVENTORY_KINDS = ("person", "prop", "surface", "graphic")
+
+
+def reference_object_inventory(objects):
+    """Bug 2 fix (2026-08-21): the reference's own meaningful NON-PRODUCT objects
+    expected to survive into the generated draft, as a list of short description
+    strings - built ENTIRELY from blueprint.objects data deconstruct.py already
+    produces, no new detection, no new schema field.
+
+    Scoped to kind in (person/prop/surface/graphic) - never "product" (substitution
+    is the intentional, required exception this whole task exists to protect, never
+    something to list as "must survive unchanged") and never "text"/"logo" (already
+    covered by this critic's own existing categories - a competitor wordmark/logo is
+    rule 9's job, a text block's presence/absence is rule 6's). disposition=="keep"
+    only, using the object's OWN stored field - the same value _objects_clause's KEEP
+    line already trusts for a non-text, non-served/non-part_of object; this is a
+    best-effort summary for the critic, not a second mechanical enforcement point,
+    so it does not duplicate _objects_clause's full two-pass context-aware
+    re-resolution (product/testimonial dispositions, served_object_id, part_of) -
+    none of which apply to these four kinds in the ordinary case anyway.
+    required_in_output=False objects are excluded - the object's own OBSERVED, NOT
+    REQUIRED status already means its absence from the output is not a violation.
+
+    Returns [] when nothing qualifies (a product-only or text-only reference) - the
+    caller then has no inventory to compare against and the checklist's own
+    instruction is to skip this category entirely, never guess one."""
+    inventory = []
+    for obj in (objects or []):
+        if not isinstance(obj, dict):
+            continue
+        if obj.get("kind") not in _INVENTORY_KINDS:
+            continue
+        if obj.get("disposition") != "keep":
+            continue
+        if obj.get("required_in_output") is False:
+            continue
+        description = (obj.get("description") or obj.get("object_id") or "").strip()
+        if description:
+            inventory.append(description)
+    return inventory
+
+
 def _sniff_mime_type(data):
     """Magic-byte sniff - duplicated rather than imported from deconstruct.py/
     generate_image_prompt.py, matching this codebase's existing precedent for this exact
@@ -466,8 +540,16 @@ def _sniff_mime_type(data):
 
 def _build_user_prompt(brand_rules_text, headline=None, subtext=None, offer_text=None,
                         include_product=True, visual_description=None, ingredients=None,
-                        testimonial=None, has_reference_image=False):
+                        testimonial=None, has_reference_image=False, reference_objects=None):
     """Pure and side-effect free so it's directly testable without mocking the API.
+
+    reference_objects (Bug 2, 2026-08-21): a list of short description strings from
+    reference_object_inventory(blueprint.get("objects")) - the reference's own
+    meaningful non-product objects the generated image is expected to still show.
+    None/empty (every pre-existing caller, and any ad whose reference has no
+    qualifying object) omits the section entirely, reproducing today's prompt
+    byte-for-byte - the REFERENCE OBJECT INVENTORY checklist category's own
+    instruction is to skip itself when nothing is supplied here.
 
     has_reference_image (Item 2, 2026-08-12): True when check_draft is also attaching
     the competitor's ORIGINAL reference image alongside the draft (edit mode only - see
@@ -525,6 +607,14 @@ def _build_user_prompt(brand_rules_text, headline=None, subtext=None, offer_text
         )
     else:
         testimonial_line = "Authorised testimonial: NONE - no testimonial was authorised for this image.\n"
+    objects_line = (
+        f"The reference ad's own meaningful non-product objects that should still be "
+        f"present in the generated image (judge REFERENCE OBJECT INVENTORY against "
+        f"THIS list - the substituted Besque product itself is NOT one of these; "
+        f"product substitution is always allowed and is never a violation of that "
+        f"category): {'; '.join(reference_objects)}.\n"
+        if reference_objects else ""
+    )
     if has_reference_image:
         closing = (
             "TWO images are attached: the FIRST is the competitor's ORIGINAL reference "
@@ -546,19 +636,23 @@ def _build_user_prompt(brand_rules_text, headline=None, subtext=None, offer_text
         f"Authorised text_in_image content: {text_line}.\n"
         f"Authorised offer: {offer_line}.\n"
         f"Product presence authorised: {product_line}.\n"
-        f"{testimonial_line}\n"
+        f"{testimonial_line}"
+        f"{objects_line}\n"
         f"{closing}"
     )
 
 
 def check_draft(image_bytes, brand_rules_text, headline=None, subtext=None, offer_text=None,
                  include_product=True, visual_description=None, ingredients=None,
-                 testimonial=None, reference_image_bytes=None):
+                 testimonial=None, reference_image_bytes=None, reference_objects=None):
     """Ask Claude to inspect a GENERATED draft image for rule violations.
 
     Returns a list of {"category", "description", "confidence"} dicts, medium/high
     confidence only (a critic that flags everything becomes noise, so low-confidence hits
     are dropped here rather than left for the caller to filter).
+
+    reference_objects (Bug 2, 2026-08-21): forwarded straight to _build_user_prompt -
+    see that function's own docstring. None (every pre-existing caller) is a no-op.
 
     reference_image_bytes (Item 2, 2026-08-12): the competitor's ORIGINAL reference ad
     image - the SAME bytes edit_mode attaches to Gemini for generation (pipeline.py
@@ -584,7 +678,8 @@ def check_draft(image_bytes, brand_rules_text, headline=None, subtext=None, offe
     user_prompt = _build_user_prompt(brand_rules_text, headline=headline, subtext=subtext,
                                       offer_text=offer_text, include_product=include_product,
                                       visual_description=visual_description, ingredients=ingredients,
-                                      testimonial=testimonial, has_reference_image=bool(reference_image_bytes))
+                                      testimonial=testimonial, has_reference_image=bool(reference_image_bytes),
+                                      reference_objects=reference_objects)
     import base64
     media_type = _sniff_mime_type(image_bytes)
     b64 = base64.standard_b64encode(image_bytes).decode("utf-8")

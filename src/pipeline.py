@@ -1904,6 +1904,14 @@ def process_ad(ad, product=None, reference_images=None, messaging_angle=None,
                     # edit_mode: generate mode never had a real reference photo to clone
                     # an identity FROM, so there is nothing meaningful to compare there.
                     reference_image_bytes=(image_bytes if edit_mode else None),
+                    # reference_objects (Bug 2, 2026-08-21): the reference's own
+                    # meaningful non-product objects, derived from this SAME blueprint's
+                    # objects[] - see output_critic.reference_object_inventory's own
+                    # docstring. Unlike reference_image_bytes above, this is NOT gated on
+                    # edit_mode: it's a text summary from data that exists regardless of
+                    # mode, not a photo comparison, so it can inform the critic even when
+                    # generate mode never attaches the reference image itself.
+                    reference_objects=output_critic.reference_object_inventory(blueprint.get("objects")),
                 )
             except Exception as e:
                 log.warning("Ad %s: output critic block raised (%s: %s), draft left unflagged",
