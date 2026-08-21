@@ -3094,3 +3094,171 @@ around — that section and this one should be read together, not duplicated her
 - **Scene-category fit** — whether a reference's own creative category/format (e.g.
   `testimonial_review` vs. `product_hero`) genuinely fits what's being asked of a given
   run is still not checked anywhere. Flagged, not scoped — no fix direction chosen.
+
+## 2026-08-21 — deploy blocked (4 failed attempts, not 5 — corrected on verification),
+## auth/ship.ps1 hardening, Bug 1 direction-inversion fix, substance-material +
+## application-area fixes coded and tested (not yet committed/applied)
+
+**Correction, made by direct verification, not transcription**: this session's own
+initial count of failed deploy attempts was "five." Checked directly via `gcloud run
+revisions list --service besque-dashboard` and `gcloud run revisions describe` on the
+one revision whose top-level `Ready` condition had aged out to "Retired": there are
+**four**, not five — `00042-rkj` (11:06 UTC), `00043-5vd` (11:24 UTC), `00044-mxj`
+(11:48 UTC), `00045-6mq` (11:51 UTC), every one of them `ContainerImageImportFailed` on
+its `ContainerReady` condition even where the summarized top-level `Ready` condition
+reads "Retired" instead. Recorded here as the verified number, per this file's own
+standing principle ("Claude Code's own end-of-session state reports are not
+authoritative - verify against `git log`/`git status`") extended to `gcloud` state too.
+
+### Deploy is BLOCKED — `ContainerImageImportFailed`, four attempts, root cause still
+### not found; prod is still `besque-dashboard-00041-2md`
+Every one of the four candidate causes checked was RULED OUT WITH EVIDENCE, not
+assumed clear:
+- **Org policies** — `gcloud resource-manager org-policies list` against
+  `besque-martech` returned zero constraints. Not the cause.
+- **Binary Authorization** — confirmed disabled (API not enabled) at both the project
+  level and the `besque-dashboard` service level. Not the cause.
+- **Image itself** — inspected directly via the Artifact Registry Docker v2 API
+  (manifest + config blob, no local Docker daemon needed): single-platform manifest,
+  `architecture: amd64`, `os: linux`, layer sizes consistent with the Dockerfile,
+  `Cmd` matching what the Dockerfile actually specifies. Not an obviously malformed or
+  multi-arch image.
+- **Region** — the Artifact Registry repo (`cloud-run-source-deploy`) and the
+  `besque-dashboard` Cloud Run service are both `europe-west2`. Not a region mismatch.
+- **IAM, both principals** — the runtime service account
+  (`181780124756-compute@developer.gserviceaccount.com`) has
+  `roles/artifactregistry.reader` on the repo (confirmed, granted this session where
+  missing). Cloud Run's own service agent
+  (`service-181780124756@serverless-robot-prod.iam.gserviceaccount.com`) — the
+  principal that actually performs the image PULL when a revision is created, distinct
+  from the runtime SA that only needs pull rights for its own execution — also needed
+  and was granted the same role this session. Neither being missing was the (sole)
+  cause: the failure recurred identically after both grants.
+- **Registry propagation timing** — ruled out via a direct `--image=` deploy of an
+  already-pushed, already-settled digest (bypassing a fresh build entirely). Same
+  failure. Not a race between push-completing and pull-starting.
+- **VPC Service Controls** — checked for a perimeter on the project; inconclusive by
+  absence (no perimeter found, no denial signature ever appeared in any failure), not
+  proven irrelevant by a positive test.
+
+**The isolation test that actually narrowed it**: deployed `gcr.io/cloudrun/hello`
+(a known-good public image) directly to the `besque-dashboard` service — it imported
+and reached Ready successfully. Then pushed that SAME known-good image into the exact
+same Artifact Registry repo (`cloud-run-source-deploy`) the besque-dashboard image
+lives in via Cloud Build, and deployed from that copy — it ALSO imported and reached
+Ready successfully (note: had to force a genuinely new revision with a distinguishing
+`--set-env-vars`, since Cloud Run silently deduped against an identical-digest existing
+revision the first time this was tried — a real gotcha for anyone repeating this test).
+**Conclusion: both the Cloud Run service and the Artifact Registry repo are proven
+fine. The fault is specific to the besque-dashboard image's own content** — something
+about what's actually IN that image, not where it's stored or what service pulls it.
+Traffic was restored to `besque-dashboard-00041-2md` after every one of these tests, so
+prod has been continuously on `00041-2md` throughout.
+
+**Next step, not started**: check whether the Dockerfile's base image is pinned by
+digest or by a floating tag (a tag that moved underneath a previously-working build is
+a real candidate — nothing here rules that out yet), and diff the failing image's own
+layers/config against `00041`'s actual working image (same Docker v2 API technique
+already used above, just comparing two images instead of inspecting one). Do not retry
+the deploy again without a concrete new hypothesis — four identical failures in a row
+is enough to stop guessing-and-retrying, per the standing instruction that governed
+this whole investigation.
+
+### `ship.ps1` gotchas found this session
+- **`gcloud run deploy --source .` builds from the working tree, not from git.** It is
+  entirely decoupled from `git` — an uncommitted change deploys, an unpushed commit
+  deploys, and a committed-but-not-yet-deployed change on a DIFFERENT branch than
+  whatever `HEAD` happens to be does not automatically get excluded. Don't infer what a
+  deploy contains from `git log`/`git status` — it deploys whatever is on disk.
+- **No error checking between `gcloud` calls, and a misleading success message.** The
+  script prints `SHIPPED: ...` unconditionally after its deploy step, with nothing
+  checking the preceding `gcloud run deploy`'s own exit code or resulting revision
+  status first — confirmed live: it printed `SHIPPED` after a deploy that had actually
+  failed with `ContainerImageImportFailed`. Treat `ship.ps1`'s own "SHIPPED" output as
+  meaningless until independently confirmed via `gcloud run services describe`/
+  `revisions describe`, not as evidence anything actually shipped. Not fixed this
+  session.
+- **PowerShell 5.1's pipe-to-native-stdin corrupts secrets with a BOM and `\r\r\n`.**
+  The pattern `$sharedPassword | gcloud secrets create $secretName --data-file=-`
+  writes a UTF-8 BOM plus doubled-CR line endings into the secret payload — confirmed
+  by reading the stored secret back directly via `gcloud secrets versions access`:
+  the real bytes were `\xef\xbb\xbfLCPUK7rDUs5rBUx1z10N\r\r\n`, not the clean literal
+  password. This is why `POST /login` returned 401 even with the correct password
+  typed in and `SHARED_ACCESS_PASSWORD` confirmed present in `os.environ` — the module
+  reads the corrupted value correctly, it's just corrupted before it ever gets there.
+  **Not fixed** — needs either a different upload mechanism in `ship.ps1` (e.g. write
+  to a temp file with an explicit no-BOM encoding and pass `--data-file=<path>`, never
+  a pipe) or a manual secret rotation using a method that doesn't go through
+  PowerShell's native-stdin pipe. The secret in Secret Manager is STILL corrupted as of
+  this writing.
+
+### Standing rules added this session
+- **Restart uvicorn before judging any bottle-rendering output.**
+  `_fetch_product_cutout_bytes` (`generate_image_prompt.py`) caches its result
+  process-wide — success cached forever, failure never cached, per the existing
+  process-wide-cache pattern this file already documents elsewhere. The v3
+  shadow-stripped cutout (`besque_magic_body_oil_cutout_v3_shadow_stripped.png`) was
+  uploaded to GCS and `PRODUCT_CUTOUT_GCS_KEY` repointed at it THIS session — any
+  process that started before that repoint is still serving the ORIGINAL cutout from
+  its own process-wide cache regardless of what the code or the bucket now say. Verify
+  the running process started after the repoint before trusting any bottle-fidelity
+  judgement made against a live draft.
+- **Targeted edits structurally bypass `build_image_prompt` entirely.** The Dynamic
+  Edit System's delta-instruction builders (`build_targeted_edit_instruction`,
+  `build_object_removal_instruction`, `build_drift_retry_instruction`, and the
+  realism-only delta path in `src/realism_deltas.py`) send short strings straight to
+  Gemini without ever calling `build_image_prompt` — confirmed live this session:
+  artifact 1439's stored `image_prompt` was only 614 characters, traced via
+  `edit_events` to a "Product — Realism" targeted edit on parent 1438, not a fresh
+  generation. **This means Bug 1's `_dispensing_orientation_fact`, Bug 2's object-
+  inventory preservation, and all four raising assertions in the standing rule near the
+  top of this file (`_assert_no_competitor_branded_object_kept`,
+  `_assert_product_count_consistent`, `_assert_no_text_content_leak`,
+  `_assert_no_prohibited_claim_leak`) do not run on the targeted-edit path at all** —
+  already true before this session for the first three; restated here because the two
+  new fixes below join that same list. A defect only reproducible via a targeted edit
+  is not evidence against a fix that only ever touched `build_image_prompt`.
+- **A temporary auth-bypass line sits uncommitted in `dashboard.py` and MUST be deleted
+  before any deploy.** Added this session to unblock local testing while the
+  Secret-Manager corruption above was being diagnosed:
+  `return await call_next(request)  # TEMPORARY BYPASS (2026-08-21) - remove to restore
+  the gate.` at the top of `_shared_password_gate`. Per explicit instruction this was
+  never committed and must stay that way — but "never committed" only protects `main`;
+  it does nothing to stop `ship.ps1`'s `--source .` deploy (see above) from shipping it
+  straight off the working tree. Check `git diff dashboard.py` for this exact line
+  before running `ship.ps1` again, every time, until it's actually removed.
+
+### Known open, from this session specifically
+- **Substance-material mismatch (item 2 of the 3-part fix task)** — coded and unit-
+  tested (`tests/test_substance_material_reconciliation.py`, 7 tests, all passing
+  against the local suite): a new optional `objects[].represents_product_substance`
+  schema field (deconstruct-time judgement, never a "cream"/"oil" keyword match) lets
+  `_objects_clause`'s KEEP branch reconcile a competitor-substance stand-in prop
+  against `products.substance_colour` instead of cloning it verbatim. **Diff shown,
+  not yet committed, not yet applied to the real DB or verified live.**
+- **Product application-area data gap (item 3)** — coded and unit-tested
+  (`tests/test_product_application_area.py`, 6 tests, all passing): new
+  `products.application_area` column (self-migrating `ALTER TABLE ADD COLUMN IF NOT
+  EXISTS`, default `''`, same pattern as every other additive column in this file's
+  history), threaded through `add_product`/`update_product`/`dashboard.py`'s product
+  endpoints, surfaced in `build_image_prompt`'s product clause as an explicit
+  don't-contradict-this-context constraint. **Diff shown, not yet committed. Migration
+  NOT yet applied to the real database — `application_area` does not exist as a real
+  column yet, confirmed by direct query. The populate statement for the real product
+  row (`UPDATE products SET application_area = 'bums, tums, thighs & underarms' WHERE
+  id = 1`) is written but NOT run**, held pending explicit go-ahead per this file's own
+  standing rule against single-field product updates without seeing the SQL first.
+- **Per-zone callout copy, deleted in the 16-17 Aug objects-array rewrite, still has no
+  replacement.** Restated here only because this session's `product_callout`-adjacent
+  work (the substance/application-area fixes) touches the same neighbourhood of
+  `_objects_clause`/`build_image_prompt` — no new work was done on the callout-copy gap
+  itself. See the 17 Aug "Known open" section above for the full detail; unchanged.
+- **The Bug 1 direction-inversion fix is committed and unit-verified against real
+  bboxes (`artifact 1438`'s own values), but NOT yet re-confirmed against a fresh live
+  generation.** `_relative_direction_phrase`'s swapped argument order
+  (`_dispensing_orientation_fact`) now computes "the product sits below and to the
+  left of the person" for that artifact's stored bboxes, matching the geometry by hand
+  — but nothing has re-run a real Generate call against a never-drafted ad to confirm
+  the corrected sentence actually reaches Gemini as intended and improves the rendered
+  nozzle direction, per the standing rule elsewhere in this file (verify image-path
+  fixes via Generate on a never-drafted ad, never Regenerate).
