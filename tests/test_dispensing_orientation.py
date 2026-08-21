@@ -70,7 +70,9 @@ def test_dispensing_orientation_fact_fires_with_product_and_person():
     ]
     fact = gip._dispensing_orientation_fact(objects)
     assert "OBSERVED PRODUCT-TO-APPLICATION-AREA RELATIONSHIP" in fact
-    assert "below and to the right of" in fact
+    # product centre (0.125, 0.2) is above-and-left of person centre (0.7, 0.7) -
+    # "the product sits {phrase} the person" must state the PRODUCT's own position.
+    assert "above and to the left of" in fact
     assert "dispensing opening" in fact
     assert "must all agree with EACH OTHER" in fact
 
@@ -107,8 +109,29 @@ def test_dispensing_orientation_fact_picks_largest_of_each_kind():
         _person_obj([0.1, 0.1, 0.3, 0.3], object_id="obj_big_person"),
     ]
     fact = gip._dispensing_orientation_fact(objects)
-    # big product (0.6,0.6) -> big person (0.1,0.1): above and to the left
-    assert "above and to the left of" in fact
+    # big product centre (0.75, 0.75) is below-and-right of big person centre
+    # (0.25, 0.25) - "the product sits {phrase} the person" states the PRODUCT's
+    # own position relative to the person, not the reverse.
+    assert "below and to the right of" in fact
+
+
+def test_dispensing_orientation_fact_matches_artifact_1438_bboxes():
+    """Regression lock for the live inversion bug (ad 1565026831791195, artifact
+    1438, 2026-08-21): _relative_direction_phrase(from_bbox, to_bbox) returns where
+    TO_BBOX sits relative to FROM_BBOX, but the sentence claims "the product sits
+    {direction} the person" - so the call must pass (person, product), not
+    (product, person). With the real bboxes from that artifact, the product's own
+    centre (0.375, 0.825) is below and to the left of the person's centre
+    (0.65, 0.5) - the fact must say exactly that, never the reverse."""
+    objects = [
+        {"object_id": "obj_02", "kind": "product", "disposition": "substitute",
+         "bbox": [0.1, 0.55, 0.55, 0.55]},
+        {"object_id": "obj_01", "kind": "person", "disposition": "substitute",
+         "bbox": [0.3, 0.0, 0.7, 1.0]},
+    ]
+    fact = gip._dispensing_orientation_fact(objects)
+    assert "the product sits below and to the left of the person" in fact
+    assert "above and to the right" not in fact
 
 
 # ---- End-to-end: the fact reaches the assembled prompt ----

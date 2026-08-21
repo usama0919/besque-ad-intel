@@ -3848,7 +3848,18 @@ def _dispensing_orientation_fact(objects):
 
     product = max(products, key=_area)
     person = max(people, key=_area)
-    direction = _relative_direction_phrase(product["bbox"], person["bbox"])
+    # Argument order fix (2026-08-21, live incident on ad 1565026831791195/artifact
+    # 1438): _relative_direction_phrase(from_bbox, to_bbox) returns where TO_BBOX
+    # sits relative to FROM_BBOX. The sentence below claims "the product sits
+    # {direction} the person" - i.e. it needs "where the PRODUCT sits relative to
+    # the PERSON," which means person must be from_bbox and product must be
+    # to_bbox. The original call had these swapped (product, person), so the
+    # phrase computed "where the person sits relative to the product" while the
+    # sentence asserted the reverse - confirmed live: for this ad's real bboxes
+    # (product [0.1,0.55,0.55,0.55], person [0.3,0.0,0.7,1.0]) the old call
+    # produced "above and to the right of" when the product's own centre is
+    # actually below and to the left of the person's - backwards on both axes.
+    direction = _relative_direction_phrase(person["bbox"], product["bbox"])
     return (
         f"OBSERVED PRODUCT-TO-APPLICATION-AREA RELATIONSHIP (a fact about THIS "
         f"reference, not a fixed rule): the product sits {direction} the person/"
