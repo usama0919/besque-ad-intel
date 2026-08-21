@@ -2751,7 +2751,14 @@ def _bottle_fixed_clause():
     )
 
 
-PRODUCT_CUTOUT_GCS_KEY = "product_assets/besque_magic_body_oil_cutout.png"
+PRODUCT_CUTOUT_GCS_KEY = "product_assets/besque_magic_body_oil_cutout_v3_shadow_stripped.png"
+# v3 (2026-08-21): the baked-in studio shadow/reflection stripped (a9eb728) on top of
+# v2's edge-decontamination (d394e9c) - both fixes were committed and sitting in the
+# repo for three sessions with the upload itself blocked by expired ADC, so every
+# Route B composite since 19 Aug pasted the ORIGINAL, uncorrected v1 asset. Repointed
+# here now that the real v3 file has been uploaded and verified byte-identical against
+# the bucket (see the upload step's own md5 check) - not just assumed present because
+# the constant says so.
 
 # SUCCESS is cached process-wide, permanently (the file is a static asset, never
 # changes at runtime) - once fetched, never re-fetched again in this process. Without
