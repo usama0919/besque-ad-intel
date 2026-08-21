@@ -861,18 +861,30 @@ def init_products():
         # counterpart from; empty by default, so a badge with no real counterpart falls
         # through to removal exactly as before, never a guessed cert.
         cur.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS certifications JSONB DEFAULT '[]'::jsonb")
+        # application_area (2026-08-21, application-area fix): a STRUCTURED statement of
+        # what body area(s)/use context this product is actually formulated for (e.g.
+        # "bums, tums, thighs & underarms") - never parsed out of visual_description's
+        # prose at runtime, same reasoning already established for substance_colour/
+        # certifications above. The real value already exists as label copy INSIDE
+        # visual_description today (a printed sub-line on the product's own bottle) but
+        # nothing downstream reads it for this purpose - this is the dedicated field a
+        # generation-time constraint can actually check. Empty by default: an unset value
+        # means no constraint is asserted, never a guessed area.
+        cur.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS application_area TEXT DEFAULT ''")
         conn.commit()
 
 
 _PRODUCT_COLS = ("id, name, description, ingredients, hero_claim, image_key, category, "
-                  "image_keys, visual_description, substance_colour, shopify_product_ids, certifications")
+                  "image_keys, visual_description, substance_colour, shopify_product_ids, certifications, "
+                  "application_area")
 
 
 def _product_row_to_dict(r):
     return {"id": r[0], "name": r[1], "description": r[2], "ingredients": r[3], "hero_claim": r[4],
             "image_key": r[5] or "", "category": r[6] or "", "image_keys": r[7] or [],
             "visual_description": r[8] or "", "substance_colour": r[9] or "",
-            "shopify_product_ids": r[10] or [], "certifications": r[11] or []}
+            "shopify_product_ids": r[10] or [], "certifications": r[11] or [],
+            "application_area": r[12] or ""}
 
 
 def get_products():
@@ -882,12 +894,13 @@ def get_products():
 
 
 def add_product(name, description="", ingredients="", hero_claim="", category="", visual_description="",
-                 substance_colour=""):
+                 substance_colour="", application_area=""):
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
             "INSERT INTO products (name, description, ingredients, hero_claim, category, visual_description, "
-            "substance_colour) VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
-            (name, description, ingredients, hero_claim, category, visual_description, substance_colour),
+            "substance_colour, application_area) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+            (name, description, ingredients, hero_claim, category, visual_description, substance_colour,
+             application_area),
         )
         new_id = cur.fetchone()[0]
         conn.commit()
@@ -895,12 +908,13 @@ def add_product(name, description="", ingredients="", hero_claim="", category=""
 
 
 def update_product(product_id, name, description, ingredients, hero_claim, category="", visual_description="",
-                    substance_colour=""):
+                    substance_colour="", application_area=""):
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
             "UPDATE products SET name=%s, description=%s, ingredients=%s, hero_claim=%s, category=%s, "
-            "visual_description=%s, substance_colour=%s WHERE id=%s",
-            (name, description, ingredients, hero_claim, category, visual_description, substance_colour, product_id),
+            "visual_description=%s, substance_colour=%s, application_area=%s WHERE id=%s",
+            (name, description, ingredients, hero_claim, category, visual_description, substance_colour,
+             application_area, product_id),
         )
         conn.commit()
 

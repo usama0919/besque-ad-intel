@@ -937,6 +937,7 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
             # generically" gap that clause was built to fix, not a second, redundant
             # confirmation worth keeping.
             hero_claim = (product.get("hero_claim") or "").strip()
+            application_area = (product.get("application_area") or "").strip()
             product_desc = (
                 f"The featured product is {product.get('name', 'a Besque product')}: {product.get('description', '')} "
                 f"These are the ONLY real ingredients allowed to appear if the product's OWN "
@@ -951,6 +952,29 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
                 # claim: . " asserted an empty statement rather than saying nothing.
                 + (f"Key claim: {hero_claim}. " if hero_claim else "")
                 + f"Never invent ingredients or label text not listed here. "
+                # application_area (2026-08-21, application-area fix): omitted entirely
+                # when unset (a pre-existing product row, or this field never populated) -
+                # same "state a fact when we have one, never guess" pattern as hero_claim
+                # immediately above. Data-driven from products.application_area, never a
+                # hardcoded body area - reads whatever this specific product's own row
+                # says, so a different product with a different application_area gets a
+                # different constraint automatically. Live incident this closes: a body
+                # oil formulated for bums/tums/thighs/underarms was placed in a
+                # face-skincare context by a reference that showed the product used that
+                # way - the reference supplies composition/styling only, never a licence
+                # to change what the product is actually applied to (same "reference
+                # supplies styling, never identity/category" principle rule 5 already
+                # applies to product category).
+                + (
+                    f"This product is formulated for use on: {application_area}. The "
+                    f"generated scene must show it used, displayed, or applied in a "
+                    f"context CONSISTENT with this application area - never depict or "
+                    f"imply application to a body area or use context that contradicts "
+                    f"it (e.g. a facial-skincare framing, a haircare framing, or "
+                    f"application to a body area not named here), regardless of what "
+                    f"context the reference ad itself showed. "
+                    if application_area else ""
+                )
             )
         else:
             product_desc = "(a natural botanical body oil in an elegant bottle). "
