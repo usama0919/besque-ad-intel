@@ -355,8 +355,119 @@ class TextContentLeakError(RuntimeError):
 
 _MIN_TEXT_CONTENT_LEAK_CHECK_LENGTH = 4
 
+_LEAK_NORMALIZE_PUNCT_RE = re.compile(r"[^\w\s]")
+_LEAK_NORMALIZE_WHITESPACE_RE = re.compile(r"\s+")
 
-def _assert_no_text_content_leak(prompt, objects, ad_id=None):
+
+def _normalize_leak_text(value):
+    """casefold + strip punctuation/collapse whitespace, so a text_content string is
+    compared against a legitimate prompt source on CONTENT alone - a trailing period,
+    a smart quote, or a case difference has no bearing on whether a match is real, and
+    left unnormalised would defeat an otherwise-correct match."""
+    text = _LEAK_NORMALIZE_PUNCT_RE.sub("", value or "")
+    text = _LEAK_NORMALIZE_WHITESPACE_RE.sub(" ", text).strip()
+    return text.casefold()
+
+
+def _legitimate_prompt_source_strings(product=None, headline=None, subtext=None,
+                                       offer_text=None, cta_text=None, testimonial=None,
+                                       panel_copy=None, object_copy=None,
+                                       operator_instruction=None, creative_description=None,
+                                       brand_palette=None):
+    """Maps every NORMALISED (see _normalize_leak_text) string the assembled prompt
+    legitimately contains from a non-object source to the name of that source, for
+    _assert_no_text_content_leak to consult before raising (2026-08-21, false-positive
+    fix). Built entirely from THIS call's own runtime arguments - the product row
+    (name/description/ingredients/hero_claim/visual_description/substance_colour/
+    certifications) and this run's own copy/operator inputs (headline, subtext,
+    offer_text, cta_text, the selected testimonial's quote/attribution, panel_copy,
+    object_copy, operator_instruction, creative_description, brand_palette) - never a
+    hardcoded literal. A text_content string that happens to COINCIDE with one of
+    these isn't a leak: that string was always going to be in the prompt anyway, from
+    a source with every right to put it there (e.g. a competitor label object whose
+    detected text happens to match "Besque Magic Body Oil" once the product's own name
+    is substituted in nearby).
+
+    Deliberately narrow to sources that are themselves free text a text_content string
+    could plausibly collide with. Never the blueprint's own objects (any object's
+    description/appearance would defeat the assertion entirely - see the eight
+    text-leak sites this codebase already fixed by scrubbing those fields, not by
+    widening this set to cover them) and never a fixed brand constant (there are none
+    to add here - every value above is read from the DB/config at runtime)."""
+    sources = {}
+
+    def _add(value, source_name):
+        if isinstance(value, str) and value.strip():
+            normalized = _normalize_leak_text(value)
+            if normalized:
+                sources[normalized] = source_name
+
+    product = product or {}
+    _add(product.get("name"), "product.name")
+    _add(product.get("description"), "product.description")
+    _add(product.get("ingredients"), "product.ingredients")
+    _add(product.get("hero_claim"), "product.hero_claim")
+    _add(product.get("visual_description"), "product.visual_description")
+    _add(product.get("substance_colour"), "product.substance_colour")
+    for cert in product.get("certifications") or []:
+        _add(cert, "product.certifications")
+
+    _add(headline, "headline")
+    _add(subtext, "subtext")
+    _add(offer_text, "offer_text")
+    _add(cta_text, "cta_text")
+    _add(operator_instruction, "operator_instruction")
+    _add(creative_description, "creative_description")
+    _add(brand_palette, "brand_palette")
+
+    if isinstance(testimonial, dict):
+        _add(testimonial.get("quote"), "testimonial.quote")
+        _add(testimonial.get("attribution"), "testimonial.attribution")
+
+    for entry in panel_copy or []:
+        if isinstance(entry, dict):
+            _add(entry.get("text"), "panel_copy")
+
+    for entry in object_copy or []:
+        if isinstance(entry, dict):
+            _add(entry.get("text"), "object_copy")
+
+    return sources
+
+
+def _find_legitimate_source_match(normalized_content, legitimate_sources):
+    """Returns the source name of the first entry in legitimate_sources (a
+    {normalized_source_value: source_name} map from _legitimate_prompt_source_strings)
+    whose normalised value CONTAINS normalized_content as a whole-word-bounded
+    substring, or None.
+
+    2026-08-21 fix: the first version of this check compared the sub-object's content
+    against a legitimate source value for EQUALITY - but the two ads this was written
+    for detected single on-image TOKENS ("BESQUE", "MAGIC"), not the whole field, so
+    normalizing "BESQUE" ("besque") was never going to equal-match the normalised
+    product name field ("besque magic body oil") it's actually a fragment of. Fixed
+    to a substring search over every source value instead of a dict lookup by exact
+    key. Word-boundary-anchored (regex \\b via a \\w lookaround, not a bare `in`
+    check) so a short content string can only match a real word (or sequence of
+    words) inside the source, never a slice through the middle of one - "agic" must
+    never match inside "magic". Both sides are already normalised (casefold,
+    punctuation stripped, whitespace collapsed - see _normalize_leak_text), so a word
+    boundary here is just "space or string edge," never a punctuation-derived one.
+    _MIN_TEXT_CONTENT_LEAK_CHECK_LENGTH (checked by the caller before this is ever
+    reached) is what stops a 1-3 char content string from being excused this way -
+    this function itself has no length floor of its own, by design, so a genuinely
+    short LEGITIMATE source token isn't excluded, only genuinely short CONTENT is
+    blocked upstream."""
+    if not normalized_content:
+        return None
+    pattern = re.compile(r"(?<!\w)" + re.escape(normalized_content) + r"(?!\w)")
+    for normalized_source, source_name in legitimate_sources.items():
+        if pattern.search(normalized_source):
+            return source_name
+    return None
+
+
+def _assert_no_text_content_leak(prompt, objects, ad_id=None, legitimate_sources=None):
     """Runtime regression lock (2026-08-20, Part 3 of the text sub-objects fix):
     scans every object's text_content[].content string (see schema/blueprint.
     schema.json) and raises TextContentLeakError if any one of them appears
@@ -371,7 +482,26 @@ def _assert_no_text_content_leak(prompt, objects, ad_id=None):
     _assert_product_count_consistent applies via its own narrow regex rather than an
     unqualified substring scan. A blueprint with no text_content anywhere (the
     common case today - see the schema field's own note that this is additive) is
-    unaffected - nothing to check."""
+    unaffected - nothing to check.
+
+    legitimate_sources (2026-08-21): a {normalized_source_value: source_name} map from
+    _legitimate_prompt_source_strings. A verbatim match is checked against this map
+    BEFORE raising, via _find_legitimate_source_match - a hit means the sub-object's
+    own content is a whole-word-bounded substring of something the prompt
+    legitimately contains from a non-object source (the product row, this run's own
+    copy), not because anything forwarded the object's own detected text into the
+    prompt. This is deliberately a substring search, not an equality check: the two
+    ads this was built for detected single on-image TOKENS ("BESQUE", "MAGIC") that
+    are fragments of a longer legitimate field ("Besque Magic Body Oil"), never the
+    whole field verbatim - see _find_legitimate_source_match's own docstring for why
+    equality wasn't enough. That case is not a leak and is never raised on; instead
+    it's recorded via dedupe.record_warning (kind
+    text_content_leak_matched_legitimate_source) naming the ad, the object/sub-object
+    id, and which source field matched, so a genuine leak that happens to collide with
+    a legitimate source is still visible somewhere rather than silently swallowed.
+    None/empty (the default) reproduces the assertion's prior behaviour exactly -
+    every verbatim match raises, same as before this fix."""
+    legitimate_sources = legitimate_sources or {}
     for obj in objects or []:
         if not isinstance(obj, dict):
             continue
@@ -381,13 +511,29 @@ def _assert_no_text_content_leak(prompt, objects, ad_id=None):
             content = (sub.get("content") or "").strip()
             if len(content) < _MIN_TEXT_CONTENT_LEAK_CHECK_LENGTH:
                 continue
-            if content in prompt:
-                raise TextContentLeakError(
+            if content not in prompt:
+                continue
+            matched_source = _find_legitimate_source_match(
+                _normalize_leak_text(content), legitimate_sources
+            )
+            if matched_source is not None:
+                from src import dedupe as _dedupe
+                _dedupe.init_pipeline_warnings()
+                _dedupe.record_warning(
+                    "text_content_leak_matched_legitimate_source",
                     f"Ad {ad_id}: text sub-object {sub.get('object_id', '?')!r} (on "
-                    f"object {obj.get('object_id', '?')!r})'s own content {content!r} "
-                    f"appears verbatim in the assembled prompt - content is "
-                    f"analysis-only and must never reach a built prompt."
+                    f"object {obj.get('object_id', '?')!r})'s content {content!r} "
+                    f"appears verbatim in the assembled prompt, but it matches "
+                    f"{matched_source!r} - a legitimate non-object prompt source - so "
+                    f"this is not treated as a leak.",
                 )
+                continue
+            raise TextContentLeakError(
+                f"Ad {ad_id}: text sub-object {sub.get('object_id', '?')!r} (on "
+                f"object {obj.get('object_id', '?')!r})'s own content {content!r} "
+                f"appears verbatim in the assembled prompt - content is "
+                f"analysis-only and must never reach a built prompt."
+            )
 
 
 class ProhibitedClaimLeakError(RuntimeError):
@@ -1105,7 +1251,15 @@ def build_image_prompt(blueprint: dict, product: dict = None, include_product: b
             closing
         )
     _assert_product_count_consistent(prompt, rule_authorised_product_count, ad_id=blueprint.get("ad_id"))
-    _assert_no_text_content_leak(prompt, blueprint.get("objects"), ad_id=blueprint.get("ad_id"))
+    _assert_no_text_content_leak(
+        prompt, blueprint.get("objects"), ad_id=blueprint.get("ad_id"),
+        legitimate_sources=_legitimate_prompt_source_strings(
+            product=product, headline=headline, subtext=subtext, offer_text=offer_text,
+            cta_text=cta_text, testimonial=testimonial, panel_copy=panel_copy,
+            object_copy=object_copy, operator_instruction=operator_instruction,
+            creative_description=creative_description, brand_palette=brand_palette,
+        ),
+    )
     _assert_no_prohibited_claim_leak(prompt, ad_id=blueprint.get("ad_id"))
     return prompt
 
